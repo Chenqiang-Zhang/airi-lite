@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.DS_Store
+*.local
+.env
+.env.*
+!.env.example
+
+# Live2D sample data is downloaded separately under its own license.
+public/models/*
+!public/models/.gitkeep
