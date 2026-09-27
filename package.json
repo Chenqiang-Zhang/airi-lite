@@ -4,12 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host",
+    "dev": "node --env-file-if-exists=.env.local server/index.mjs",
     "build": "vue-tsc --noEmit && vite build",
-    "preview": "vite preview --host",
+    "start": "NODE_ENV=production node --env-file-if-exists=.env.local server/index.mjs",
+    "test": "node --test server/*.test.mjs",
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
+    "pixi-live2d-display": "0.4.0",
+    "pixi.js": "^6.5.10",
     "vue": "^3.5.41"
   },
   "devDependencies": {

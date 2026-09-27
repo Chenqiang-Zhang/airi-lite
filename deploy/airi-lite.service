@@ -1,0 +1,22 @@
+[Unit]
+Description=AIRI Lite demo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/airi-lite
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/airi-lite/.env
+ExecStart=/usr/bin/node /opt/airi-lite/server/index.mjs
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
