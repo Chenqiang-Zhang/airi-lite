@@ -1,4 +1,5 @@
 import type { PersonaConfig } from './persona'
+import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code'
 
 export interface ChatMessage {
   role: 'assistant' | 'user'
@@ -40,6 +41,9 @@ export async function streamChat(options: {
   accessCode?: string
   onDelta: (content: string) => void
 }) {
+  if (options.accessCode && !isValidAccessCode(options.accessCode))
+    throw new ChatApiError(INVALID_ACCESS_CODE_MESSAGE)
+
   const response = await fetch(`${import.meta.env.BASE_URL}api/chat`, {
     method: 'POST',
     headers: {

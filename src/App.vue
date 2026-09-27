@@ -3,6 +3,7 @@ import type { PersonaConfig } from './persona'
 
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
+import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code'
 import { ChatApiError, fetchProviderStatus, streamChat } from './api'
 import { mountHiyori } from './live2d'
 import { DEFAULT_PERSONA, loadPersona, savePersona } from './persona'
@@ -34,8 +35,13 @@ const lastError = ref('')
 const modelStage = ref<HTMLElement | null>(null)
 const modelStatus = ref('正在载入 Live2D 角色…')
 const accessProtected = ref(false)
-const accessCode = ref(sessionStorage.getItem('airi-demo-access-code') ?? '')
-const accessDraft = ref(accessCode.value)
+const savedAccessCode = sessionStorage.getItem('airi-demo-access-code') ?? ''
+const accessCode = ref(isValidAccessCode(savedAccessCode) ? savedAccessCode : '')
+const accessDraft = ref(savedAccessCode)
+if (savedAccessCode && !accessCode.value) {
+  sessionStorage.removeItem('airi-demo-access-code')
+  lastError.value = INVALID_ACCESS_CODE_MESSAGE
+}
 const activeController = ref<AbortController | null>(null)
 let live2d: Awaited<ReturnType<typeof mountHiyori>> | null = null
 let speech: ReturnType<typeof createSpeechController> | null = null
@@ -117,6 +123,13 @@ async function sendMessage() {
     return
   if (accessProtected.value && !accessCode.value) {
     lastError.value = '请先输入体验码。'
+    return
+  }
+  if (accessCode.value && !isValidAccessCode(accessCode.value)) {
+    accessDraft.value = accessCode.value
+    accessCode.value = ''
+    sessionStorage.removeItem('airi-demo-access-code')
+    lastError.value = INVALID_ACCESS_CODE_MESSAGE
     return
   }
 
@@ -216,8 +229,13 @@ function resetConversation() {
 }
 
 function saveAccessCode() {
-  accessCode.value = accessDraft.value.trim()
-  sessionStorage.setItem('airi-demo-access-code', accessCode.value)
+  const code = accessDraft.value.trim()
+  if (!isValidAccessCode(code)) {
+    lastError.value = INVALID_ACCESS_CODE_MESSAGE
+    return
+  }
+  accessCode.value = code
+  sessionStorage.setItem('airi-demo-access-code', code)
   lastError.value = ''
 }
 </script>
