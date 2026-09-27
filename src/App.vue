@@ -54,8 +54,8 @@ const providerLabel = computed(() => ({
 })[providerMode.value])
 
 const voiceLabel = computed(() => ({
-  idle: '免费本地声线 · 首次需下载约 120–160 MB',
-  loading: '正在载入免费本地声线，首次可能需要一些时间…',
+  idle: '免费本地声线 · 首次需下载约 330 MB',
+  loading: '正在载入免费本地声线，首次需下载约 330 MB…',
   ready: 'Kokoro 固定中文声线 · 音频驱动口型',
   fallback: '当前设备使用浏览器朗读 · 音频驱动口型暂不可用',
 })[voiceState.value])

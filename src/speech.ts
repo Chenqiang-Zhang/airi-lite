@@ -121,15 +121,17 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     modelPromise = (async () => {
       const { KokoroTTS } = await import('@uzen/kokoro-js')
       const voicePath = `${import.meta.env.BASE_URL}kokoro/voices`
+      // Browser q4f16 returned silence and q8 returned invalid samples in testing.
+      // The upstream browser demo recommends fp32 for both execution providers.
       if ('gpu' in navigator) {
         try {
-          return await KokoroTTS.from_pretrained(MODEL_ID, { device: 'webgpu', dtype: 'q4f16', voicePath })
+          return await KokoroTTS.from_pretrained(MODEL_ID, { device: 'webgpu', dtype: 'fp32', voicePath })
         }
         catch (error) {
           console.warn('Kokoro WebGPU load failed; retrying with WASM', error)
         }
       }
-      return KokoroTTS.from_pretrained(MODEL_ID, { device: 'wasm', dtype: 'q8', voicePath })
+      return KokoroTTS.from_pretrained(MODEL_ID, { device: 'wasm', dtype: 'fp32', voicePath })
     })()
     try {
       const model = await modelPromise
@@ -212,6 +214,16 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         samples.set(chunk, offset)
         offset += chunk.length
       }
+      let energy = 0
+      let peak = 0
+      for (const sample of samples) {
+        if (!Number.isFinite(sample))
+          throw new Error('Kokoro returned invalid audio samples')
+        energy += sample * sample
+        peak = Math.max(peak, Math.abs(sample))
+      }
+      if (peak < 0.001 || Math.sqrt(energy / samples.length) < 0.0001)
+        throw new Error('Kokoro returned silent audio')
       envelope = mouthEnvelope(samples, sampleRate)
       objectUrl = URL.createObjectURL(new Blob([encodeWav(samples, sampleRate)], { type: 'audio/wav' }))
       audio.src = objectUrl
