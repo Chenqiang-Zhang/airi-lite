@@ -9,3 +9,7 @@ dist/
 # Live2D sample data is downloaded separately under its own license.
 public/models/*
 !public/models/.gitkeep
+
+# Kokoro voice embeddings are installed separately from the source code.
+public/kokoro/voices/*
+!public/kokoro/voices/.gitkeep

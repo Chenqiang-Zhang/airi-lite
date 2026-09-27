@@ -386,6 +386,17 @@ h1 {
   color: #ac574f;
 }
 
+.voice-notice {
+  margin: 5px 0 0;
+  color: #8d817a;
+  text-align: center;
+  font-size: 10px;
+}
+
+.voice-notice a {
+  color: inherit;
+}
+
 .access-form {
   margin-bottom: 13px;
   padding: 16px;

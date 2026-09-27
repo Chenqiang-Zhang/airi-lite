@@ -39,6 +39,7 @@ export async function mountHiyori(container: HTMLElement) {
 
     let speaking = false
     let tick = 0
+    let mouthLevel: number | null = null
     const animateMouth = () => {
       if (!speaking)
         return
@@ -46,16 +47,23 @@ export async function mountHiyori(container: HTMLElement) {
       const core = model.internalModel.coreModel as unknown as {
         setParameterValueById?: (id: string, value: number) => void
       }
-      core.setParameterValueById?.('ParamMouthOpenY', 0.3 + Math.abs(Math.sin(tick)) * 0.55)
+      core.setParameterValueById?.('ParamMouthOpenY', mouthLevel ?? (0.3 + Math.abs(Math.sin(tick)) * 0.55))
     }
     app.ticker.add(animateMouth)
 
     return {
       setSpeaking(value: boolean) {
         speaking = value
-        if (!value)
-          (model.internalModel.coreModel as unknown as { setParameterValueById?: (id: string, value: number) => void })
-            .setParameterValueById?.('ParamMouthOpenY', 0)
+        if (!value) {
+          mouthLevel = null
+          const core = model.internalModel.coreModel as unknown as {
+            setParameterValueById?: (id: string, value: number) => void
+          }
+          core.setParameterValueById?.('ParamMouthOpenY', 0)
+        }
+      },
+      setMouthOpen(value: number | null) {
+        mouthLevel = value === null ? null : Math.min(1, Math.max(0, value))
       },
       destroy() {
         observer.disconnect()

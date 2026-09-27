@@ -6,6 +6,8 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ChatApiError, fetchProviderStatus, streamChat } from './api'
 import { mountHiyori } from './live2d'
 import { DEFAULT_PERSONA, loadPersona, savePersona } from './persona'
+import { createSpeechController } from './speech'
+import type { VoiceState } from './speech'
 
 interface Message {
   id: number
@@ -20,6 +22,7 @@ const draftPersona = ref<PersonaConfig>({ ...persona.value })
 const characterName = computed(() => persona.value.name || 'Hiyori')
 const input = ref('')
 const isSpeaking = ref(false)
+const voiceState = ref<VoiceState>('idle')
 const isGenerating = ref(false)
 const personaOpen = ref(false)
 const providerMode = ref<ProviderMode>('checking')
@@ -32,6 +35,7 @@ const accessCode = ref(sessionStorage.getItem('airi-demo-access-code') ?? '')
 const accessDraft = ref(accessCode.value)
 const activeController = ref<AbortController | null>(null)
 let live2d: Awaited<ReturnType<typeof mountHiyori>> | null = null
+let speech: ReturnType<typeof createSpeechController> | null = null
 const messages = ref<Message[]>([
   {
     id: 1,
@@ -46,6 +50,13 @@ const providerLabel = computed(() => ({
   fallback: '本地降级模式',
 })[providerMode.value])
 
+const voiceLabel = computed(() => ({
+  idle: '免费本地声线 · 首次需下载约 120–160 MB',
+  loading: '正在载入免费本地声线，首次可能需要一些时间…',
+  ready: 'Kokoro 固定中文声线 · 音频驱动口型',
+  fallback: '当前设备使用浏览器朗读 · 音频驱动口型暂不可用',
+})[voiceState.value])
+
 const fallbackReplies = [
   'DeepSeek 还没有连接好，所以这次是我的本地演示回复。配置 API Key 后，我就能根据完整人格与你交流了。',
   '我现在处于本地降级模式。你仍然可以测试文字与朗读流程，但真正的内容生成需要 DeepSeek。',
@@ -53,6 +64,11 @@ const fallbackReplies = [
 ]
 
 onMounted(async () => {
+  speech = createSpeechController({
+    onState: state => (voiceState.value = state),
+    onPlaying: playing => (isSpeaking.value = playing),
+    onMouth: opening => live2d?.setMouthOpen(opening),
+  })
   refreshProviderStatus()
   if (!modelStage.value)
     return
@@ -67,6 +83,7 @@ onMounted(async () => {
 })
 onUnmounted(() => {
   activeController.value?.abort()
+  speech?.dispose()
   live2d?.destroy()
 })
 watch(isSpeaking, value => live2d?.setSpeaking(value))
@@ -84,17 +101,7 @@ async function refreshProviderStatus() {
 }
 
 function speak(text: string) {
-  if (!('speechSynthesis' in window) || !text.trim())
-    return
-
-  window.speechSynthesis.cancel()
-  const utterance = new SpeechSynthesisUtterance(text)
-  utterance.lang = 'zh-CN'
-  utterance.rate = 1
-  utterance.onstart = () => (isSpeaking.value = true)
-  utterance.onend = () => (isSpeaking.value = false)
-  utterance.onerror = () => (isSpeaking.value = false)
-  window.speechSynthesis.speak(utterance)
+  void speech?.speak(text)
 }
 
 async function sendMessage() {
@@ -105,6 +112,9 @@ async function sendMessage() {
     lastError.value = '请先输入体验码。'
     return
   }
+
+  speech?.unlock()
+  void speech?.prepare().catch(() => {})
 
   lastError.value = ''
   const userMessage: Message = { id: Date.now(), role: 'user', text }
@@ -187,7 +197,7 @@ function resetPersona() {
 
 function resetConversation() {
   activeController.value?.abort()
-  window.speechSynthesis?.cancel()
+  speech?.cancel()
   isGenerating.value = false
   isSpeaking.value = false
   lastError.value = ''
@@ -272,6 +282,7 @@ function saveAccessCode() {
       <p class="notice" :class="{ error: lastError }">
         {{ lastError || (providerMode === 'deepseek' ? '回复由 DeepSeek 生成，完成后会自动朗读；可点击角色互动。' : '尚未配置 DeepSeek Key，当前会使用明确标注的本地回复。') }}
       </p>
+      <p class="voice-notice" role="status">{{ voiceLabel }} · <a href="https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh" target="_blank" rel="noopener noreferrer">开源模型</a></p>
     </section>
 
     <div v-if="personaOpen" class="persona-backdrop" @click.self="personaOpen = false">

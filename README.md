@@ -9,7 +9,7 @@ The first milestone is intentionally narrow:
 - reply with a configurable personality;
 - read replies aloud without microphone access.
 
-The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, lets each browser edit a basic persona, and reads finished replies aloud with browser text-to-speech. There is no microphone or speech recognition. The Hiyori artwork and this demo's configurable persona are separate from Project AIRI.
+The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, lets each browser edit a basic persona, and reads finished replies aloud with a fixed local Kokoro Chinese voice. Audio amplitude drives the Live2D mouth. If local inference is unavailable, it falls back to browser text-to-speech. There is no microphone or speech recognition. The Hiyori artwork and this demo's configurable persona are separate from Project AIRI.
 
 ## Development
 
@@ -20,7 +20,7 @@ pnpm install
 pnpm dev
 ```
 
-Open <http://localhost:5173/airi/>. The app must run through this local server; opening `index.html` directly will not provide the chat API. Hiyori's model files must be installed separately (see below).
+Open <http://localhost:5173/airi/>. The app must run through this local server; opening `index.html` directly will not provide the chat API. Hiyori's model files and the Kokoro voice file must be installed separately (see below).
 
 ## DeepSeek setup
 
@@ -72,6 +72,17 @@ The model files are not redistributed by this repository. Review the [official L
 
 The app loads Cubism Core from Live2D's official URL at runtime. Internet access to that script is required. The application code and model artwork have separate licenses; the published page includes the sample's copyright/creator notice.
 
+## Local voice and lip sync
+
+The demo uses the Apache-2.0 [Kokoro Chinese model](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh) through the [ONNX release](https://huggingface.co/onnx-community/Kokoro-82M-v1.1-zh-ONNX) and `@uzen/kokoro-js`. It uses the fixed `zf_001` voice. Download its voice data into the ignored path before building:
+
+```bash
+mkdir -p public/kokoro/voices
+curl -fL https://huggingface.co/onnx-community/Kokoro-82M-v1.1-zh-ONNX/resolve/main/voices/zf_001.bin -o public/kokoro/voices/zf_001.bin
+```
+
+The ONNX model is **not** bundled in the repository or hosted on this VPS. On first use, each visitor's browser downloads roughly 120–160 MB directly from Hugging Face and caches it locally. The app tries WebGPU first and then WASM; this does not add a paid TTS API or VPS inference load, but it requires model-download access and a reasonably capable device. If loading or synthesis fails, the app switches to the browser's built-in voice. The browser build currently fails on some English spans: common demo names are mapped to Chinese pronunciation, and other mixed-language replies use the browser fallback. Only Kokoro playback uses measured audio levels for the mouth; browser fallback retains the simpler speaking animation. DeepSeek chat still uses its paid API.
+
 ## Deployment
 
 The current VPS uses the sample systemd unit in `deploy/airi-lite.service`: Node listens only on `127.0.0.1:3001`; Nginx forwards `/airi/` and disables proxy buffering for streamed replies. Keep the production `.env` outside Git and readable only by the service account. Check `GET /airi/api/health` for non-secret status, then test a chat with the access code. This route shares a domain with another app, but it runs as an independent service.
@@ -79,7 +90,7 @@ The current VPS uses the sample systemd unit in `deploy/airi-lite.service`: Node
 ## Roadmap
 
 1. Add sentence-level speech queuing during streamed replies.
-2. Add stronger speech-to-motion synchronization and optional expressions.
+2. Add phoneme-level mouth shapes and optional expressions; the current lip sync follows volume, not exact phonemes.
 3. Add per-user accounts/quotas before opening unrestricted public chat.
 
 ## License
