@@ -23,6 +23,9 @@ const characterName = computed(() => persona.value.name || 'Hiyori')
 const input = ref('')
 const isSpeaking = ref(false)
 const voiceState = ref<VoiceState>('idle')
+const voiceProblem = ref('')
+const audioAvailable = ref(false)
+const speechPlayer = ref<HTMLAudioElement | null>(null)
 const isGenerating = ref(false)
 const personaOpen = ref(false)
 const providerMode = ref<ProviderMode>('checking')
@@ -64,10 +67,14 @@ const fallbackReplies = [
 ]
 
 onMounted(async () => {
-  speech = createSpeechController({
+  if (!speechPlayer.value)
+    return
+  speech = createSpeechController(speechPlayer.value, {
     onState: state => (voiceState.value = state),
     onPlaying: playing => (isSpeaking.value = playing),
     onMouth: opening => live2d?.setMouthOpen(opening),
+    onAudioReady: ready => (audioAvailable.value = ready),
+    onProblem: message => (voiceProblem.value = message),
   })
   refreshProviderStatus()
   if (!modelStage.value)
@@ -113,7 +120,6 @@ async function sendMessage() {
     return
   }
 
-  speech?.unlock()
   void speech?.prepare().catch(() => {})
 
   lastError.value = ''
@@ -198,6 +204,7 @@ function resetPersona() {
 function resetConversation() {
   activeController.value?.abort()
   speech?.cancel()
+  voiceProblem.value = ''
   isGenerating.value = false
   isSpeaking.value = false
   lastError.value = ''
@@ -282,7 +289,8 @@ function saveAccessCode() {
       <p class="notice" :class="{ error: lastError }">
         {{ lastError || (providerMode === 'deepseek' ? '回复由 DeepSeek 生成，完成后会自动朗读；可点击角色互动。' : '尚未配置 DeepSeek Key，当前会使用明确标注的本地回复。') }}
       </p>
-      <p class="voice-notice" role="status">{{ voiceLabel }} · <a href="https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh" target="_blank" rel="noopener noreferrer">开源模型</a></p>
+      <p class="voice-notice" role="status">{{ voiceProblem || voiceLabel }} · <a href="https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh" target="_blank" rel="noopener noreferrer">开源模型</a></p>
+      <audio ref="speechPlayer" class="speech-player" :class="{ visible: audioAvailable }" controls preload="none" aria-label="日和语音播放器" />
     </section>
 
     <div v-if="personaOpen" class="persona-backdrop" @click.self="personaOpen = false">

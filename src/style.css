@@ -397,6 +397,18 @@ h1 {
   color: inherit;
 }
 
+.speech-player {
+  display: none;
+  width: 100%;
+  max-width: 420px;
+  height: 38px;
+  margin: 10px auto 0;
+}
+
+.speech-player.visible {
+  display: block;
+}
+
 .access-form {
   margin-bottom: 13px;
   padding: 16px;
