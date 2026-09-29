@@ -345,6 +345,10 @@ function saveAccessCode() {
             <textarea v-model="draftPersona.behaviorGuidelines" rows="4" maxlength="2000" />
           </label>
           <label>
+            <span>示例对话</span>
+            <textarea v-model="draftPersona.dialogueExamples" rows="8" maxlength="2000" />
+          </label>
+          <label>
             <span>开场白</span>
             <textarea v-model="draftPersona.greeting" rows="3" maxlength="1000" />
           </label>

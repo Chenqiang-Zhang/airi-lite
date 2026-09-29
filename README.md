@@ -86,6 +86,7 @@ Choose **人格** in the chat header to edit:
 - background scenario;
 - speaking style;
 - behavioral boundaries;
+- example dialogues that calibrate tone without becoming fixed lines;
 - first greeting.
 
 Persona settings are stored in the browser's local storage. They are sent to the local server with recent conversation history and compiled into the system message there. The design is a reduced version of AIRI's Character Card separation of personality, scenario, system instructions, greetings, and examples.
@@ -97,7 +98,7 @@ pnpm build
 AIRI_DEMO_ACCESS_CODE=replace-with-a-long-random-code pnpm start
 ```
 
-Run the server-side persona tests with `pnpm test`.
+Run the Persona and server tests with `pnpm test`.
 
 ## Hiyori Momose model
 
