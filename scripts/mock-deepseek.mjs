@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 
 const chunks = [
-  '嗨！',
+  '[[tone:bright]]嗨！',
   '刚才你说无聊，',
   '我先丢个小游戏。',
   'Deep',

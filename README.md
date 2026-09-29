@@ -24,10 +24,10 @@ The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, l
 | Area | Current behavior |
 | --- | --- |
 | Character | Hiyori Momose Live2D model with click interaction, basic mouth movement, and subtle delivery cues |
-| Personality | Editable persona stored in the visitor's browser; recent chat survives refresh in the current tab |
+| Personality | Editable persona and opt-in user memory stored in the visitor's browser; recent chat survives refresh in the current tab |
 | Brain | Server-side DeepSeek streaming, with an explicitly labelled local fallback when unconfigured |
 | Voice | Fixed `zf_001` Kokoro Chinese voice with slight speed variation; browser speech fallback |
-| Not yet built | Microphone input, emotional prosody, phoneme-level lip sync, cross-session memory, and user accounts |
+| Not yet built | Microphone input, learned emotional prosody, phoneme-level lip sync, automatic memory extraction, cross-device sync, and user accounts |
 
 ## How it fits together
 
@@ -35,14 +35,14 @@ The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, l
 flowchart LR
   U[Browser: text + persona] --> API[Node /api/chat]
   API --> DS[DeepSeek]
-  DS -->|streamed text| API
-  API -->|streamed reply| U
+  DS -->|text + hidden delivery cue| API
+  API -->|visible reply + delivery event| U
   U -->|completed sentences| TTS[Kokoro in the browser]
   TTS -->|audio| Player[Audio player]
   Player -->|audio level| L2D[Live2D mouth]
 ```
 
-The DeepSeek key stays on the server. Kokoro inference runs on the visitor's device; the VPS does not generate the audio. Speech can start when the first complete sentence arrives, but this is **not** a low-latency full-duplex voice chat.
+The DeepSeek key stays on the server. Kokoro inference runs on the visitor's device; the VPS does not generate the audio. Speech can start when the first complete sentence arrives, but this is **not** a low-latency full-duplex voice chat. DeepSeek can choose a hidden `neutral`/`soft`/`bright`/`curious` delivery cue for each reply. The server removes it from visible text, then the browser uses it for restrained speed and Live2D face changes; untagged replies retain the local heuristic. This is still one fixed TTS voice, not trained expressive speech.
 
 ## Run locally
 
@@ -104,7 +104,7 @@ AIRI_DEMO_ACCESS_CODE=replace-with-a-long-random-code pnpm start
 
 Run the Persona and server tests with `pnpm test`.
 
-For a real-provider Persona spot check, `scripts/smoke-persona.mjs` accepts a JSON chat request on stdin and uses `AIRI_DEMO_ACCESS_CODE` from the server environment. It prints only the reply, not the code. This calls the paid DeepSeek API; a few good samples are not a human-likeness evaluation.
+For a real-provider Persona spot check, `scripts/smoke-persona.mjs` accepts a JSON chat request on stdin and uses `AIRI_DEMO_ACCESS_CODE` from the server environment. It prints only the reply, not the code. Set `AIRI_SMOKE_SHOW_DELIVERY=1` to report the hidden delivery cue on stderr. This calls the paid DeepSeek API; a few good samples are not a human-likeness evaluation.
 
 For local sentence-stream testing without provider charges, run `node scripts/mock-deepseek.mjs` in one terminal and `DEEPSEEK_API_KEY=mock DEEPSEEK_BASE_URL=http://127.0.0.1:4174 pnpm dev` in another. The page will show a configured provider because the mock uses the same API shape; its canned text is **not** a real DeepSeek reply. Stop both processes after testing.
 

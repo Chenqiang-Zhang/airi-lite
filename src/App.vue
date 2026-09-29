@@ -182,6 +182,12 @@ async function sendMessage() {
       userMemory: userMemory.value,
       accessCode: accessCode.value,
       signal: controller.signal,
+      onDelivery: (delivery) => {
+        assistantMessage.delivery = delivery
+        activeDelivery.value = delivery
+        if (isSpeaking.value)
+          live2d?.setDelivery(delivery)
+      },
       onDelta: (chunk) => {
         assistantMessage.text += chunk
         assistantMessage.source = 'deepseek'
@@ -191,7 +197,7 @@ async function sendMessage() {
             activeDelivery.value = delivery
             if (isSpeaking.value)
               live2d?.setDelivery(delivery)
-          })
+          }, assistantMessage.delivery)
         }
         speechStream.current?.push(chunk)
       },

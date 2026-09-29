@@ -56,8 +56,15 @@ export async function mountHiyori(container: HTMLElement) {
         core.setParameterValueById?.('ParamEyeLSmile', 0.25, 0.3)
         core.setParameterValueById?.('ParamEyeRSmile', 0.25, 0.3)
       }
+      else if (delivery === 'soft') {
+        core.setParameterValueById?.('ParamMouthForm', -0.15, 0.3)
+        core.setParameterValueById?.('ParamBrowLForm', -0.2, 0.25)
+        core.setParameterValueById?.('ParamBrowRForm', -0.2, 0.25)
+      }
       else if (delivery === 'curious') {
         core.setParameterValueById?.('ParamMouthForm', 0.25, 0.3)
+        core.setParameterValueById?.('ParamBrowLForm', 0.2, 0.25)
+        core.setParameterValueById?.('ParamBrowRForm', 0.2, 0.25)
       }
     }
     app.ticker.add(animateMouth)

@@ -6,6 +6,7 @@ import { extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { buildSystemPrompt, normaliseChatRequest } from './persona.mjs'
+import { createDeliveryCueParser } from './delivery-cue.mjs'
 
 const rootDirectory = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const production = process.env.NODE_ENV === 'production'
@@ -210,6 +211,7 @@ async function relayDeepSeekStream(body, response) {
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  const deliveryCue = createDeliveryCueParser()
 
   const consumeLine = (line) => {
     if (!line.startsWith('data:'))
@@ -221,8 +223,10 @@ async function relayDeepSeekStream(body, response) {
 
     const chunk = JSON.parse(data)
     const content = chunk.choices?.[0]?.delta?.content
-    if (typeof content === 'string' && content)
-      writeEvent(response, { type: 'delta', content })
+    if (typeof content === 'string' && content) {
+      for (const event of deliveryCue.push(content))
+        writeEvent(response, event)
+    }
   }
 
   while (true) {
@@ -237,6 +241,8 @@ async function relayDeepSeekStream(body, response) {
   }
 
   consumeLine(buffer.trimEnd())
+  for (const event of deliveryCue.finish())
+    writeEvent(response, event)
 }
 
 async function readJson(request) {

@@ -331,7 +331,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     }
   }
 
-  function beginStream(userText: string, onDelivery?: (delivery: Delivery) => void) {
+  function beginStream(userText: string, onDelivery?: (delivery: Delivery) => void, preferredDelivery?: Delivery) {
     cancel()
     const token = run
     const buffer = new SentenceBuffer()
@@ -348,7 +348,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     const feed = (sentences: string[]) => {
       for (const sentence of sentences) {
         if (!delivery) {
-          delivery = chooseDelivery(userText, sentence)
+          delivery = preferredDelivery ?? chooseDelivery(userText, sentence)
           onDelivery?.(delivery)
           callbacks.onProblem('正在生成语音…')
           resolveFirst()

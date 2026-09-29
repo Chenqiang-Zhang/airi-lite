@@ -1,4 +1,5 @@
 import type { PersonaConfig } from './persona'
+import type { Delivery } from './delivery'
 import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code'
 
 export interface ChatMessage {
@@ -14,9 +15,10 @@ export interface ProviderStatus {
 }
 
 interface StreamEvent {
-  type: 'delta' | 'done' | 'error'
+  type: 'delta' | 'delivery' | 'done' | 'error'
   content?: string
   message?: string
+  value?: string
 }
 
 export class ChatApiError extends Error {
@@ -41,6 +43,7 @@ export async function streamChat(options: {
   signal?: AbortSignal
   accessCode?: string
   onDelta: (content: string) => void
+  onDelivery?: (delivery: Delivery) => void
 }) {
   if (options.accessCode && !isValidAccessCode(options.accessCode))
     throw new ChatApiError(INVALID_ACCESS_CODE_MESSAGE)
@@ -79,6 +82,9 @@ export async function streamChat(options: {
     const event = JSON.parse(line) as StreamEvent
     if (event.type === 'error')
       throw new ChatApiError(event.message ?? 'DeepSeek 流式响应中断')
+
+    if (event.type === 'delivery' && ['neutral', 'soft', 'bright', 'curious'].includes(event.value ?? ''))
+      options.onDelivery?.(event.value as Delivery)
 
     if (event.type === 'delta' && event.content) {
       completeText += event.content

@@ -20,6 +20,7 @@ if (!response.ok)
 
 const body = await response.text()
 let reply = ''
+let delivery = null
 for (const line of body.split('\n')) {
   if (!line.trim())
     continue
@@ -28,8 +29,12 @@ for (const line of body.split('\n')) {
     throw new Error('Chat stream ended with an error')
   if (event.type === 'delta' && typeof event.content === 'string')
     reply += event.content
+  if (event.type === 'delivery' && typeof event.value === 'string')
+    delivery = event.value
 }
 
 if (!reply.trim())
   throw new Error('Chat smoke test returned an empty reply')
+if (process.env.AIRI_SMOKE_SHOW_DELIVERY === '1')
+  process.stderr.write(`delivery=${delivery ?? 'missing'}\n`)
 process.stdout.write(`${reply}\n`)

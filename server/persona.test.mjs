@@ -44,6 +44,7 @@ test('builds a persona-led system prompt', () => {
   assert.match(prompt, /不是需要逐条复述的台词/)
   assert.match(prompt, /不是实际聊天记录/)
   assert.match(prompt, /用户：你好/)
+  assert.match(prompt, /\[\[tone:soft\]\]/)
 })
 
 test('bounds opt-in user memory and includes it only when provided', () => {
