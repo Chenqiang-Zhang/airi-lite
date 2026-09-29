@@ -102,6 +102,8 @@ AIRI_DEMO_ACCESS_CODE=replace-with-a-long-random-code pnpm start
 
 Run the Persona and server tests with `pnpm test`.
 
+For a real-provider Persona spot check, `scripts/smoke-persona.mjs` accepts a JSON chat request on stdin and uses `AIRI_DEMO_ACCESS_CODE` from the server environment. It prints only the reply, not the code. This calls the paid DeepSeek API; a few good samples are not a human-likeness evaluation.
+
 ## Hiyori Momose model
 
 The model files are not redistributed by this repository; only the screenshot above is included. Review the [official Live2D sample page](https://www.live2d.com/en/learn/sample/momose-hiyori/) and [license terms](https://www.live2d.com/eula/live2d-sample-model-terms_en.html) first. Download the Simplified Chinese ZIP and copy the contents of `hiyori_free/runtime/` into `public/models/hiyori/`. The expected entrypoint is `public/models/hiyori/hiyori_free_t08.model3.json`. Build only after adding those files; Vite copies them into `dist/models/hiyori/`.

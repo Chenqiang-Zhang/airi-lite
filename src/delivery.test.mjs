@@ -5,6 +5,8 @@ import { chooseDelivery, deliverySpeed } from './delivery.ts'
 
 test('a difficult user message receives a restrained delivery', () => {
   assert.equal(chooseDelivery('今天好累，明天还有考试', '没事！我们先休息一下。'), 'soft')
+  assert.equal(chooseDelivery('我有点不舒服', '喝点水，好好休息！'), 'soft')
+  assert.equal(chooseDelivery('今天不开心', '怎么啦？'), 'soft')
   assert.equal(chooseDelivery('我不难过了', '那太好啦！'), 'bright')
 })
 

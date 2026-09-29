@@ -13,8 +13,8 @@ export function deliverySpeed(delivery: Delivery): number {
 }
 
 export function chooseDelivery(userText: string, replyText: string): Delivery {
-  const withoutNegations = userText.replace(/不(?:难过|伤心|焦虑|害怕|累|舒服)/g, '')
-  if (/(?:难过|伤心|焦虑|害怕|失眠|哭了|哭泣|崩溃|痛苦|生病|去世|分手|压力很大|好累|很累|不舒服)/.test(withoutNegations))
+  const withoutNegations = userText.replace(/不(?:难过|伤心|焦虑|害怕|累)/g, '')
+  if (/(?:难过|伤心|焦虑|害怕|失眠|哭了|哭泣|崩溃|痛苦|生病|去世|分手|压力很大|好累|很累|不舒服|不开心|沮丧|低落|委屈|孤独)/.test(withoutNegations))
     return 'soft'
 
   const reply = replyText.trim()

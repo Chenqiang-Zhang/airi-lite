@@ -4,6 +4,7 @@ export interface ConversationMessage {
   role: 'assistant' | 'user'
   text: string
   delivery?: Delivery
+  source?: 'deepseek' | 'fallback'
 }
 
 export const CONVERSATION_STORAGE_KEY = 'airi-lite:conversation:v1'
@@ -25,6 +26,8 @@ function normaliseMessages(value: unknown): ConversationMessage[] {
       }
       if (deliveries.has(item.delivery))
         message.delivery = item.delivery
+      if (item.source === 'deepseek' || item.source === 'fallback')
+        message.source = item.source
       return message
     })
     .filter(message => message.text)

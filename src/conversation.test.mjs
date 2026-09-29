@@ -17,11 +17,11 @@ test('conversation survives reload in the same session and can be cleared', () =
   assert.deepEqual(loadConversation(storage), [])
   saveConversation([
     { role: 'user', text: '你好' },
-    { role: 'assistant', text: '来啦！', delivery: 'bright' },
+    { role: 'assistant', text: '来啦！', delivery: 'bright', source: 'fallback' },
   ], storage)
   assert.deepEqual(loadConversation(storage), [
     { role: 'user', text: '你好' },
-    { role: 'assistant', text: '来啦！', delivery: 'bright' },
+    { role: 'assistant', text: '来啦！', delivery: 'bright', source: 'fallback' },
   ])
   clearConversation(storage)
   assert.equal(storage.getItem(CONVERSATION_STORAGE_KEY), null)
@@ -39,6 +39,7 @@ test('invalid and excessive stored data is discarded or bounded', () => {
       role: 'user',
       text: `${index}`,
       delivery: 'invented',
+      source: 'invented',
     })),
   ]))
   const loaded = loadConversation(storage)
@@ -46,4 +47,5 @@ test('invalid and excessive stored data is discarded or bounded', () => {
   assert.equal(loaded[0].text, '6')
   assert.equal(loaded.at(-1).text, '29')
   assert.ok(loaded.every(message => message.delivery === undefined))
+  assert.ok(loaded.every(message => message.source === undefined))
 })

@@ -6,6 +6,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code'
 import { ChatApiError, fetchProviderStatus, streamChat } from './api'
 import { clearConversation, loadConversation, saveConversation } from './conversation'
+import type { ConversationMessage } from './conversation'
 import { chooseDelivery } from './delivery'
 import type { Delivery } from './delivery'
 import { mountHiyori } from './live2d'
@@ -13,11 +14,8 @@ import { DEFAULT_PERSONA, loadPersona, savePersona } from './persona'
 import { createSpeechController } from './speech'
 import type { VoiceState } from './speech'
 
-interface Message {
+interface Message extends ConversationMessage {
   id: number
-  role: 'assistant' | 'user'
-  text: string
-  delivery?: Delivery
 }
 
 type ProviderMode = 'checking' | 'deepseek' | 'fallback'
@@ -125,8 +123,10 @@ function speak(text: string, delivery: Delivery = 'neutral') {
 
 function replayLastResponse() {
   const message = messages.value.filter(item => item.role === 'assistant').at(-1)
-  if (message?.text)
-    speak(message.text, message.delivery)
+  if (message?.text) {
+    const previousUser = messages.value.filter(item => item.role === 'user').at(-1)
+    speak(message.text, message.delivery ?? chooseDelivery(previousUser?.text ?? '', message.text))
+  }
 }
 
 async function sendMessage() {
@@ -153,7 +153,7 @@ async function sendMessage() {
   input.value = ''
   await nextTick()
 
-  const requestMessages = messages.value.map(message => ({
+  const requestMessages = messages.value.filter(message => message.source !== 'fallback').map(message => ({
     role: message.role,
     content: message.text,
   }))
@@ -176,6 +176,7 @@ async function sendMessage() {
       signal: controller.signal,
       onDelta: (chunk) => {
         assistantMessage.text += chunk
+        assistantMessage.source = 'deepseek'
       },
     })
     assistantMessage.delivery = chooseDelivery(text, assistantMessage.text)
@@ -196,6 +197,7 @@ async function sendMessage() {
       }
       else if (error instanceof ChatApiError && error.status === 503 && providerMode.value === 'fallback') {
         assistantMessage.text = fallbackReplies[messages.value.length % fallbackReplies.length]
+        assistantMessage.source = 'fallback'
         messages.value.push(assistantMessage)
       }
     }
@@ -306,7 +308,7 @@ function saveAccessCode() {
 
       <div class="messages" aria-live="polite">
         <article v-for="message in messages" :key="message.id" class="message" :class="[message.role, { generating: isGenerating && message.role === 'assistant' && !message.text }]">
-          <span>{{ message.role === 'assistant' ? characterName : 'You' }}</span>
+          <span>{{ message.role === 'assistant' ? characterName : 'You' }}{{ message.source === 'fallback' ? ' · 本地演示' : '' }}</span>
           <p v-if="message.text">{{ message.text }}</p>
           <p v-else class="typing"><i /><i /><i /></p>
         </article>
