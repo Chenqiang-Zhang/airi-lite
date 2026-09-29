@@ -1,4 +1,7 @@
 import type { KokoroTTS } from '@uzen/kokoro-js'
+import type { Delivery } from './delivery'
+
+import { deliverySpeed } from './delivery'
 
 export type VoiceState = 'idle' | 'loading' | 'ready' | 'fallback'
 
@@ -161,7 +164,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     window.speechSynthesis?.cancel()
   }
 
-  function browserFallback(text: string, token: number) {
+  function browserFallback(text: string, token: number, delivery: Delivery) {
     if (token !== run)
       return
     callbacks.onState('fallback')
@@ -173,7 +176,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     callbacks.onProblem('本地声线不可用，正在尝试浏览器语音；若仍无声，请检查输出设备。')
     const utterance = new SpeechSynthesisUtterance(text)
     utterance.lang = 'zh-CN'
-    utterance.rate = 0.95
+    utterance.rate = deliverySpeed(delivery)
     utterance.onstart = () => callbacks.onPlaying(true)
     utterance.onend = () => callbacks.onPlaying(false)
     utterance.onerror = () => {
@@ -183,7 +186,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     window.speechSynthesis.speak(utterance)
   }
 
-  async function speak(text: string) {
+  async function speak(text: string, delivery: Delivery = 'neutral') {
     cancel()
     if (!text.trim())
       return
@@ -196,7 +199,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       const chunks: Float32Array[] = []
       let total = 0
       let sampleRate = 24_000
-      for await (const segment of model.stream(forChineseVoice(text), { voice: VOICE_ID, speed: 0.98, maxChunkLength: 130 })) {
+      for await (const segment of model.stream(forChineseVoice(text), { voice: VOICE_ID, speed: deliverySpeed(delivery), maxChunkLength: 130 })) {
         if (token !== run)
           return
         const data = segment.audio.data as Float32Array
@@ -242,7 +245,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       if (token !== run)
         return
       console.warn('Kokoro synthesis failed; using browser speech', error)
-      browserFallback(text, token)
+      browserFallback(text, token, delivery)
     }
   }
 

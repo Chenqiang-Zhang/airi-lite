@@ -386,6 +386,13 @@ h1 {
   color: #ac574f;
 }
 
+.memory-notice {
+  margin: 4px 0 0;
+  color: #a09590;
+  text-align: center;
+  font-size: 10px;
+}
+
 .voice-notice {
   margin: 5px 0 0;
   color: #8d817a;

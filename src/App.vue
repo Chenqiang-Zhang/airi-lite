@@ -5,6 +5,9 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code'
 import { ChatApiError, fetchProviderStatus, streamChat } from './api'
+import { clearConversation, loadConversation, saveConversation } from './conversation'
+import { chooseDelivery } from './delivery'
+import type { Delivery } from './delivery'
 import { mountHiyori } from './live2d'
 import { DEFAULT_PERSONA, loadPersona, savePersona } from './persona'
 import { createSpeechController } from './speech'
@@ -14,6 +17,7 @@ interface Message {
   id: number
   role: 'assistant' | 'user'
   text: string
+  delivery?: Delivery
 }
 
 type ProviderMode = 'checking' | 'deepseek' | 'fallback'
@@ -23,6 +27,7 @@ const draftPersona = ref<PersonaConfig>({ ...persona.value })
 const characterName = computed(() => persona.value.name || 'Hiyori')
 const input = ref('')
 const isSpeaking = ref(false)
+const activeDelivery = ref<Delivery>('neutral')
 const voiceState = ref<VoiceState>('idle')
 const voiceProblem = ref('')
 const audioAvailable = ref(false)
@@ -45,13 +50,10 @@ if (savedAccessCode && !accessCode.value) {
 const activeController = ref<AbortController | null>(null)
 let live2d: Awaited<ReturnType<typeof mountHiyori>> | null = null
 let speech: ReturnType<typeof createSpeechController> | null = null
-const messages = ref<Message[]>([
-  {
-    id: 1,
-    role: 'assistant',
-    text: persona.value.greeting,
-  },
-])
+const restoredMessages = loadConversation()
+const messages = ref<Message[]>(restoredMessages.length
+  ? restoredMessages.map((message, index) => ({ ...message, id: index + 1 }))
+  : [{ id: 1, role: 'assistant', text: persona.value.greeting }])
 
 const providerLabel = computed(() => ({
   checking: '检查大脑连接…',
@@ -99,7 +101,10 @@ onUnmounted(() => {
   speech?.dispose()
   live2d?.destroy()
 })
-watch(isSpeaking, value => live2d?.setSpeaking(value))
+watch(isSpeaking, (value) => {
+  live2d?.setSpeaking(value)
+  live2d?.setDelivery(value ? activeDelivery.value : 'neutral')
+})
 
 async function refreshProviderStatus() {
   try {
@@ -113,8 +118,15 @@ async function refreshProviderStatus() {
   }
 }
 
-function speak(text: string) {
-  void speech?.speak(text)
+function speak(text: string, delivery: Delivery = 'neutral') {
+  activeDelivery.value = delivery
+  void speech?.speak(text, delivery)
+}
+
+function replayLastResponse() {
+  const message = messages.value.filter(item => item.role === 'assistant').at(-1)
+  if (message?.text)
+    speak(message.text, message.delivery)
 }
 
 async function sendMessage() {
@@ -166,6 +178,7 @@ async function sendMessage() {
         assistantMessage.text += chunk
       },
     })
+    assistantMessage.delivery = chooseDelivery(text, assistantMessage.text)
     providerMode.value = 'deepseek'
   }
   catch (error) {
@@ -192,7 +205,12 @@ async function sendMessage() {
     isGenerating.value = false
     activeController.value = null
     if (!aborted && assistantMessage.text)
-      speak(assistantMessage.text)
+      assistantMessage.delivery ??= chooseDelivery(text, assistantMessage.text)
+    if (!aborted)
+      saveConversation(messages.value)
+    if (!aborted && assistantMessage.text) {
+      speak(assistantMessage.text, assistantMessage.delivery)
+    }
   }
 }
 
@@ -207,6 +225,10 @@ function applyPersona() {
     name: draftPersona.value.name.trim() || 'Hiyori',
   }
   savePersona(persona.value)
+  if (messages.value.length === 1 && messages.value[0].role === 'assistant') {
+    messages.value = [{ id: Date.now(), role: 'assistant', text: persona.value.greeting }]
+    clearConversation()
+  }
   personaOpen.value = false
 }
 
@@ -226,6 +248,7 @@ function resetConversation() {
     role: 'assistant',
     text: persona.value.greeting,
   }]
+  clearConversation()
 }
 
 function saveAccessCode() {
@@ -275,7 +298,7 @@ function saveAccessCode() {
           <button class="voice-button" type="button" @click="openPersonaEditor">
             人格
           </button>
-          <button class="voice-button" type="button" title="朗读最后一条回复" @click="speak(messages.filter(message => message.role === 'assistant').at(-1)?.text ?? '')">
+          <button class="voice-button" type="button" title="朗读最后一条回复" @click="replayLastResponse">
             朗读
           </button>
         </div>
@@ -307,6 +330,7 @@ function saveAccessCode() {
       <p class="notice" :class="{ error: lastError }">
         {{ lastError || (providerMode === 'deepseek' ? '回复由 DeepSeek 生成，完成后会自动朗读；可点击角色互动。' : '尚未配置 DeepSeek Key，当前会使用明确标注的本地回复。') }}
       </p>
+      <p class="memory-notice">当前标签页临时保留对话；点击「清空」可删除。</p>
       <p class="voice-notice" role="status">{{ voiceProblem || voiceLabel }} · <a href="https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh" target="_blank" rel="noopener noreferrer">开源模型</a></p>
       <audio ref="speechPlayer" class="speech-player" :class="{ visible: audioAvailable }" controls preload="none" aria-label="日和语音播放器" />
     </section>

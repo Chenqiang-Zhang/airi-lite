@@ -17,17 +17,17 @@ The first milestone is intentionally narrow:
 - reply with a configurable personality;
 - read replies aloud without microphone access.
 
-The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, lets each browser edit a basic persona, and reads finished replies aloud with a fixed local Kokoro Chinese voice. Audio amplitude drives the Live2D mouth. If local inference is unavailable, it falls back to browser text-to-speech. There is no microphone or speech recognition. The Hiyori artwork and this demo's configurable persona are separate from Project AIRI.
+The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, lets each browser edit a basic persona, and reads finished replies aloud with a fixed local Kokoro Chinese voice. Audio amplitude drives the Live2D mouth. A small delivery layer makes restrained changes to speech speed and facial parameters for short replies; this is not an expressive voice model. If local inference is unavailable, it falls back to browser text-to-speech. There is no microphone or speech recognition. The Hiyori artwork and this demo's configurable persona are separate from Project AIRI.
 
 ## What works today
 
 | Area | Current behavior |
 | --- | --- |
-| Character | Hiyori Momose Live2D model with click interaction and basic mouth movement |
-| Personality | Editable persona stored in the visitor's browser; sent with recent chat context |
+| Character | Hiyori Momose Live2D model with click interaction, basic mouth movement, and subtle delivery cues |
+| Personality | Editable persona stored in the visitor's browser; recent chat survives refresh in the current tab |
 | Brain | Server-side DeepSeek streaming, with an explicitly labelled local fallback when unconfigured |
-| Voice | Fixed `zf_001` Kokoro Chinese voice generated in the browser; browser speech fallback |
-| Not yet built | Microphone input, emotional prosody, phoneme-level lip sync, long-term memory, and user accounts |
+| Voice | Fixed `zf_001` Kokoro Chinese voice with slight speed variation; browser speech fallback |
+| Not yet built | Microphone input, emotional prosody, phoneme-level lip sync, cross-session memory, and user accounts |
 
 ## How it fits together
 
@@ -91,6 +91,8 @@ Choose **人格** in the chat header to edit:
 
 Persona settings are stored in the browser's local storage. They are sent to the local server with recent conversation history and compiled into the system message there. The design is a reduced version of AIRI's Character Card separation of personality, scenario, system instructions, greetings, and examples.
 
+Recent conversation is temporarily kept in this browser tab's session storage so refreshing the page does not make Hiyori forget the current exchange. **清空** removes that stored transcript. This is not a cross-device or long-term memory system; the current chat context is still sent to DeepSeek when generating a reply.
+
 Run a production build with:
 
 ```bash
@@ -123,8 +125,8 @@ The current VPS uses the sample systemd unit in `deploy/airi-lite.service`: Node
 
 ## Roadmap
 
-1. Add sentence-level speech queuing during streamed replies and an explicit emotion/prosody layer for a more expressive voice.
-2. Add phoneme-level mouth shapes and optional expressions; the current lip sync follows volume, not exact phonemes.
+1. Add sentence-level speech queuing during streamed replies and evaluate a genuinely expressive voice model; speed changes alone do not provide emotional prosody.
+2. Add phoneme-level mouth shapes and more nuanced expressions; the current lip sync follows volume, not exact phonemes.
 3. Add per-user accounts/quotas before opening unrestricted public chat.
 
 ## License

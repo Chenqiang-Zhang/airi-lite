@@ -1,5 +1,6 @@
 import * as PIXI from 'pixi.js'
 import { Live2DModel } from 'pixi-live2d-display/cubism4'
+import type { Delivery } from './delivery'
 
 export async function mountHiyori(container: HTMLElement) {
   // pixi-live2d-display uses the shared PIXI ticker through the browser global.
@@ -38,6 +39,7 @@ export async function mountHiyori(container: HTMLElement) {
     model.on('hit', () => model.motion('Tap'))
 
     let speaking = false
+    let delivery: Delivery = 'neutral'
     let tick = 0
     let mouthLevel: number | null = null
     const animateMouth = () => {
@@ -45,9 +47,18 @@ export async function mountHiyori(container: HTMLElement) {
         return
       tick += 0.16
       const core = model.internalModel.coreModel as unknown as {
-        setParameterValueById?: (id: string, value: number) => void
+        setParameterValueById?: (id: string, value: number, weight?: number) => void
       }
       core.setParameterValueById?.('ParamMouthOpenY', mouthLevel ?? (0.3 + Math.abs(Math.sin(tick)) * 0.55))
+      if (delivery === 'bright') {
+        core.setParameterValueById?.('ParamMouthForm', 0.6, 0.4)
+        core.setParameterValueById?.('ParamCheek', 0.3, 0.35)
+        core.setParameterValueById?.('ParamEyeLSmile', 0.25, 0.3)
+        core.setParameterValueById?.('ParamEyeRSmile', 0.25, 0.3)
+      }
+      else if (delivery === 'curious') {
+        core.setParameterValueById?.('ParamMouthForm', 0.25, 0.3)
+      }
     }
     app.ticker.add(animateMouth)
 
@@ -64,6 +75,9 @@ export async function mountHiyori(container: HTMLElement) {
       },
       setMouthOpen(value: number | null) {
         mouthLevel = value === null ? null : Math.min(1, Math.max(0, value))
+      },
+      setDelivery(value: Delivery) {
+        delivery = value
       },
       destroy() {
         observer.disconnect()
