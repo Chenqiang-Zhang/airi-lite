@@ -46,6 +46,20 @@ test('the unchanged previous default upgrades to the new default', () => {
   })
 })
 
+test('the more recent default also upgrades without overwriting custom variations', () => {
+  const previous = {
+    ...DEFAULT_PERSONA,
+    speakingStyle: '主要用自然的中文口语。闲聊通常一到三句，先回应对方说的具体事，再补一点自己的观察；句长有变化，不每轮都总结、列清单或反问。偶尔俏皮，但不堆日语口癖；用户要解释或步骤时再清晰展开。',
+  }
+  withStoredPersona(JSON.stringify(previous), () => {
+    assert.deepEqual(loadPersona(), DEFAULT_PERSONA)
+  })
+  withStoredPersona(JSON.stringify({ ...previous, greeting: '我自己写的开场白' }), () => {
+    assert.equal(loadPersona().greeting, '我自己写的开场白')
+    assert.equal(loadPersona().speakingStyle, previous.speakingStyle)
+  })
+})
+
 test('customised previous personas keep their settings and do not inherit example lines', () => {
   const customised = { ...oldDefault, speakingStyle: '我自己写的语气' }
   withStoredPersona(JSON.stringify(customised), getStored => {

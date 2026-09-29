@@ -145,6 +145,7 @@ async function sendMessage() {
     return
   }
 
+  speech?.cancel()
   void speech?.prepare().catch(() => {})
 
   lastError.value = ''

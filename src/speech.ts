@@ -5,6 +5,21 @@ import { deliverySpeed } from './delivery'
 
 export type VoiceState = 'idle' | 'loading' | 'ready' | 'fallback'
 
+interface AudioClip {
+  samples: Float32Array
+  sampleRate: number
+}
+
+interface PlaybackRun {
+  token: number
+  queue: AudioClip[]
+  chunks: Float32Array[]
+  sampleRate: number | null
+  total: number
+  synthesisFinished: boolean
+  playingChunk: boolean
+}
+
 const MODEL_ID = 'onnx-community/Kokoro-82M-v1.1-zh-ONNX'
 const VOICE_ID = 'zf_001'
 const LETTERS: Record<string, string> = {
@@ -86,6 +101,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   let envelope: number[] = []
   let frame = 0
   let run = 0
+  let activeRun: PlaybackRun | null = null
 
   audio.volume = 1
   audio.muted = false
@@ -106,14 +122,62 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     callbacks.onMouth(0)
     callbacks.onPlaying(false)
   }
+  const onEnded = () => {
+    onStopped()
+    if (!activeRun?.playingChunk)
+      return
+    activeRun.playingChunk = false
+    advance(activeRun)
+  }
   const onError = () => {
     onStopped()
+    activeRun = null
     callbacks.onProblem('音频文件无法播放。请刷新页面重试，或更换浏览器。')
   }
   audio.addEventListener('playing', onPlaying)
   audio.addEventListener('pause', onStopped)
-  audio.addEventListener('ended', onStopped)
+  audio.addEventListener('ended', onEnded)
   audio.addEventListener('error', onError)
+
+  function replaceAudioSource(samples: Float32Array, sampleRate: number) {
+    if (objectUrl)
+      URL.revokeObjectURL(objectUrl)
+    objectUrl = URL.createObjectURL(new Blob([encodeWav(samples, sampleRate)], { type: 'audio/wav' }))
+    envelope = mouthEnvelope(samples, sampleRate)
+    audio.src = objectUrl
+    audio.load()
+    callbacks.onAudioReady(true)
+  }
+
+  function advance(session: PlaybackRun) {
+    if (session !== activeRun || session.token !== run || session.playingChunk)
+      return
+
+    const next = session.queue.shift()
+    if (next) {
+      session.playingChunk = true
+      replaceAudioSource(next.samples, next.sampleRate)
+      void audio.play().catch((error) => {
+        if (session !== activeRun)
+          return
+        console.warn('Automatic audio playback was blocked', error)
+        callbacks.onProblem('语音已生成，但自动播放被浏览器拦截。请点击下方播放器的播放键。')
+      })
+      return
+    }
+
+    if (!session.synthesisFinished || !session.sampleRate)
+      return
+
+    const samples = new Float32Array(session.total)
+    let offset = 0
+    for (const chunk of session.chunks) {
+      samples.set(chunk, offset)
+      offset += chunk.length
+    }
+    activeRun = null
+    replaceAudioSource(samples, session.sampleRate)
+  }
 
   async function prepare() {
     if (unavailable)
@@ -151,6 +215,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
 
   function cancel() {
     run++
+    activeRun = null
     audio.pause()
     audio.removeAttribute('src')
     audio.load()
@@ -192,60 +257,66 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       return
     const token = run
     callbacks.onProblem('正在生成语音…')
+    let session: PlaybackRun | null = null
     try {
       const model = await prepare()
       if (token !== run)
         return
-      const chunks: Float32Array[] = []
-      let total = 0
-      let sampleRate = 24_000
+      session = {
+        token,
+        queue: [],
+        chunks: [],
+        sampleRate: null,
+        total: 0,
+        synthesisFinished: false,
+        playingChunk: false,
+      }
+      activeRun = session
       for await (const segment of model.stream(forChineseVoice(text), { voice: VOICE_ID, speed: deliverySpeed(delivery), maxChunkLength: 130 })) {
         if (token !== run)
           return
-        const data = segment.audio.data as Float32Array
-        sampleRate = segment.audio.sampling_rate
-        chunks.push(data)
-        total += data.length
+        const data = new Float32Array(segment.audio.data as Float32Array)
+        const sampleRate = segment.audio.sampling_rate
+        if (session.sampleRate && sampleRate !== session.sampleRate)
+          throw new Error('Kokoro changed its audio sample rate during synthesis')
+        let energy = 0
+        let peak = 0
+        for (const sample of data) {
+          if (!Number.isFinite(sample))
+            throw new Error('Kokoro returned invalid audio samples')
+          energy += sample * sample
+          peak = Math.max(peak, Math.abs(sample))
+        }
+        if (!data.length || peak < 0.001 || Math.sqrt(energy / data.length) < 0.0001)
+          continue
+        session.sampleRate = sampleRate
+        session.chunks.push(data)
+        session.total += data.length
+        session.queue.push({ samples: data, sampleRate })
+        advance(session)
       }
       if (token !== run)
         return
-      if (!total)
-        throw new Error('Kokoro returned no audio samples')
-      const samples = new Float32Array(total)
-      let offset = 0
-      for (const chunk of chunks) {
-        samples.set(chunk, offset)
-        offset += chunk.length
-      }
-      let energy = 0
-      let peak = 0
-      for (const sample of samples) {
-        if (!Number.isFinite(sample))
-          throw new Error('Kokoro returned invalid audio samples')
-        energy += sample * sample
-        peak = Math.max(peak, Math.abs(sample))
-      }
-      if (peak < 0.001 || Math.sqrt(energy / samples.length) < 0.0001)
+      if (!session.total)
         throw new Error('Kokoro returned silent audio')
-      envelope = mouthEnvelope(samples, sampleRate)
-      objectUrl = URL.createObjectURL(new Blob([encodeWav(samples, sampleRate)], { type: 'audio/wav' }))
-      audio.src = objectUrl
-      audio.load()
-      callbacks.onAudioReady(true)
+      session.synthesisFinished = true
       callbacks.onState('ready')
-      try {
-        await audio.play()
-      }
-      catch (error) {
-        console.warn('Automatic audio playback was blocked', error)
-        callbacks.onProblem('语音已生成，但自动播放被浏览器拦截。请点击下方播放器的播放键。')
-      }
+      advance(session)
     }
     catch (error) {
       if (token !== run)
         return
-      console.warn('Kokoro synthesis failed; using browser speech', error)
-      browserFallback(text, token, delivery)
+      if (session?.total) {
+        console.warn('Kokoro synthesis stopped after partial audio', error)
+        session.synthesisFinished = true
+        callbacks.onProblem('后续语音生成中断；可以点击「朗读」重试。')
+        advance(session)
+      }
+      else {
+        activeRun = null
+        console.warn('Kokoro synthesis failed; using browser speech', error)
+        browserFallback(text, token, delivery)
+      }
     }
   }
 
@@ -253,7 +324,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     cancel()
     audio.removeEventListener('playing', onPlaying)
     audio.removeEventListener('pause', onStopped)
-    audio.removeEventListener('ended', onStopped)
+    audio.removeEventListener('ended', onEnded)
     audio.removeEventListener('error', onError)
   }
   return { prepare, speak, cancel, dispose }
