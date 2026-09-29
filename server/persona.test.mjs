@@ -45,6 +45,8 @@ test('builds a persona-led system prompt', () => {
   assert.match(prompt, /不是实际聊天记录/)
   assert.match(prompt, /用户：你好/)
   assert.match(prompt, /\[\[tone:soft\]\]/)
+  assert.match(prompt, /没有读取用户浏览器标签页/)
+  assert.match(prompt, /不要用“刚才看到”/)
 })
 
 test('bounds opt-in user memory and includes it only when provided', () => {
@@ -58,6 +60,7 @@ test('bounds opt-in user memory and includes it only when provided', () => {
   assert.match(prompt, /用户主动保存的背景信息/)
   assert.match(prompt, /可以叫我小陈/)
   assert.match(prompt, /可能过时/)
+  assert.ok(prompt.indexOf('没有读取用户浏览器标签页') > prompt.indexOf('用户主动保存的背景信息'))
 
   const withoutMemory = buildSystemPrompt(result.persona)
   assert.doesNotMatch(withoutMemory, /用户主动保存的背景信息/)
