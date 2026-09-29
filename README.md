@@ -42,7 +42,7 @@ flowchart LR
   Player -->|audio level| L2D[Live2D mouth]
 ```
 
-The DeepSeek key stays on the server. Kokoro inference runs on the visitor's device; the VPS does not generate the audio. The current app waits for the completed reply before synthesizing speech, so this is **not** low-latency streaming voice chat.
+The DeepSeek key stays on the server. Kokoro inference runs on the visitor's device; the VPS does not generate the audio. Speech can start when the first complete sentence arrives, but this is **not** a low-latency full-duplex voice chat.
 
 ## Run locally
 
@@ -91,7 +91,9 @@ Choose **人格** in the chat header to edit:
 
 Persona settings are stored in the browser's local storage. They are sent to the local server with recent conversation history and compiled into the system message there. The design is a reduced version of AIRI's Character Card separation of personality, scenario, system instructions, greetings, and examples.
 
-Recent conversation is temporarily kept in this browser tab's session storage so refreshing the page does not make Hiyori forget the current exchange. **清空** removes that stored transcript. This is not a cross-device or long-term memory system; the current chat context is still sent to DeepSeek when generating a reply.
+Recent conversation is temporarily kept in this browser tab's session storage so refreshing the page does not make Hiyori forget the current exchange. **清空** removes that stored transcript. The transcript is not shared across devices or stored as long-term memory; its current context is still sent to DeepSeek when generating a reply.
+
+Choose **记忆** to manually save a short note about yourself (for example, a preferred name or response style). It remains in this browser's local storage across tabs and restarts until you remove it with **清除记忆** or clear browser data. Each new chat request sends this note to the local server and then to DeepSeek as context; it is not automatically extracted from conversation, shared across devices, or verified as fact. **清空** clears only the current tab's conversation, not the note. Avoid passwords and other sensitive information.
 
 Run a production build with:
 

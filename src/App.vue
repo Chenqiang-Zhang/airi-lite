@@ -10,6 +10,7 @@ import type { ConversationMessage } from './conversation'
 import { chooseDelivery } from './delivery'
 import type { Delivery } from './delivery'
 import { mountHiyori } from './live2d'
+import { clearUserMemory, loadUserMemory, saveUserMemory, USER_MEMORY_LIMIT } from './memory'
 import { DEFAULT_PERSONA, loadPersona, savePersona } from './persona'
 import { createSpeechController } from './speech'
 import type { VoiceState } from './speech'
@@ -32,6 +33,9 @@ const audioAvailable = ref(false)
 const speechPlayer = ref<HTMLAudioElement | null>(null)
 const isGenerating = ref(false)
 const personaOpen = ref(false)
+const memoryOpen = ref(false)
+const userMemory = ref(loadUserMemory())
+const draftUserMemory = ref(userMemory.value)
 const providerMode = ref<ProviderMode>('checking')
 const providerModel = ref('DeepSeek')
 const lastError = ref('')
@@ -175,6 +179,7 @@ async function sendMessage() {
     await streamChat({
       messages: requestMessages,
       persona: persona.value,
+      userMemory: userMemory.value,
       accessCode: accessCode.value,
       signal: controller.signal,
       onDelta: (chunk) => {
@@ -254,6 +259,37 @@ function resetPersona() {
   draftPersona.value = { ...DEFAULT_PERSONA }
 }
 
+function openMemoryEditor() {
+  draftUserMemory.value = userMemory.value
+  memoryOpen.value = true
+}
+
+function applyUserMemory() {
+  try {
+    userMemory.value = saveUserMemory(draftUserMemory.value)
+    lastError.value = ''
+    memoryOpen.value = false
+  }
+  catch {
+    lastError.value = '无法保存记忆，请检查浏览器是否允许本地存储。'
+  }
+}
+
+function removeUserMemory() {
+  if (!window.confirm('清除当前浏览器保存的全部个人记忆？此操作不会清空聊天记录。'))
+    return
+  try {
+    clearUserMemory()
+    userMemory.value = ''
+    draftUserMemory.value = ''
+    lastError.value = ''
+    memoryOpen.value = false
+  }
+  catch {
+    lastError.value = '无法清除记忆，请检查浏览器本地存储。'
+  }
+}
+
 function resetConversation() {
   activeController.value?.abort()
   speech?.cancel()
@@ -316,6 +352,9 @@ function saveAccessCode() {
           <button class="voice-button" type="button" @click="openPersonaEditor">
             人格
           </button>
+          <button class="voice-button" type="button" @click="openMemoryEditor">
+            记忆{{ userMemory ? ' · 已保存' : '' }}
+          </button>
           <button class="voice-button" type="button" title="朗读最后一条回复" @click="replayLastResponse">
             朗读
           </button>
@@ -348,7 +387,7 @@ function saveAccessCode() {
       <p class="notice" :class="{ error: lastError }">
         {{ lastError || (providerMode === 'deepseek' ? '回复由 DeepSeek 生成，完整句子会逐步朗读；可点击角色互动。' : '尚未配置 DeepSeek Key，当前会使用明确标注的本地回复。') }}
       </p>
-      <p class="memory-notice">当前标签页临时保留对话；点击「清空」可删除。</p>
+      <p class="memory-notice">对话只在当前标签页保留；「清空」只删对话，不删你主动保存的记忆。</p>
       <p class="voice-notice" role="status">{{ voiceProblem || voiceLabel }} · <a href="https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh" target="_blank" rel="noopener noreferrer">开源模型</a></p>
       <audio ref="speechPlayer" class="speech-player" :class="{ visible: audioAvailable }" controls preload="none" aria-label="日和语音播放器" />
     </section>
@@ -398,6 +437,31 @@ function saveAccessCode() {
           <div class="persona-actions">
             <button class="secondary-button" type="button" @click="resetPersona">恢复默认</button>
             <button class="primary-button" type="submit">保存人格</button>
+          </div>
+        </form>
+      </aside>
+    </div>
+
+    <div v-if="memoryOpen" class="persona-backdrop" @click.self="memoryOpen = false">
+      <aside class="persona-panel memory-panel" aria-label="个人记忆设置">
+        <div class="persona-heading">
+          <div>
+            <p class="eyebrow">ABOUT YOU</p>
+            <h2>让日和记住你</h2>
+          </div>
+          <button class="close-button" type="button" aria-label="关闭" @click="memoryOpen = false">×</button>
+        </div>
+
+        <p class="persona-intro">只记录你主动写下的称呼、偏好或约定。保存在当前浏览器；每次聊天都会随消息发送给 DeepSeek。请不要填写密码或其他敏感信息。</p>
+        <form class="persona-form" @submit.prevent="applyUserMemory">
+          <label>
+            <span>希望日和记住什么？</span>
+            <textarea v-model="draftUserMemory" rows="8" :maxlength="USER_MEMORY_LIMIT" placeholder="例如：你可以叫我小陈。我喜欢简短一点的回复，最近在学日语。" />
+          </label>
+          <p class="memory-hint">只在相关时参考，日和不会每轮主动提起。{{ draftUserMemory.length }}/{{ USER_MEMORY_LIMIT }}</p>
+          <div class="persona-actions memory-actions">
+            <button class="secondary-button" type="button" :disabled="!userMemory" @click="removeUserMemory">清除记忆</button>
+            <button class="primary-button" type="submit">保存记忆</button>
           </div>
         </form>
       </aside>

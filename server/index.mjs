@@ -155,7 +155,7 @@ async function handleChat(request, response) {
     body: JSON.stringify({
       model,
       messages: [
-        { role: 'system', content: buildSystemPrompt(chatRequest.persona) },
+        { role: 'system', content: buildSystemPrompt(chatRequest.persona, chatRequest.userMemory) },
         ...chatRequest.messages,
       ],
       stream: true,

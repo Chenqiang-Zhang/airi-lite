@@ -37,6 +37,7 @@ export async function fetchProviderStatus(): Promise<ProviderStatus> {
 export async function streamChat(options: {
   messages: ChatMessage[]
   persona: PersonaConfig
+  userMemory?: string
   signal?: AbortSignal
   accessCode?: string
   onDelta: (content: string) => void
@@ -53,6 +54,7 @@ export async function streamChat(options: {
     body: JSON.stringify({
       messages: options.messages,
       persona: options.persona,
+      userMemory: options.userMemory,
     }),
     signal: options.signal,
   })

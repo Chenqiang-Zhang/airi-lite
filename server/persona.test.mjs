@@ -19,6 +19,7 @@ test('normalises persona and keeps recent user/assistant messages', () => {
     { role: 'assistant', content: '你好' },
     { role: 'user', content: '今天怎么样？' },
   ])
+  assert.equal(result.userMemory, '')
 })
 
 test('requires the final message to come from the user', () => {
@@ -43,4 +44,20 @@ test('builds a persona-led system prompt', () => {
   assert.match(prompt, /不是需要逐条复述的台词/)
   assert.match(prompt, /不是实际聊天记录/)
   assert.match(prompt, /用户：你好/)
+})
+
+test('bounds opt-in user memory and includes it only when provided', () => {
+  const result = normaliseChatRequest({
+    persona: {},
+    messages: [{ role: 'user', content: '还记得我吗？' }],
+    userMemory: `  可以叫我小陈。${'a'.repeat(2_000)}  `,
+  })
+  assert.equal(result.userMemory.length, 1_200)
+  const prompt = buildSystemPrompt(result.persona, result.userMemory)
+  assert.match(prompt, /用户主动保存的背景信息/)
+  assert.match(prompt, /可以叫我小陈/)
+  assert.match(prompt, /可能过时/)
+
+  const withoutMemory = buildSystemPrompt(result.persona)
+  assert.doesNotMatch(withoutMemory, /用户主动保存的背景信息/)
 })
