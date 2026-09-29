@@ -1,7 +1,8 @@
-import type { KokoroTTS } from '@uzen/kokoro-js'
+import type { KokoroTTS, TextSplitterStream } from '@uzen/kokoro-js'
 import type { Delivery } from './delivery'
 
-import { deliverySpeed } from './delivery'
+import { chooseDelivery, deliverySpeed } from './delivery'
+import { SentenceBuffer } from './sentence-buffer'
 
 export type VoiceState = 'idle' | 'loading' | 'ready' | 'fallback'
 
@@ -251,28 +252,19 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     window.speechSynthesis.speak(utterance)
   }
 
-  async function speak(text: string, delivery: Delivery = 'neutral') {
-    cancel()
-    if (!text.trim())
-      return
-    const token = run
-    callbacks.onProblem('正在生成语音…')
-    let session: PlaybackRun | null = null
+  async function consumeSegments(source: ReturnType<KokoroTTS['stream']>, token: number) {
+    const session: PlaybackRun = {
+      token,
+      queue: [],
+      chunks: [],
+      sampleRate: null,
+      total: 0,
+      synthesisFinished: false,
+      playingChunk: false,
+    }
+    activeRun = session
     try {
-      const model = await prepare()
-      if (token !== run)
-        return
-      session = {
-        token,
-        queue: [],
-        chunks: [],
-        sampleRate: null,
-        total: 0,
-        synthesisFinished: false,
-        playingChunk: false,
-      }
-      activeRun = session
-      for await (const segment of model.stream(forChineseVoice(text), { voice: VOICE_ID, speed: deliverySpeed(delivery), maxChunkLength: 130 })) {
+      for await (const segment of source) {
         if (token !== run)
           return
         const data = new Float32Array(segment.audio.data as Float32Array)
@@ -306,7 +298,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     catch (error) {
       if (token !== run)
         return
-      if (session?.total) {
+      if (session.total) {
         console.warn('Kokoro synthesis stopped after partial audio', error)
         session.synthesisFinished = true
         callbacks.onProblem('后续语音生成中断；可以点击「朗读」重试。')
@@ -314,10 +306,120 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       }
       else {
         activeRun = null
-        console.warn('Kokoro synthesis failed; using browser speech', error)
-        browserFallback(text, token, delivery)
+        throw error
       }
     }
+  }
+
+  async function speak(text: string, delivery: Delivery = 'neutral') {
+    cancel()
+    if (!text.trim())
+      return
+    const token = run
+    callbacks.onProblem('正在生成语音…')
+    try {
+      const model = await prepare()
+      if (token !== run)
+        return
+      await consumeSegments(model.stream(forChineseVoice(text), { voice: VOICE_ID, speed: deliverySpeed(delivery), maxChunkLength: 130 }), token)
+    }
+    catch (error) {
+      if (token !== run)
+        return
+      console.warn('Kokoro synthesis failed; using browser speech', error)
+      browserFallback(text, token, delivery)
+    }
+  }
+
+  function beginStream(userText: string, onDelivery?: (delivery: Delivery) => void) {
+    cancel()
+    const token = run
+    const buffer = new SentenceBuffer()
+    const pendingSentences: string[] = []
+    let splitter: TextSplitterStream | null = null
+    let complete = false
+    let fullText = ''
+    let delivery: Delivery | null = null
+    let resolveFirst!: () => void
+    let resolveComplete!: () => void
+    const firstSentence = new Promise<void>(resolve => (resolveFirst = resolve))
+    const completion = new Promise<void>(resolve => (resolveComplete = resolve))
+
+    const feed = (sentences: string[]) => {
+      for (const sentence of sentences) {
+        if (!delivery) {
+          delivery = chooseDelivery(userText, sentence)
+          onDelivery?.(delivery)
+          callbacks.onProblem('正在生成语音…')
+          resolveFirst()
+        }
+        const normalised = forChineseVoice(sentence)
+        if (splitter) {
+          splitter.push(normalised)
+          splitter.flush()
+        }
+        else {
+          pendingSentences.push(normalised)
+        }
+      }
+    }
+
+    const push = (delta: string) => {
+      if (complete || token !== run)
+        return
+      fullText += delta
+      feed(buffer.push(delta))
+    }
+
+    const finish = () => {
+      if (complete || token !== run)
+        return
+      complete = true
+      feed(buffer.finish())
+      resolveFirst()
+      splitter?.close()
+      resolveComplete()
+    }
+
+    const cancelStream = () => {
+      if (token !== run)
+        return
+      cancel()
+      resolveFirst()
+      resolveComplete()
+    }
+
+    const synthesize = async () => {
+      try {
+        const [model, { TextSplitterStream }] = await Promise.all([prepare(), import('@uzen/kokoro-js')])
+        if (token !== run)
+          return
+        await firstSentence
+        if (token !== run || !fullText.trim())
+          return
+        splitter = new TextSplitterStream()
+        for (const sentence of pendingSentences) {
+          splitter.push(sentence)
+          splitter.flush()
+        }
+        pendingSentences.length = 0
+        if (complete)
+          splitter.close()
+        await consumeSegments(model.stream(splitter, { voice: VOICE_ID, speed: deliverySpeed(delivery ?? 'neutral'), maxChunkLength: 130 }), token)
+      }
+      catch (error) {
+        if (token !== run)
+          return
+        await completion
+        if (token !== run)
+          return
+        console.warn('Kokoro streaming synthesis failed; using browser speech', error)
+        browserFallback(fullText, token, delivery ?? 'neutral')
+      }
+    }
+    void synthesize()
+
+    return { push, finish, cancel: cancelStream }
   }
 
   function dispose() {
@@ -327,5 +429,5 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     audio.removeEventListener('ended', onEnded)
     audio.removeEventListener('error', onError)
   }
-  return { prepare, speak, cancel, dispose }
+  return { prepare, speak, beginStream, cancel, dispose }
 }

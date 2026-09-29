@@ -17,7 +17,7 @@ The first milestone is intentionally narrow:
 - reply with a configurable personality;
 - read replies aloud without microphone access.
 
-The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, lets each browser edit a basic persona, and reads finished replies aloud with a fixed local Kokoro Chinese voice. Audio amplitude drives the Live2D mouth. Generated speech chunks can start playing before the whole reply finishes synthesizing, and the complete WAV remains available for replay afterward. A small delivery layer makes restrained changes to speech speed and facial parameters for short replies; this is not an expressive voice model. If local inference is unavailable, it falls back to browser text-to-speech. There is no microphone or speech recognition. The Hiyori artwork and this demo's configurable persona are separate from Project AIRI.
+The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, lets each browser edit a basic persona, and speaks completed sentences with a fixed local Kokoro Chinese voice while later text is still arriving. Audio amplitude drives the Live2D mouth. Generated speech chunks can play before the whole reply finishes synthesizing, and the complete WAV remains available for replay afterward. A small delivery layer makes restrained changes to speech speed and facial parameters for short replies; this is not an expressive voice model. If local inference is unavailable, it falls back to browser text-to-speech. There is no microphone or speech recognition. The Hiyori artwork and this demo's configurable persona are separate from Project AIRI.
 
 ## What works today
 
@@ -37,7 +37,7 @@ flowchart LR
   API --> DS[DeepSeek]
   DS -->|streamed text| API
   API -->|streamed reply| U
-  U -->|finished reply| TTS[Kokoro in the browser]
+  U -->|completed sentences| TTS[Kokoro in the browser]
   TTS -->|audio| Player[Audio player]
   Player -->|audio level| L2D[Live2D mouth]
 ```
@@ -104,6 +104,8 @@ Run the Persona and server tests with `pnpm test`.
 
 For a real-provider Persona spot check, `scripts/smoke-persona.mjs` accepts a JSON chat request on stdin and uses `AIRI_DEMO_ACCESS_CODE` from the server environment. It prints only the reply, not the code. This calls the paid DeepSeek API; a few good samples are not a human-likeness evaluation.
 
+For local sentence-stream testing without provider charges, run `node scripts/mock-deepseek.mjs` in one terminal and `DEEPSEEK_API_KEY=mock DEEPSEEK_BASE_URL=http://127.0.0.1:4174 pnpm dev` in another. The page will show a configured provider because the mock uses the same API shape; its canned text is **not** a real DeepSeek reply. Stop both processes after testing.
+
 ## Hiyori Momose model
 
 The model files are not redistributed by this repository; only the screenshot above is included. Review the [official Live2D sample page](https://www.live2d.com/en/learn/sample/momose-hiyori/) and [license terms](https://www.live2d.com/eula/live2d-sample-model-terms_en.html) first. Download the Simplified Chinese ZIP and copy the contents of `hiyori_free/runtime/` into `public/models/hiyori/`. The expected entrypoint is `public/models/hiyori/hiyori_free_t08.model3.json`. Build only after adding those files; Vite copies them into `dist/models/hiyori/`.
@@ -119,7 +121,7 @@ mkdir -p public/kokoro/voices
 curl -fL https://huggingface.co/onnx-community/Kokoro-82M-v1.1-zh-ONNX/resolve/main/voices/zf_001.bin -o public/kokoro/voices/zf_001.bin
 ```
 
-The ONNX model is **not** bundled in the repository or hosted on this VPS. On first use, each visitor's browser downloads the roughly 326 MB fp32 model directly from Hugging Face and caches it locally. The app tries WebGPU first and then WASM. Browser tests found that q4f16/WebGPU could return an all-zero waveform and q8/WASM could return invalid samples; fp32/WebGPU produced a non-silent WAV. This does not add a paid TTS API or VPS inference load, but it requires model-download access and a reasonably capable device. The app rejects silent output instead of presenting it as successful speech. Once the text reply is complete, Kokoro starts playing each generated audio chunk while later chunks are still synthesizing. During long replies the player progress resets for each chunk; after playback it holds the combined WAV for replay. If automatic playback is blocked, use the visible audio player's play button. The browser build currently fails on some English spans, so common terms are mapped to Chinese and remaining Latin words are spelled out on the same fixed voice. If model loading or synthesis fails before audio starts, the app attempts the browser's built-in voice and reports the fallback. Only Kokoro playback uses measured audio levels for the mouth; browser fallback retains the simpler speaking animation. DeepSeek chat still uses its paid API.
+The ONNX model is **not** bundled in the repository or hosted on this VPS. On first use, each visitor's browser downloads the roughly 326 MB fp32 model directly from Hugging Face and caches it locally. The app tries WebGPU first and then WASM. Browser tests found that q4f16/WebGPU could return an all-zero waveform and q8/WASM could return invalid samples; fp32/WebGPU produced a non-silent WAV. This does not add a paid TTS API or VPS inference load, but it requires model-download access and a reasonably capable device. The app rejects silent output instead of presenting it as successful speech. Each complete sentence can start synthesizing while DeepSeek streams later text; raw token boundaries are buffered so names such as `DeepSeek` are normalized intact. During long replies the player progress resets for each generated chunk; after playback it holds the combined WAV for replay. If automatic playback is blocked, use the visible audio player's play button. The browser build currently fails on some English spans, so common terms are mapped to Chinese and remaining Latin words are spelled out on the same fixed voice. If model loading or synthesis fails before audio starts, the app attempts the browser's built-in voice and reports the fallback. Only Kokoro playback uses measured audio levels for the mouth; browser fallback retains the simpler speaking animation. DeepSeek chat still uses its paid API.
 
 ## Deployment
 
@@ -127,7 +129,7 @@ The current VPS uses the sample systemd unit in `deploy/airi-lite.service`: Node
 
 ## Roadmap
 
-1. Add sentence-level speech queuing during streamed replies and evaluate a genuinely expressive voice model; speed changes alone do not provide emotional prosody.
+1. Measure first-audio latency and speech gaps under real network conditions, then evaluate a genuinely expressive voice model; speed changes alone do not provide emotional prosody.
 2. Add phoneme-level mouth shapes and more nuanced expressions; the current lip sync follows volume, not exact phonemes.
 3. Add per-user accounts/quotas before opening unrestricted public chat.
 

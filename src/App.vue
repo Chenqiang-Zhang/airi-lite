@@ -168,6 +168,8 @@ async function sendMessage() {
   isGenerating.value = true
   const controller = new AbortController()
   activeController.value = controller
+  const speechStream: { current: ReturnType<ReturnType<typeof createSpeechController>['beginStream']> | null } = { current: null }
+  let chatSucceeded = false
 
   try {
     await streamChat({
@@ -178,9 +180,20 @@ async function sendMessage() {
       onDelta: (chunk) => {
         assistantMessage.text += chunk
         assistantMessage.source = 'deepseek'
+        if (!speechStream.current && speech) {
+          speechStream.current = speech.beginStream(text, (delivery) => {
+            assistantMessage.delivery = delivery
+            activeDelivery.value = delivery
+            if (isSpeaking.value)
+              live2d?.setDelivery(delivery)
+          })
+        }
+        speechStream.current?.push(chunk)
       },
     })
-    assistantMessage.delivery = chooseDelivery(text, assistantMessage.text)
+    chatSucceeded = true
+    speechStream.current?.finish()
+    assistantMessage.delivery ??= chooseDelivery(text, assistantMessage.text)
     providerMode.value = 'deepseek'
   }
   catch (error) {
@@ -204,6 +217,8 @@ async function sendMessage() {
     }
   }
   finally {
+    if (!chatSucceeded)
+      speechStream.current?.cancel()
     const aborted = controller.signal.aborted
     isGenerating.value = false
     activeController.value = null
@@ -211,7 +226,7 @@ async function sendMessage() {
       assistantMessage.delivery ??= chooseDelivery(text, assistantMessage.text)
     if (!aborted)
       saveConversation(messages.value)
-    if (!aborted && assistantMessage.text) {
+    if (!aborted && assistantMessage.text && !speechStream.current) {
       speak(assistantMessage.text, assistantMessage.delivery)
     }
   }
@@ -331,7 +346,7 @@ function saveAccessCode() {
       </form>
 
       <p class="notice" :class="{ error: lastError }">
-        {{ lastError || (providerMode === 'deepseek' ? '回复由 DeepSeek 生成，完成后会自动朗读；可点击角色互动。' : '尚未配置 DeepSeek Key，当前会使用明确标注的本地回复。') }}
+        {{ lastError || (providerMode === 'deepseek' ? '回复由 DeepSeek 生成，完整句子会逐步朗读；可点击角色互动。' : '尚未配置 DeepSeek Key，当前会使用明确标注的本地回复。') }}
       </p>
       <p class="memory-notice">当前标签页临时保留对话；点击「清空」可删除。</p>
       <p class="voice-notice" role="status">{{ voiceProblem || voiceLabel }} · <a href="https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh" target="_blank" rel="noopener noreferrer">开源模型</a></p>
