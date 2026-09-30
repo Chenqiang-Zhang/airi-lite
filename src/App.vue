@@ -7,6 +7,7 @@ import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code'
 import { ChatApiError, fetchProviderStatus, streamChat } from './api'
 import { clearConversation, loadConversation, saveConversation } from './conversation'
 import type { ConversationMessage } from './conversation'
+import type { AvatarActivity } from './avatar-performance'
 import { chooseDelivery } from './delivery'
 import type { Delivery } from './delivery'
 import { mountHiyori } from './live2d'
@@ -27,6 +28,8 @@ const persona = ref(loadPersona())
 const draftPersona = ref<PersonaConfig>({ ...persona.value })
 const characterName = computed(() => persona.value.name || 'Hiyori')
 const input = ref('')
+const composerFocused = ref(false)
+const composerInput = ref<HTMLInputElement | null>(null)
 const isSpeaking = ref(false)
 const activeDelivery = ref<Delivery>('neutral')
 const voiceState = ref<VoiceState>('idle')
@@ -34,6 +37,7 @@ const voiceProblem = ref('')
 const audioAvailable = ref(false)
 const speechPlayer = ref<HTMLAudioElement | null>(null)
 const isGenerating = ref(false)
+const avatarActivity = computed<AvatarActivity>(() => isSpeaking.value ? 'speaking' : isGenerating.value ? 'thinking' : composerFocused.value ? 'attentive' : 'idle')
 const personaOpen = ref(false)
 const memoryOpen = ref(false)
 const voiceOpen = ref(false)
@@ -60,6 +64,7 @@ if (savedAccessCode && !accessCode.value) {
 const activeController = ref<AbortController | null>(null)
 const activeAssistantId = ref<number | null>(null)
 let live2d: Awaited<ReturnType<typeof mountHiyori>> | null = null
+let latestMouth: { opening: number | null, form: number } = { opening: 0, form: 0 }
 let speech: ReturnType<typeof createSpeechController> | null = null
 const restoredMessages = loadConversation()
 const messages = ref<Message[]>(restoredMessages.length
@@ -94,7 +99,10 @@ onMounted(async () => {
   speech = createSpeechController(speechPlayer.value, {
     onState: state => (voiceState.value = state),
     onPlaying: playing => (isSpeaking.value = playing),
-    onMouth: (opening, form) => live2d?.setMouth(opening, form),
+    onMouth: (opening, form) => {
+      latestMouth = { opening, form }
+      live2d?.setMouth(opening, form)
+    },
     onAudioReady: ready => (audioAvailable.value = ready),
     onProblem: message => (voiceProblem.value = message),
   })
@@ -103,6 +111,8 @@ onMounted(async () => {
     return
   try {
     live2d = await mountHiyori(modelStage.value)
+    live2d.setMouth(latestMouth.opening, latestMouth.form)
+    syncAvatarActivity()
     modelStatus.value = ''
   }
   catch (error) {
@@ -115,10 +125,11 @@ onUnmounted(() => {
   speech?.dispose()
   live2d?.destroy()
 })
-watch(isSpeaking, (value) => {
-  live2d?.setSpeaking(value)
-  live2d?.setDelivery(value ? activeDelivery.value : 'neutral')
-})
+function syncAvatarActivity() {
+  live2d?.setActivity(avatarActivity.value)
+  live2d?.setDelivery(isSpeaking.value ? activeDelivery.value : 'neutral')
+}
+watch([avatarActivity, activeDelivery], syncAvatarActivity)
 
 async function refreshProviderStatus() {
   try {
@@ -367,6 +378,7 @@ function stopCurrentTurn() {
   voiceProblem.value = ''
   lastError.value = ''
   interactionNotice.value = '好，我先停下。你接着说。'
+  composerInput.value?.focus()
 }
 
 function resetConversation() {
@@ -467,7 +479,7 @@ function saveAccessCode() {
       </form>
 
       <form class="composer" @submit.prevent="sendMessage">
-        <input v-model="input" :disabled="accessProtected && !accessCode" :aria-label="`发送给 ${characterName} 的消息`" autocomplete="off" :placeholder="isGenerating ? '可以先写下一句，停下后发送……' : '输入一段文字……'">
+        <input ref="composerInput" v-model="input" :disabled="accessProtected && !accessCode" :aria-label="`发送给 ${characterName} 的消息`" autocomplete="off" :placeholder="isGenerating ? '可以先写下一句，停下后发送……' : '输入一段文字……'" @focus="composerFocused = true" @blur="composerFocused = false">
         <button type="submit" :disabled="isGenerating || !input.trim() || (accessProtected && !accessCode)">
           {{ isGenerating ? '生成中' : '发送' }}
         </button>

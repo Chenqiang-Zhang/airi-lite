@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hiyori 动作校验（仅本地）</title>
+<style>
+  body { margin: 0; background: #f5eee9; color: #41342c; font: 16px system-ui; }
+  main { display: flex; min-height: 100vh; }
+  #stage { width: 60vw; height: 95vh; }
+  aside { flex: 1; padding: 30px 20px; }
+  button { margin: 5px; padding: 10px; cursor: pointer; }
+  pre { white-space: pre-wrap; }
+</style>
+<main>
+  <div id="stage"></div>
+  <aside>
+    <h1>Hiyori 动作校验</h1>
+    <p>仅开发页面。固定姿态用于检查真实 Cubism 绘制顺序，不播放音频、不调用 LLM。</p>
+    <div id="controls">
+      <button data-activity="idle">静默</button>
+      <button data-activity="attentive">注意输入</button>
+      <button data-activity="thinking">等待回复</button>
+      <button data-activity="speaking">说话（固定开口）</button>
+      <button data-delivery="neutral">自然</button>
+      <button data-delivery="bright">轻快</button>
+      <button data-delivery="soft">温柔</button>
+      <button data-delivery="curious">好奇</button>
+      <button data-form="-0.32">嘴形 −0.32</button>
+      <button data-form="0.32">嘴形 +0.32</button>
+      <button data-motion="1">重播张嘴待机动作</button>
+    </div>
+    <pre id="state">正在加载模型……</pre>
+    <p>This content uses sample data owned and copyrighted by Live2D Inc.<br>Hiyori Momose · Illustration: Kani Biimu</p>
+  </aside>
+</main>
+<script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+<script type="module">
+  import * as PIXI from 'pixi.js'
+  import { Live2DModel } from 'pixi-live2d-display/cubism4'
+  import { attachAvatarPerformance } from '../src/avatar-performance.ts'
+
+  const output = document.querySelector('#state')
+  try {
+    Object.assign(window, { PIXI })
+    const stage = document.querySelector('#stage')
+    const app = new PIXI.Application({ resizeTo: stage, backgroundAlpha: 0, antialias: true })
+    stage.append(app.view)
+    const model = await Live2DModel.from(`${import.meta.env.BASE_URL}models/hiyori/hiyori_free_t08.model3.json`)
+    model.anchor.set(0.5, 1)
+    app.stage.addChild(model)
+    const scale = Math.min(stage.clientWidth * 0.9 / model.width, stage.clientHeight * 0.94 / model.height)
+    model.scale.set(scale)
+    model.position.set(stage.clientWidth / 2, stage.clientHeight * 1.04)
+    const internal = model.internalModel
+    const actor = attachAvatarPerformance(internal, {
+      reducedMotion: () => matchMedia('(prefers-reduced-motion: reduce)').matches,
+    })
+    let activity = 'idle', delivery = 'neutral', form = 0, motionMouth = 0, frames = 0, failures = 0, overridden = 0
+    actor.setMouth(0.7, form)
+    document.querySelector('#controls').addEventListener('click', ({ target }) => {
+      if (!(target instanceof HTMLButtonElement)) return
+      if (target.dataset.activity) actor.setActivity(activity = target.dataset.activity)
+      if (target.dataset.delivery) actor.setDelivery(delivery = target.dataset.delivery)
+      if (target.dataset.form) actor.setMouth(0.7, form = Number(target.dataset.form))
+      if (target.dataset.motion) void model.motion('Idle', Number(target.dataset.motion), 3)
+    })
+    internal.on('afterMotionUpdate', () => {
+      motionMouth = internal.coreModel.getParameterValueById('ParamMouthOpenY')
+    })
+    internal.on('beforeModelUpdate', () => {
+      const mouth = internal.coreModel.getParameterValueById('ParamMouthOpenY')
+      const renderedForm = internal.coreModel.getParameterValueById('ParamMouthForm')
+      if (Math.abs(mouth - (activity === 'speaking' ? 0.7 : 0)) > 0.001) failures++
+      if (Math.abs(motionMouth - mouth) > 0.1) overridden++
+      if (++frames % 15 === 0) output.textContent = `状态: ${activity} / ${delivery}\n动作写入的开口: ${motionMouth.toFixed(3)}\n实际绘制前开口: ${mouth.toFixed(3)}\n实际绘制前嘴形: ${renderedForm.toFixed(3)}\n检查帧数: ${frames}\n已纠正动作覆盖: ${overridden}\n口型覆盖错误: ${failures}`
+    })
+    addEventListener('pagehide', () => { actor.destroy(); app.destroy(true, { children: true, texture: true, baseTexture: true }) }, { once: true })
+  }
+  catch (error) { output.textContent = `加载失败: ${error.message}` }
+</script>
+</html>
