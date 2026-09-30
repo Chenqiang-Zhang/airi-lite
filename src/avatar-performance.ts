@@ -24,6 +24,8 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
   let delivery: Delivery = 'neutral'
   let mouthOpen: number | null = 0
   let mouthForm = 0
+  let reactionStartedAt: number | null = null
+  const reactionDuration = 650
   const weights = { attentive: 0, thinking: 0, speaking: 0, bright: 0, soft: 0, curious: 0 }
 
   const apply = () => {
@@ -57,18 +59,31 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
     core.addParameterValueById('ParamBrowLForm', brow)
     core.addParameterValueById('ParamBrowRForm', brow)
 
-    if (!options.reducedMotion?.()) {
+    const reducedMotion = options.reducedMotion?.() ?? false
+    if (reactionStartedAt !== null && (reducedMotion || time - reactionStartedAt >= reactionDuration))
+      reactionStartedAt = null
+    if (!reducedMotion) {
       // Small offsets preserve the original blink, breathing and pointer tracking.
       core.addParameterValueById('ParamAngleX', -weights.thinking * 3 + weights.speaking * Math.sin(elapsed * 1.7) * 0.7)
       core.addParameterValueById('ParamAngleY', weights.attentive * 1.5 + weights.thinking * 1.8 + weights.speaking * Math.sin(elapsed * 2.3) * 0.6)
       core.addParameterValueById('ParamAngleZ', -weights.attentive * 1.2 + weights.thinking * 2.2)
       core.addParameterValueById('ParamEyeBallX', -weights.thinking * 0.12)
       core.addParameterValueById('ParamEyeBallY', weights.attentive * 0.06 + weights.thinking * 0.1)
+      if (reactionStartedAt !== null) {
+        const progress = Math.max(0, (time - reactionStartedAt) / reactionDuration)
+        const reaction = Math.sin(Math.PI * progress) ** 2
+        // Ease a little out of Hiyori's extreme Idle pitches before the nod.
+        // Y is not a physics input in this model; X/Z and hair stay untouched.
+        core.setParameterValueById('ParamAngleY', 0, reaction * 0.18)
+        core.addParameterValueById('ParamAngleY', -reaction * 2.4)
+      }
     }
   }
 
   model.on('beforeModelUpdate', apply)
   return {
+    acknowledge() { reactionStartedAt = options.reducedMotion?.() ? null : now() },
+    clearReaction() { reactionStartedAt = null },
     setActivity(value: AvatarActivity) { activity = value },
     setDelivery(value: Delivery) { delivery = value },
     setMouth(open: number | null, form: number) {

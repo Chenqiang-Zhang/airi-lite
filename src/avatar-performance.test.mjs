@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { existsSync, readFileSync } from 'node:fs'
 import test from 'node:test'
 import { attachAvatarPerformance } from './avatar-performance.ts'
 
@@ -12,18 +13,20 @@ function fixture(reducedMotion = false) {
     addParameterValueById: (id, value) => values.set(id, (values.get(id) ?? 0) + value),
   }
   const actor = attachAvatarPerformance(model, { now: () => time, reducedMotion: () => reducedMotion })
-  const frame = (milliseconds = 16, idleMouth = 1, idleSmile = 0) => {
+  const frame = (milliseconds = 16, idleMouth = 1, idleSmile = 0, idleHeadY) => {
     time += milliseconds
     // Cubism restores the motion baseline before each pre-render event.
     values.clear()
     values.set('ParamMouthOpenY', idleMouth)
     values.set('ParamMouthForm', -1)
+    if (idleHeadY !== undefined)
+      values.set('ParamAngleY', idleHeadY)
     for (const id of ['ParamCheek', 'ParamEyeLSmile', 'ParamEyeRSmile'])
       values.set(id, idleSmile)
     model.emit('beforeModelUpdate')
     return Object.fromEntries(values)
   }
-  return { actor, frame, model }
+  return { actor, frame, model, setReducedMotion: value => (reducedMotion = value) }
 }
 
 test('rendered mouth survives alternating Idle motions and closes on interruption', () => {
@@ -93,4 +96,63 @@ test('browser voice fallback animates over elapsed time and closes immediately',
   assert.notEqual(first, second)
   actor.setActivity('idle')
   assert.equal(frame().ParamMouthOpenY, 0)
+})
+
+test('acknowledgement is one silent nod, can be cancelled, and does not replay after a background gap', () => {
+  const { actor, frame } = fixture()
+  actor.acknowledge()
+  const peak = frame(325)
+  assert.ok(peak.ParamAngleY < -2)
+  assert.equal(peak.ParamMouthOpenY, 0)
+  assert.equal(frame(325).ParamAngleY, 0)
+  assert.equal(frame(650).ParamAngleY, 0)
+  actor.acknowledge()
+  assert.ok(frame(200).ParamAngleY < 0)
+  actor.clearReaction()
+  assert.equal(frame().ParamAngleY, 0)
+  actor.acknowledge()
+  assert.equal(frame(5_000).ParamAngleY, 0)
+})
+
+test('reduced motion skips and clears acknowledgement without changing audio mouth control', () => {
+  const { actor, frame } = fixture(true)
+  actor.acknowledge()
+  actor.setActivity('speaking')
+  actor.setMouth(0.6, 0)
+  assert.equal(frame(325).ParamAngleY, undefined)
+  assert.equal(frame().ParamMouthOpenY, 0.6)
+  const changing = fixture()
+  changing.actor.acknowledge()
+  changing.frame(100)
+  changing.setReducedMotion(true)
+  assert.equal(changing.frame().ParamAngleY, undefined)
+  changing.setReducedMotion(false)
+  assert.equal(changing.frame().ParamAngleY, 0)
+})
+
+const sampleMotions = ['hiyori_m02', 'hiyori_m05'].map(motion => new URL(`../public/models/hiyori/motion/${motion}.motion3.json`, import.meta.url))
+test('acknowledgement stays within real m02/m05 pitch ranges and restores their baseline', {
+  skip: sampleMotions.every(path => existsSync(path)) ? false : 'Live2D sample assets are installed separately',
+}, () => {
+  for (const path of sampleMotions) {
+    const json = JSON.parse(readFileSync(path, 'utf8'))
+    const segments = json.Curves.find(curve => curve.Id === 'ParamAngleY').Segments
+    const pitches = [segments[1]]
+    for (let index = 2; index < segments.length;) {
+      const width = segments[index] === 1 ? 7 : 3
+      pitches.push(segments[index + width - 1])
+      index += width
+    }
+    assert.ok(pitches.some(pitch => Math.abs(pitch) === 30), 'real Idle should exercise an extreme pitch')
+    for (const pitch of new Set(pitches)) {
+      const { actor, frame } = fixture()
+      actor.acknowledge()
+      const peak = frame(325, 1, 0, pitch)
+      assert.ok(peak.ParamAngleY >= -30 && peak.ParamAngleY <= 30)
+      assert.equal(peak.ParamMouthOpenY, 0)
+      for (let index = 0; index < 10; index++)
+        assert.equal(frame(0, 1, 0, pitch).ParamAngleY, peak.ParamAngleY)
+      assert.equal(frame(325, 1, 0, pitch).ParamAngleY, pitch)
+    }
+  }
 })

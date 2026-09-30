@@ -28,6 +28,9 @@
       <button data-form="-0.32">嘴形 −0.32</button>
       <button data-form="0.32">嘴形 +0.32</button>
       <button data-motion="1">重播张嘴待机动作</button>
+      <button data-motion="2">重播大幅抬头待机动作</button>
+      <button data-reaction="acknowledge">发送回应（轻点头）</button>
+      <button data-reaction="clear">取消回应</button>
     </div>
     <pre id="state">正在加载模型……</pre>
     <p>This content uses sample data owned and copyrighted by Live2D Inc.<br>Hiyori Momose · Illustration: Kani Biimu</p>
@@ -52,10 +55,15 @@
     model.scale.set(scale)
     model.position.set(stage.clientWidth / 2, stage.clientHeight * 1.04)
     const internal = model.internalModel
+    let beforeHeadY = 0
+    internal.on('beforeModelUpdate', () => {
+      beforeHeadY = internal.coreModel.getParameterValueById('ParamAngleY')
+    })
     const actor = attachAvatarPerformance(internal, {
       reducedMotion: () => matchMedia('(prefers-reduced-motion: reduce)').matches,
     })
     let activity = 'idle', delivery = 'neutral', form = 0, motionMouth = 0, frames = 0, failures = 0, overridden = 0
+    let reactions = 0, reactionTime = -Infinity, reactionMaxOffset = 0
     actor.setMouth(0.7, form)
     document.querySelector('#controls').addEventListener('click', ({ target }) => {
       if (!(target instanceof HTMLButtonElement)) return
@@ -63,6 +71,16 @@
       if (target.dataset.delivery) actor.setDelivery(delivery = target.dataset.delivery)
       if (target.dataset.form) actor.setMouth(0.7, form = Number(target.dataset.form))
       if (target.dataset.motion) void model.motion('Idle', Number(target.dataset.motion), 3)
+      if (target.dataset.reaction === 'acknowledge') {
+        reactions++
+        reactionTime = performance.now()
+        reactionMaxOffset = 0
+        actor.acknowledge()
+      }
+      if (target.dataset.reaction === 'clear') {
+        reactionTime = -Infinity
+        actor.clearReaction()
+      }
     })
     internal.on('afterMotionUpdate', () => {
       motionMouth = internal.coreModel.getParameterValueById('ParamMouthOpenY')
@@ -70,9 +88,16 @@
     internal.on('beforeModelUpdate', () => {
       const mouth = internal.coreModel.getParameterValueById('ParamMouthOpenY')
       const renderedForm = internal.coreModel.getParameterValueById('ParamMouthForm')
+      const headY = internal.coreModel.getParameterValueById('ParamAngleY')
+      if (performance.now() - reactionTime < 650)
+        reactionMaxOffset = Math.max(reactionMaxOffset, Math.abs(headY - beforeHeadY))
+      output.dataset.headYBefore = beforeHeadY.toFixed(3)
+      output.dataset.headYAfter = headY.toFixed(3)
+      output.dataset.reactions = String(reactions)
+      output.dataset.reactionMaxOffset = reactionMaxOffset.toFixed(3)
       if (Math.abs(mouth - (activity === 'speaking' ? 0.7 : 0)) > 0.001) failures++
       if (Math.abs(motionMouth - mouth) > 0.1) overridden++
-      if (++frames % 15 === 0) output.textContent = `状态: ${activity} / ${delivery}\n动作写入的开口: ${motionMouth.toFixed(3)}\n实际绘制前开口: ${mouth.toFixed(3)}\n实际绘制前嘴形: ${renderedForm.toFixed(3)}\n检查帧数: ${frames}\n已纠正动作覆盖: ${overridden}\n口型覆盖错误: ${failures}`
+      if (++frames % 15 === 0) output.textContent = `状态: ${activity} / ${delivery}\n动作写入的开口: ${motionMouth.toFixed(3)}\n实际绘制前开口: ${mouth.toFixed(3)}\n实际绘制前嘴形: ${renderedForm.toFixed(3)}\n回应前/后 Y: ${beforeHeadY.toFixed(3)} / ${headY.toFixed(3)}\n回应次数: ${reactions}\n本次最大 Y 偏移: ${reactionMaxOffset.toFixed(3)}\n检查帧数: ${frames}\n已纠正动作覆盖: ${overridden}\n口型覆盖错误: ${failures}`
     })
     addEventListener('pagehide', () => { actor.destroy(); app.destroy(true, { children: true, texture: true, baseTexture: true }) }, { once: true })
   }

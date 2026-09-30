@@ -25,7 +25,7 @@ The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, l
 | --- | --- |
 | Character | Hiyori Momose Live2D model with click interaction, audio-synchronous mouth movement, and smoothly blended attention/thinking/speaking cues |
 | Personality | Editable persona and opt-in user memory; up to 160 recent messages survive refresh in the current tab, subject to byte limits |
-| Turn-taking | Visitors can draft a new message while Hiyori replies, then stop the current reply or speech before sending it |
+| Turn-taking | Interruptible replies, a brief visual acknowledgement when sending, and streaming chat that follows the latest text without pulling visitors away from older messages |
 | Brain | Server-side DeepSeek streaming, with an explicitly labelled local fallback when unconfigured |
 | Voice | Three selectable Kokoro Chinese female presets (`zf_001`–`zf_003`) with slight speed variation; browser speech fallback |
 | Not yet built | Microphone input, learned emotional prosody, phoneme-level lip sync, automatic memory extraction, cross-device sync, and user accounts |
@@ -80,7 +80,7 @@ Generation settings such as `DEEPSEEK_MAX_TOKENS` and `DEEPSEEK_TEMPERATURE` are
 
 ## Persona
 
-Choose **人格** in the chat header to edit:
+Choose **设置 → 角色人格** in the chat header to edit:
 
 - character name;
 - personality tendencies;
@@ -107,7 +107,7 @@ Sentence-level delivery cues are kept with each reply in this tab, so **朗读**
 
 While a reply is being generated, you can type your next thought and choose **停下** to interrupt it. The unfinished assistant reply is removed from the visible and saved conversation; your own message and unsent draft remain. **停下** also stops active audio. This is a text-chat turn-taking control, not microphone barge-in.
 
-Choose **记忆** to manually save a short note about yourself (for example, a preferred name or response style). It remains in this browser's local storage across tabs and restarts until you remove it with **清除记忆** or clear browser data. Each new chat request sends this note to the local server and then to DeepSeek as context; it is not automatically extracted from conversation, shared across devices, or verified as fact. **清空** clears only the current tab's conversation, not the note. Avoid passwords and other sensitive information.
+Choose **设置 → 个人记忆** to manually save a short note about yourself (for example, a preferred name or response style). It remains in this browser's local storage across tabs and restarts until you remove it with **清除记忆** or clear browser data. Each new chat request sends this note to the local server and then to DeepSeek as context; it is not automatically extracted from conversation, shared across devices, or verified as fact. **清空当前对话** clears only the current tab's conversation, not the note. Avoid passwords and other sensitive information.
 
 For a line you want to keep, use **记住这句…** beneath your own message. This only opens an editable memory draft; nothing is persisted until you review it and press **保存记忆**.
 
@@ -132,7 +132,7 @@ The app loads Cubism Core from Live2D's official URL at runtime. Internet access
 
 ## Local voice and lip sync
 
-The demo uses the Apache-2.0 [Kokoro Chinese model](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh) through the [ONNX release](https://huggingface.co/onnx-community/Kokoro-82M-v1.1-zh-ONNX) and `@uzen/kokoro-js`. Choose **声线** in the chat header to audition and save one of three fixed Chinese female presets on this browser. Download all three voice files into the ignored path before building:
+The demo uses the Apache-2.0 [Kokoro Chinese model](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh) through the [ONNX release](https://huggingface.co/onnx-community/Kokoro-82M-v1.1-zh-ONNX) and `@uzen/kokoro-js`. Choose **设置 → 选择声线** to audition and save one of three fixed Chinese female presets on this browser. Download all three voice files into the ignored path before building:
 
 ```bash
 mkdir -p public/kokoro/voices
@@ -151,9 +151,15 @@ The avatar adds restrained attention cues while the input is focused, a thinking
 
 For local render-order checks, run the development server and open `/airi/scripts/avatar-preview.html`. It uses the actual Hiyori model and production performance controller, with fixed open/closed poses, expression controls, an idle-motion replay, and pre-render parameter assertions. It does not use the LLM or play audio and is not part of the production build.
 
+The chat now has a bounded scrolling area rather than stretching the whole page with every exchange. The character and composer stay in view in desktop and tested narrow-window layouts. While at the bottom, streamed text follows automatically; scrolling up suspends following and a **回到最新** button appears when more text arrives. Sending your own message or clearing the chat returns to the latest exchange. Streaming callbacks use a reactive message reference so text updates immediately, independently of audio/player state changes. Settings and connection details are grouped into collapsible controls; voice errors and first-download progress remain visible.
+
+Sending a valid message triggers one restrained 650 ms head response. This is visual feedback for the send action, not evidence that the model understood or agreed with the message. It is not retriggered by speech gaps, expires while the tab is in the background, and clears when stopping or resetting. The added response respects reduced-motion preferences. Short stages use an upper-body camera framing, without altering Hiyori's artwork. Very short windows below the minimum 480 px app height may still need page scrolling; actual phone browser/keyboard behavior has not been established by CSS viewport checks alone.
+
 For a real Kokoro/Live2D playback check, open `/airi/scripts/speech-preview.html` in development. It plays three fixed sentences with bright, soft and curious cues and shows the cues emitted by the actual player; replay the combined WAV to check its audio timeline. This page is also excluded from production builds.
 
 For long-context checks, open `/airi/scripts/continuity-preview.html` in a fresh development tab. Its clearly labelled synthetic fixtures use the actual transcript storage and request packer. Preparing a fixture replaces that tab's conversation; it does not call DeepSeek or touch long-term memory. Follow its link to the demo and send the displayed question to test the real API path (or the local mock). This diagnostic page is excluded from production builds too.
+
+For responsive layout checks, `/airi/scripts/layout-preview.html` embeds the actual demo in 390 × 844 and 390 × 520 CSS viewports and reports page, chat and composer dimensions. It does not emulate a phone, touch input or an operating-system keyboard, and is excluded from production builds. The avatar preview also provides a one-shot response and cancellation check under the real m02/m05 Idle motions.
 
 ## Deployment
 

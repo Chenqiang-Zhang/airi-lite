@@ -8,6 +8,8 @@ import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code'
 import { ChatApiError, fetchProviderStatus, streamChat } from './api'
 import { clearConversation, loadConversation, saveConversation } from './conversation'
 import type { ConversationMessage } from './conversation'
+import { createChatScrollController } from './chat-scroll'
+import { createAssistantMessage } from './chat-turn'
 import type { AvatarActivity } from './avatar-performance'
 import { chooseDelivery } from './delivery'
 import type { Delivery } from './delivery'
@@ -32,6 +34,9 @@ const characterName = computed(() => persona.value.name || 'Hiyori')
 const input = ref('')
 const composerFocused = ref(false)
 const composerInput = ref<HTMLInputElement | null>(null)
+const messagesViewport = ref<HTMLElement | null>(null)
+const chatSettings = ref<HTMLDetailsElement | null>(null)
+const hasUnreadReply = ref(false)
 const isSpeaking = ref(false)
 const isPreparingSpeech = ref(false)
 const activeDelivery = ref<Delivery>('neutral')
@@ -69,6 +74,7 @@ const activeAssistantId = ref<number | null>(null)
 let live2d: Awaited<ReturnType<typeof mountHiyori>> | null = null
 let latestMouth: { opening: number | null, form: number } = { opening: 0, form: 0 }
 let speech: ReturnType<typeof createSpeechController> | null = null
+let chatScroll: ReturnType<typeof createChatScrollController> | null = null
 const restoredMessages = loadConversation()
 const messages = ref<Message[]>(restoredMessages.length
   ? restoredMessages.map((message, index) => ({ ...message, id: index + 1 }))
@@ -97,6 +103,8 @@ const fallbackReplies = [
 ]
 
 onMounted(async () => {
+  if (messagesViewport.value)
+    chatScroll = createChatScrollController(messagesViewport.value, { onUnread: value => (hasUnreadReply.value = value) })
   if (!speechPlayer.value)
     return
   speech = createSpeechController(speechPlayer.value, {
@@ -126,6 +134,7 @@ onMounted(async () => {
   }
 })
 onUnmounted(() => {
+  chatScroll?.destroy()
   activeController.value?.abort()
   speech?.dispose()
   live2d?.destroy()
@@ -135,6 +144,16 @@ function syncAvatarActivity() {
   live2d?.setDelivery(isSpeaking.value ? activeDelivery.value : 'neutral')
 }
 watch([avatarActivity, activeDelivery], syncAvatarActivity)
+watch(() => [messages.value.length, messages.value.at(-1)?.id, messages.value.at(-1)?.text], () => chatScroll?.notifyContentChanged(), { flush: 'post' })
+
+function closeChatSettings() {
+  if (chatSettings.value)
+    chatSettings.value.open = false
+}
+
+function jumpToLatest() {
+  chatScroll?.jumpToLatest()
+}
 
 async function refreshProviderStatus() {
   try {
@@ -204,14 +223,12 @@ async function sendMessage() {
   interactionNotice.value = ''
   const userMessage: Message = { id: Date.now(), role: 'user', text }
   messages.value.push(userMessage)
+  chatScroll?.jumpToLatest()
+  live2d?.acknowledge()
   input.value = ''
   await nextTick()
 
-  const assistantMessage: Message = {
-    id: Date.now() + 1,
-    role: 'assistant',
-    text: '',
-  }
+  const assistantMessage = createAssistantMessage(Date.now() + 1)
   messages.value.push(assistantMessage)
 
   isGenerating.value = true
@@ -295,6 +312,7 @@ async function sendMessage() {
 }
 
 function openPersonaEditor() {
+  closeChatSettings()
   draftPersona.value = { ...persona.value }
   personaOpen.value = true
 }
@@ -319,6 +337,7 @@ function resetPersona() {
 }
 
 function openMemoryEditor() {
+  closeChatSettings()
   draftUserMemory.value = userMemory.value
   memoryDraftWarning.value = ''
   memoryOpen.value = true
@@ -361,6 +380,7 @@ function removeUserMemory() {
 }
 
 function openVoiceEditor() {
+  closeChatSettings()
   draftVoice.value = selectedVoice.value
   voiceOpen.value = true
 }
@@ -383,6 +403,7 @@ function applyVoice() {
 }
 
 function stopCurrentTurn() {
+  live2d?.clearReaction()
   const controller = activeController.value
   if (controller) {
     controller.abort()
@@ -401,6 +422,8 @@ function stopCurrentTurn() {
 }
 
 function resetConversation() {
+  closeChatSettings()
+  live2d?.clearReaction()
   activeController.value?.abort()
   activeController.value = null
   activeAssistantId.value = null
@@ -416,6 +439,7 @@ function resetConversation() {
     text: persona.value.greeting,
   }]
   clearConversation()
+  chatScroll?.jumpToLatest()
 }
 
 function saveAccessCode() {
@@ -456,37 +480,36 @@ function saveAccessCode() {
         <div>
           <p class="eyebrow">CONVERSATION</p>
           <h1>和 {{ characterName }} 聊聊</h1>
-          <span class="provider-badge" :class="providerMode">{{ providerLabel }}</span>
         </div>
         <div class="header-actions">
-          <button class="voice-button" type="button" @click="resetConversation">
-            清空
-          </button>
-          <button class="voice-button" type="button" @click="openPersonaEditor">
-            人格
-          </button>
-          <button class="voice-button" type="button" @click="openMemoryEditor">
-            记忆{{ userMemory ? ' · 已保存' : '' }}
-          </button>
-          <button class="voice-button" type="button" :disabled="isGenerating" @click="openVoiceEditor">
-            声线
-          </button>
           <button v-if="isGenerating || isSpeaking || isPreparingSpeech" class="voice-button stop-button" type="button" @click="stopCurrentTurn">
             停下
           </button>
           <button class="voice-button" type="button" title="朗读最后一条回复" :disabled="isGenerating" @click="replayLastResponse">
             朗读
           </button>
+          <details ref="chatSettings" class="chat-settings" @keydown.esc="closeChatSettings">
+            <summary class="voice-button">设置</summary>
+            <div class="chat-settings-menu" role="group" aria-label="聊天设置">
+              <button type="button" @click="openPersonaEditor">角色人格</button>
+              <button type="button" @click="openMemoryEditor">个人记忆{{ userMemory ? ' · 已保存' : '' }}</button>
+              <button type="button" :disabled="isGenerating" @click="openVoiceEditor">选择声线</button>
+              <button type="button" @click="resetConversation">清空当前对话</button>
+            </div>
+          </details>
         </div>
       </header>
 
-      <div class="messages" aria-live="polite">
+      <div class="chat-history">
+      <div ref="messagesViewport" class="messages" aria-live="polite" tabindex="0" aria-label="聊天记录">
         <article v-for="message in messages" :key="message.id" class="message" :class="[message.role, { generating: isGenerating && message.role === 'assistant' && !message.text }]">
           <span>{{ message.role === 'assistant' ? characterName : 'You' }}{{ message.source === 'fallback' ? ' · 本地演示' : '' }}</span>
           <p v-if="message.text">{{ message.text }}</p>
           <p v-else class="typing"><i /><i /><i /></p>
           <button v-if="message.role === 'user' && message.text" class="remember-button" type="button" aria-label="把这条消息加入记忆草稿" @click="rememberMessage(message)">记住这句…</button>
         </article>
+      </div>
+      <button v-if="hasUnreadReply" class="latest-button" type="button" @click="jumpToLatest">回到最新 ↓</button>
       </div>
 
       <form v-if="accessProtected && !accessCode" class="access-form" @submit.prevent="saveAccessCode">
@@ -504,11 +527,18 @@ function saveAccessCode() {
         </button>
       </form>
 
-      <p class="notice" :class="{ error: lastError }">
+      <p v-if="lastError || interactionNotice || providerMode !== 'deepseek'" class="notice" :class="{ error: lastError }">
         {{ lastError || interactionNotice || (providerMode === 'deepseek' ? '回复由 DeepSeek 生成，完整句子会逐步朗读；可点击角色互动。' : '尚未配置 DeepSeek Key，当前会使用明确标注的本地回复。') }}
       </p>
-      <p class="memory-notice">当前标签页保留最近 160 条对话；长文会优先保留最近完整回合。「清空」不删你主动保存的记忆。</p>
-      <p class="voice-notice" role="status">{{ voiceProblem || voiceLabel }} · <a href="https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh" target="_blank" rel="noopener noreferrer">开源模型</a></p>
+      <p v-if="voiceProblem || voiceState === 'loading'" class="voice-notice" role="status">{{ voiceProblem || voiceLabel }}</p>
+      <details class="connection-info">
+        <summary>连接与说明 · {{ providerMode === 'deepseek' ? providerModel : providerLabel }}</summary>
+        <div>
+          <p>{{ providerLabel }} · 回复由模型生成，完整句子会逐步朗读；可点击角色互动。</p>
+          <p>当前标签页保留最近 160 条对话；长文优先保留最近完整回合。「清空」不删你主动保存的记忆。</p>
+          <p>{{ voiceLabel }} · <a href="https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh" target="_blank" rel="noopener noreferrer">开源模型</a></p>
+        </div>
+      </details>
       <audio ref="speechPlayer" class="speech-player" :class="{ visible: audioAvailable }" controls preload="none" aria-label="日和语音播放器" />
     </section>
 

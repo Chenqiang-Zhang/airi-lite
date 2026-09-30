@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>聊天布局检查 · AIRI Lite</title>
+<style>
+  body { margin: 20px; color: #41342c; background: #f5eee9; font: 14px/1.5 system-ui; }
+  button { margin-right: 8px; padding: 8px 12px; }
+  main { display: flex; align-items: flex-start; gap: 20px; }
+  iframe { flex: none; width: 390px; height: 844px; border: 1px solid #cdbcb1; border-radius: 12px; }
+  pre { white-space: pre-wrap; max-width: 300px; }
+</style>
+<h1>实际页面的窄窗口检查</h1>
+<p>开发检查页：iframe 使用真实 demo 和 CSS 视口；不模拟手机浏览器、触屏或系统键盘，也不自动调用模型。</p>
+<p><button data-height="844">390 × 844</button><button data-height="520">390 × 520（短窗口）</button></p>
+<main>
+  <iframe src="../" title="窄窗口中的 AIRI Lite" allow="autoplay"></iframe>
+  <pre id="metrics">正在读取布局……</pre>
+</main>
+<script type="module">
+  const frame = document.querySelector('iframe')
+  const metrics = document.querySelector('#metrics')
+  document.querySelectorAll('[data-height]').forEach(button => button.onclick = () => { frame.style.height = `${button.dataset.height}px` })
+  const timer = setInterval(() => {
+    const doc = frame.contentDocument
+    const log = doc?.querySelector('.messages')
+    const composer = doc?.querySelector('.composer')
+    if (!log || !composer) return
+    const root = doc.documentElement
+    const box = composer.getBoundingClientRect()
+    metrics.textContent = `实际 CSS 视口：${root.clientWidth} × ${root.clientHeight}\n页面高度：${root.scrollHeight}\n页面宽度：${root.scrollWidth}\n聊天区高度：${log.clientHeight}\n输入区 bottom：${box.bottom.toFixed(1)}\n输入区在视口内：${box.bottom <= root.clientHeight}\n到最新消息距离：${(log.scrollHeight - log.clientHeight - log.scrollTop).toFixed(1)}`
+  }, 250)
+  addEventListener('pagehide', () => clearInterval(timer), { once: true })
+</script>
+</html>

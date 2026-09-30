@@ -28,10 +28,13 @@ export async function mountHiyori(container: HTMLElement) {
     const layout = () => {
       const width = container.clientWidth
       const height = container.clientHeight
-      const scale = Math.min(width * 0.9 / naturalWidth, height * 0.94 / naturalHeight)
+      // Short phone stages frame the upper body instead of making her face tiny.
+      // This crops the camera view; it does not change Hiyori's artwork.
+      const portrait = height < 420 && width > height * 1.1
+      const scale = Math.min(width * 0.9 / naturalWidth, height * (portrait ? 1.8 : 0.94) / naturalHeight)
       model.scale.set(scale)
       model.x = width / 2
-      model.y = height * 1.04
+      model.y = height * (portrait ? 1.66 : 1.04)
     }
     const observer = new ResizeObserver(layout)
     observer.observe(container)
@@ -45,6 +48,8 @@ export async function mountHiyori(container: HTMLElement) {
     })
 
     return {
+      acknowledge: actor.acknowledge,
+      clearReaction: actor.clearReaction,
       setActivity: actor.setActivity,
       setMouth: actor.setMouth,
       setDelivery: actor.setDelivery,
