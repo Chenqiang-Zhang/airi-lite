@@ -341,6 +341,22 @@ h1 {
   background: #82665e;
 }
 
+.remember-button {
+  display: block;
+  margin: 5px 0 0 auto;
+  padding: 3px 6px;
+  border: 0;
+  color: #9c8b84;
+  background: transparent;
+  font-size: 10px;
+}
+
+.remember-button:hover,
+.remember-button:focus-visible {
+  color: #82665e;
+  text-decoration: underline;
+}
+
 .composer {
   display: flex;
   padding: 7px;
@@ -557,6 +573,12 @@ h1 {
   color: #9b8a82;
   font-size: 11px;
   line-height: 1.6;
+}
+
+.memory-warning {
+  margin: -12px 0 18px;
+  color: #ac574f;
+  font-size: 12px;
 }
 
 .memory-actions {

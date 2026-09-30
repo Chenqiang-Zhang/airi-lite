@@ -10,7 +10,7 @@ import type { ConversationMessage } from './conversation'
 import { chooseDelivery } from './delivery'
 import type { Delivery } from './delivery'
 import { mountHiyori } from './live2d'
-import { clearUserMemory, loadUserMemory, saveUserMemory, USER_MEMORY_LIMIT } from './memory'
+import { clearUserMemory, loadUserMemory, proposeUserMemory, saveUserMemory, USER_MEMORY_LIMIT } from './memory'
 import { DEFAULT_PERSONA, loadPersona, savePersona } from './persona'
 import { createSpeechController } from './speech'
 import type { VoiceState } from './speech'
@@ -36,6 +36,7 @@ const personaOpen = ref(false)
 const memoryOpen = ref(false)
 const userMemory = ref(loadUserMemory())
 const draftUserMemory = ref(userMemory.value)
+const memoryDraftWarning = ref('')
 const providerMode = ref<ProviderMode>('checking')
 const providerModel = ref('DeepSeek')
 const lastError = ref('')
@@ -267,12 +268,23 @@ function resetPersona() {
 
 function openMemoryEditor() {
   draftUserMemory.value = userMemory.value
+  memoryDraftWarning.value = ''
+  memoryOpen.value = true
+}
+
+function rememberMessage(message: Message) {
+  draftUserMemory.value = proposeUserMemory(userMemory.value, message.text)
+  memoryDraftWarning.value = draftUserMemory.value === userMemory.value
+    && !userMemory.value.split('\n').some(line => line.trim() === message.text.trim())
+    ? '这句太长或记忆空间不足，请先精简草稿。'
+    : ''
   memoryOpen.value = true
 }
 
 function applyUserMemory() {
   try {
     userMemory.value = saveUserMemory(draftUserMemory.value)
+    memoryDraftWarning.value = ''
     lastError.value = ''
     memoryOpen.value = false
   }
@@ -372,6 +384,7 @@ function saveAccessCode() {
           <span>{{ message.role === 'assistant' ? characterName : 'You' }}{{ message.source === 'fallback' ? ' · 本地演示' : '' }}</span>
           <p v-if="message.text">{{ message.text }}</p>
           <p v-else class="typing"><i /><i /><i /></p>
+          <button v-if="message.role === 'user' && message.text" class="remember-button" type="button" aria-label="把这条消息加入记忆草稿" @click="rememberMessage(message)">记住这句…</button>
         </article>
       </div>
 
@@ -458,11 +471,12 @@ function saveAccessCode() {
           <button class="close-button" type="button" aria-label="关闭" @click="memoryOpen = false">×</button>
         </div>
 
-        <p class="persona-intro">只记录你主动写下的称呼、偏好或约定。保存在当前浏览器；每次聊天都会随消息发送给 DeepSeek。请不要填写密码或其他敏感信息。</p>
+        <p class="persona-intro">只记录你主动写下或选择的称呼、偏好或约定。请先检查草稿，点击「保存记忆」后才会存入当前浏览器，并随之后的聊天发送给 DeepSeek。请不要填写密码或其他敏感信息。</p>
+        <p v-if="memoryDraftWarning" class="memory-warning" role="status">{{ memoryDraftWarning }}</p>
         <form class="persona-form" @submit.prevent="applyUserMemory">
           <label>
             <span>希望日和记住什么？</span>
-            <textarea v-model="draftUserMemory" rows="8" :maxlength="USER_MEMORY_LIMIT" placeholder="例如：你可以叫我小陈。我喜欢简短一点的回复，最近在学日语。" />
+            <textarea v-model="draftUserMemory" rows="8" :maxlength="USER_MEMORY_LIMIT" placeholder="例如：你可以叫我小陈。我喜欢简短一点的回复，最近在学日语。" @input="memoryDraftWarning = ''" />
           </label>
           <p class="memory-hint">只在相关时参考，日和不会每轮主动提起。{{ draftUserMemory.length }}/{{ USER_MEMORY_LIMIT }}</p>
           <div class="persona-actions memory-actions">

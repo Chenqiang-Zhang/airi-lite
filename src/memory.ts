@@ -32,3 +32,15 @@ export function saveUserMemory(value: string, storage: StorageLike = browserStor
 export function clearUserMemory(storage: StorageLike = browserStorage()): void {
   storage.removeItem(USER_MEMORY_STORAGE_KEY)
 }
+
+// A chat line only becomes persistent after the visitor reviews and saves it.
+export function proposeUserMemory(current: string, message: string): string {
+  const saved = current.trim().slice(0, USER_MEMORY_LIMIT)
+  const candidate = message.trim()
+  if (!candidate || saved.split('\n').some(line => line.trim() === candidate))
+    return saved
+
+  const separator = saved ? '\n' : ''
+  const proposal = `${saved}${separator}${candidate}`
+  return proposal.length <= USER_MEMORY_LIMIT ? proposal : saved
+}
