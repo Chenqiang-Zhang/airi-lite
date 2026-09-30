@@ -46,6 +46,7 @@ const memoryDraftWarning = ref('')
 const providerMode = ref<ProviderMode>('checking')
 const providerModel = ref('DeepSeek')
 const lastError = ref('')
+const interactionNotice = ref('')
 const modelStage = ref<HTMLElement | null>(null)
 const modelStatus = ref('正在载入 Live2D 角色…')
 const accessProtected = ref(false)
@@ -57,6 +58,7 @@ if (savedAccessCode && !accessCode.value) {
   lastError.value = INVALID_ACCESS_CODE_MESSAGE
 }
 const activeController = ref<AbortController | null>(null)
+const activeAssistantId = ref<number | null>(null)
 let live2d: Awaited<ReturnType<typeof mountHiyori>> | null = null
 let speech: ReturnType<typeof createSpeechController> | null = null
 const restoredMessages = loadConversation()
@@ -164,6 +166,7 @@ async function sendMessage() {
   void speech?.prepare().catch(() => {})
 
   lastError.value = ''
+  interactionNotice.value = ''
   const userMessage: Message = { id: Date.now(), role: 'user', text }
   messages.value.push(userMessage)
   input.value = ''
@@ -183,6 +186,7 @@ async function sendMessage() {
   isGenerating.value = true
   const controller = new AbortController()
   activeController.value = controller
+  activeAssistantId.value = assistantMessage.id
   const speechStream: { current: ReturnType<ReturnType<typeof createSpeechController>['beginStream']> | null } = { current: null }
   let chatSucceeded = false
 
@@ -194,12 +198,16 @@ async function sendMessage() {
       accessCode: accessCode.value,
       signal: controller.signal,
       onDelivery: (delivery) => {
+        if (controller.signal.aborted || activeController.value !== controller)
+          return
         assistantMessage.delivery = delivery
         activeDelivery.value = delivery
         if (isSpeaking.value)
           live2d?.setDelivery(delivery)
       },
       onDelta: (chunk) => {
+        if (controller.signal.aborted || activeController.value !== controller)
+          return
         assistantMessage.text += chunk
         assistantMessage.source = 'deepseek'
         if (!speechStream.current && speech) {
@@ -243,8 +251,11 @@ async function sendMessage() {
     if (!chatSucceeded)
       speechStream.current?.cancel()
     const aborted = controller.signal.aborted
-    isGenerating.value = false
-    activeController.value = null
+    if (activeController.value === controller) {
+      isGenerating.value = false
+      activeController.value = null
+      activeAssistantId.value = null
+    }
     if (!aborted && assistantMessage.text)
       assistantMessage.delivery ??= chooseDelivery(text, assistantMessage.text)
     if (!aborted)
@@ -341,13 +352,33 @@ function applyVoice() {
   }
 }
 
+function stopCurrentTurn() {
+  const controller = activeController.value
+  if (controller) {
+    controller.abort()
+    activeController.value = null
+    isGenerating.value = false
+    if (activeAssistantId.value !== null)
+      messages.value = messages.value.filter(message => message.id !== activeAssistantId.value)
+    activeAssistantId.value = null
+    saveConversation(messages.value)
+  }
+  speech?.cancel()
+  voiceProblem.value = ''
+  lastError.value = ''
+  interactionNotice.value = '好，我先停下。你接着说。'
+}
+
 function resetConversation() {
   activeController.value?.abort()
+  activeController.value = null
+  activeAssistantId.value = null
   speech?.cancel()
   voiceProblem.value = ''
   isGenerating.value = false
   isSpeaking.value = false
   lastError.value = ''
+  interactionNotice.value = ''
   messages.value = [{
     id: Date.now(),
     role: 'assistant',
@@ -409,7 +440,10 @@ function saveAccessCode() {
           <button class="voice-button" type="button" :disabled="isGenerating" @click="openVoiceEditor">
             声线
           </button>
-          <button class="voice-button" type="button" title="朗读最后一条回复" @click="replayLastResponse">
+          <button v-if="isGenerating || isSpeaking || voiceProblem === '正在生成语音…'" class="voice-button stop-button" type="button" @click="stopCurrentTurn">
+            停下
+          </button>
+          <button class="voice-button" type="button" title="朗读最后一条回复" :disabled="isGenerating" @click="replayLastResponse">
             朗读
           </button>
         </div>
@@ -433,14 +467,14 @@ function saveAccessCode() {
       </form>
 
       <form class="composer" @submit.prevent="sendMessage">
-        <input v-model="input" :disabled="isGenerating || (accessProtected && !accessCode)" :aria-label="`发送给 ${characterName} 的消息`" autocomplete="off" placeholder="输入一段文字……">
+        <input v-model="input" :disabled="accessProtected && !accessCode" :aria-label="`发送给 ${characterName} 的消息`" autocomplete="off" :placeholder="isGenerating ? '可以先写下一句，停下后发送……' : '输入一段文字……'">
         <button type="submit" :disabled="isGenerating || !input.trim() || (accessProtected && !accessCode)">
           {{ isGenerating ? '生成中' : '发送' }}
         </button>
       </form>
 
       <p class="notice" :class="{ error: lastError }">
-        {{ lastError || (providerMode === 'deepseek' ? '回复由 DeepSeek 生成，完整句子会逐步朗读；可点击角色互动。' : '尚未配置 DeepSeek Key，当前会使用明确标注的本地回复。') }}
+        {{ lastError || interactionNotice || (providerMode === 'deepseek' ? '回复由 DeepSeek 生成，完整句子会逐步朗读；可点击角色互动。' : '尚未配置 DeepSeek Key，当前会使用明确标注的本地回复。') }}
       </p>
       <p class="memory-notice">对话只在当前标签页保留；「清空」只删对话，不删你主动保存的记忆。</p>
       <p class="voice-notice" role="status">{{ voiceProblem || voiceLabel }} · <a href="https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh" target="_blank" rel="noopener noreferrer">开源模型</a></p>

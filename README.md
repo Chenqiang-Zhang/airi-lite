@@ -25,6 +25,7 @@ The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, l
 | --- | --- |
 | Character | Hiyori Momose Live2D model with click interaction, basic mouth movement, and subtle delivery cues |
 | Personality | Editable persona and opt-in user memory stored in the visitor's browser; recent chat survives refresh in the current tab |
+| Turn-taking | Visitors can draft a new message while Hiyori replies, then stop the current reply or speech before sending it |
 | Brain | Server-side DeepSeek streaming, with an explicitly labelled local fallback when unconfigured |
 | Voice | Three selectable Kokoro Chinese female presets (`zf_001`–`zf_003`) with slight speed variation; browser speech fallback |
 | Not yet built | Microphone input, learned emotional prosody, phoneme-level lip sync, automatic memory extraction, cross-device sync, and user accounts |
@@ -94,6 +95,8 @@ Persona settings are stored in the browser's local storage. They are sent to the
 The default Hiyori persona favors concrete reactions over routine closing questions. The server also reminds the model that it cannot see browser tabs, the screen, surroundings, or live outside information, so a playful reply should not invent sensory evidence. Existing user-edited character cards are preserved when the default changes.
 
 Recent conversation is temporarily kept in this browser tab's session storage so refreshing the page does not make Hiyori forget the current exchange. **清空** removes that stored transcript. The transcript is not shared across devices or stored as long-term memory; its current context is still sent to DeepSeek when generating a reply.
+
+While a reply is being generated, you can type your next thought and choose **停下** to interrupt it. The unfinished assistant reply is removed from the visible and saved conversation; your own message and unsent draft remain. **停下** also stops active audio. This is a text-chat turn-taking control, not microphone barge-in.
 
 Choose **记忆** to manually save a short note about yourself (for example, a preferred name or response style). It remains in this browser's local storage across tabs and restarts until you remove it with **清除记忆** or clear browser data. Each new chat request sends this note to the local server and then to DeepSeek as context; it is not automatically extracted from conversation, shared across devices, or verified as fact. **清空** clears only the current tab's conversation, not the note. Avoid passwords and other sensitive information.
 

@@ -265,6 +265,12 @@ h1 {
   opacity: 0.45;
 }
 
+.stop-button {
+  border-color: #a98075;
+  color: #765047;
+  background: #f6eae5;
+}
+
 .provider-badge {
   display: inline-flex;
   align-items: center;
