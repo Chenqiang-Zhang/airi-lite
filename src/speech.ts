@@ -1,8 +1,10 @@
 import type { KokoroTTS, TextSplitterStream } from '@uzen/kokoro-js'
 import type { Delivery } from './delivery'
+import type { VoiceId } from './voice'
 
 import { chooseDelivery, deliverySpeed } from './delivery'
 import { SentenceBuffer } from './sentence-buffer'
+import { DEFAULT_VOICE } from './voice'
 
 export type VoiceState = 'idle' | 'loading' | 'ready' | 'fallback'
 
@@ -22,7 +24,6 @@ interface PlaybackRun {
 }
 
 const MODEL_ID = 'onnx-community/Kokoro-82M-v1.1-zh-ONNX'
-const VOICE_ID = 'zf_001'
 const LETTERS: Record<string, string> = {
   A: '诶', B: '比', C: '西', D: '迪', E: '伊', F: '艾弗', G: '吉',
   H: '艾尺', I: '艾', J: '杰', K: '凯', L: '艾勒', M: '艾姆',
@@ -311,7 +312,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     }
   }
 
-  async function speak(text: string, delivery: Delivery = 'neutral') {
+  async function speak(text: string, delivery: Delivery = 'neutral', voice: VoiceId = DEFAULT_VOICE) {
     cancel()
     if (!text.trim())
       return
@@ -321,7 +322,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       const model = await prepare()
       if (token !== run)
         return
-      await consumeSegments(model.stream(forChineseVoice(text), { voice: VOICE_ID, speed: deliverySpeed(delivery), maxChunkLength: 130 }), token)
+      await consumeSegments(model.stream(forChineseVoice(text), { voice, speed: deliverySpeed(delivery), maxChunkLength: 130 }), token)
     }
     catch (error) {
       if (token !== run)
@@ -331,7 +332,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     }
   }
 
-  function beginStream(userText: string, onDelivery?: (delivery: Delivery) => void, preferredDelivery?: Delivery) {
+  function beginStream(userText: string, onDelivery?: (delivery: Delivery) => void, preferredDelivery?: Delivery, voice: VoiceId = DEFAULT_VOICE) {
     cancel()
     const token = run
     const buffer = new SentenceBuffer()
@@ -405,7 +406,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         pendingSentences.length = 0
         if (complete)
           splitter.close()
-        await consumeSegments(model.stream(splitter, { voice: VOICE_ID, speed: deliverySpeed(delivery ?? 'neutral'), maxChunkLength: 130 }), token)
+        await consumeSegments(model.stream(splitter, { voice, speed: deliverySpeed(delivery ?? 'neutral'), maxChunkLength: 130 }), token)
       }
       catch (error) {
         if (token !== run)

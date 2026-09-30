@@ -8,7 +8,7 @@ A small, self-hosted Live2D companion inspired by [Project AIRI](https://github.
 
 <sub>Screenshot of the live demo. This content uses sample data owned and copyrighted by Live2D Inc. Hiyori Momose was illustrated by Kani Biimu. The sample is used under [Live2D's terms](https://www.live2d.com/eula/live2d-sample-model-terms_en.html); the application itself is independently authored. Model files are not included in this repository.</sub>
 
-> 中文速览：这是一个精简的 AI 角色 demo，包含 Live2D 形象、可编辑人格、DeepSeek 文字对话、固定中文声线及随音量变化的口型。暂不支持麦克风输入，线上聊天需要体验码。
+> 中文速览：这是一个精简的 AI 角色 demo，包含 Live2D 形象、可编辑人格、DeepSeek 文字对话、可选的固定中文声线及随音量变化的口型。暂不支持麦克风输入，线上聊天需要体验码。
 
 The first milestone is intentionally narrow:
 
@@ -17,7 +17,7 @@ The first milestone is intentionally narrow:
 - reply with a configurable personality;
 - read replies aloud without microphone access.
 
-The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, lets each browser edit a basic persona, and speaks completed sentences with a fixed local Kokoro Chinese voice while later text is still arriving. Audio amplitude drives the Live2D mouth. Generated speech chunks can play before the whole reply finishes synthesizing, and the complete WAV remains available for replay afterward. A small delivery layer makes restrained changes to speech speed and facial parameters for short replies; this is not an expressive voice model. If local inference is unavailable, it falls back to browser text-to-speech. There is no microphone or speech recognition. The Hiyori artwork and this demo's configurable persona are separate from Project AIRI.
+The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, lets each browser edit a basic persona, and speaks completed sentences with one of three selectable fixed local Kokoro Chinese voices while later text is still arriving. Audio amplitude drives the Live2D mouth. Generated speech chunks can play before the whole reply finishes synthesizing, and the complete WAV remains available for replay afterward. A small delivery layer makes restrained changes to speech speed and facial parameters for short replies; this is not an expressive voice model. If local inference is unavailable, it falls back to browser text-to-speech. There is no microphone or speech recognition. The Hiyori artwork and this demo's configurable persona are separate from Project AIRI.
 
 ## What works today
 
@@ -26,7 +26,7 @@ The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, l
 | Character | Hiyori Momose Live2D model with click interaction, basic mouth movement, and subtle delivery cues |
 | Personality | Editable persona and opt-in user memory stored in the visitor's browser; recent chat survives refresh in the current tab |
 | Brain | Server-side DeepSeek streaming, with an explicitly labelled local fallback when unconfigured |
-| Voice | Fixed `zf_001` Kokoro Chinese voice with slight speed variation; browser speech fallback |
+| Voice | Three selectable Kokoro Chinese female presets (`zf_001`–`zf_003`) with slight speed variation; browser speech fallback |
 | Not yet built | Microphone input, learned emotional prosody, phoneme-level lip sync, automatic memory extraction, cross-device sync, and user accounts |
 
 ## How it fits together
@@ -42,14 +42,14 @@ flowchart LR
   Player -->|audio level| L2D[Live2D mouth]
 ```
 
-The DeepSeek key stays on the server. Kokoro inference runs on the visitor's device; the VPS does not generate the audio. Speech can start when the first complete sentence arrives, but this is **not** a low-latency full-duplex voice chat. DeepSeek can choose a hidden `neutral`/`soft`/`bright`/`curious` delivery cue for each reply. The server removes it from visible text, then the browser uses it for restrained speed and Live2D face changes; untagged replies retain the local heuristic. This is still one fixed TTS voice, not trained expressive speech.
+The DeepSeek key stays on the server. Kokoro inference runs on the visitor's device; the VPS does not generate the audio. Speech can start when the first complete sentence arrives, but this is **not** a low-latency full-duplex voice chat. DeepSeek can choose a hidden `neutral`/`soft`/`bright`/`curious` delivery cue for each reply. The server removes it from visible text, then the browser uses it for restrained speed and Live2D face changes; untagged replies retain the local heuristic. Each chosen preset remains a fixed TTS voice, not trained expressive speech.
 
 ## Run locally
 
 Requirements: Node.js 24+ and pnpm 10+.
 
 1. Install dependencies with `pnpm install`.
-2. Add the [Hiyori model](#hiyori-momose-model) and [Kokoro voice file](#local-voice-and-lip-sync); neither is committed to Git.
+2. Add the [Hiyori model](#hiyori-momose-model) and [Kokoro voice files](#local-voice-and-lip-sync); neither is committed to Git.
 3. Optionally configure a [DeepSeek API key](#deepseek-setup) for real replies.
 4. Start the app with `pnpm dev` and open <http://localhost:5173/airi/>.
 
@@ -120,12 +120,16 @@ The app loads Cubism Core from Live2D's official URL at runtime. Internet access
 
 ## Local voice and lip sync
 
-The demo uses the Apache-2.0 [Kokoro Chinese model](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh) through the [ONNX release](https://huggingface.co/onnx-community/Kokoro-82M-v1.1-zh-ONNX) and `@uzen/kokoro-js`. It uses the fixed `zf_001` voice. Download its voice data into the ignored path before building:
+The demo uses the Apache-2.0 [Kokoro Chinese model](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh) through the [ONNX release](https://huggingface.co/onnx-community/Kokoro-82M-v1.1-zh-ONNX) and `@uzen/kokoro-js`. Choose **声线** in the chat header to audition and save one of three fixed Chinese female presets on this browser. Download all three voice files into the ignored path before building:
 
 ```bash
 mkdir -p public/kokoro/voices
 curl -fL https://huggingface.co/onnx-community/Kokoro-82M-v1.1-zh-ONNX/resolve/main/voices/zf_001.bin -o public/kokoro/voices/zf_001.bin
+curl -fL https://huggingface.co/onnx-community/Kokoro-82M-v1.1-zh-ONNX/resolve/main/voices/zf_002.bin -o public/kokoro/voices/zf_002.bin
+curl -fL https://huggingface.co/onnx-community/Kokoro-82M-v1.1-zh-ONNX/resolve/main/voices/zf_003.bin -o public/kokoro/voices/zf_003.bin
 ```
+
+These are existing presets, not a custom-trained or cloned voice. Choosing one does not add learned emotional prosody.
 
 The ONNX model is **not** bundled in the repository or hosted on this VPS. On first use, each visitor's browser downloads the roughly 326 MB fp32 model directly from Hugging Face and caches it locally. The app tries WebGPU first and then WASM. Browser tests found that q4f16/WebGPU could return an all-zero waveform and q8/WASM could return invalid samples; fp32/WebGPU produced a non-silent WAV. This does not add a paid TTS API or VPS inference load, but it requires model-download access and a reasonably capable device. The app rejects silent output instead of presenting it as successful speech. Each complete sentence can start synthesizing while DeepSeek streams later text; raw token boundaries are buffered so names such as `DeepSeek` are normalized intact. During long replies the player progress resets for each generated chunk; after playback it holds the combined WAV for replay. If automatic playback is blocked, use the visible audio player's play button. The browser build currently fails on some English spans, so common terms are mapped to Chinese and remaining Latin words are spelled out on the same fixed voice. If model loading or synthesis fails before audio starts, the app attempts the browser's built-in voice and reports the fallback. Only Kokoro playback uses measured audio levels for the mouth; browser fallback retains the simpler speaking animation. DeepSeek chat still uses its paid API.
 

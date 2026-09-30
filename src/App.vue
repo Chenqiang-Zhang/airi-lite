@@ -14,6 +14,8 @@ import { clearUserMemory, loadUserMemory, proposeUserMemory, saveUserMemory, USE
 import { DEFAULT_PERSONA, loadPersona, savePersona } from './persona'
 import { createSpeechController } from './speech'
 import type { VoiceState } from './speech'
+import { loadVoice, saveVoice, VOICE_OPTIONS } from './voice'
+import type { VoiceId } from './voice'
 
 interface Message extends ConversationMessage {
   id: number
@@ -34,6 +36,10 @@ const speechPlayer = ref<HTMLAudioElement | null>(null)
 const isGenerating = ref(false)
 const personaOpen = ref(false)
 const memoryOpen = ref(false)
+const voiceOpen = ref(false)
+const selectedVoice = ref<VoiceId>(loadVoice())
+const draftVoice = ref<VoiceId>(selectedVoice.value)
+const activeVoice = ref<VoiceId>(selectedVoice.value)
 const userMemory = ref(loadUserMemory())
 const draftUserMemory = ref(userMemory.value)
 const memoryDraftWarning = ref('')
@@ -64,10 +70,13 @@ const providerLabel = computed(() => ({
   fallback: '本地降级模式',
 })[providerMode.value])
 
+const selectedVoiceLabel = computed(() => VOICE_OPTIONS.find(option => option.id === selectedVoice.value)?.label ?? '声线 A')
+const activeVoiceLabel = computed(() => VOICE_OPTIONS.find(option => option.id === activeVoice.value)?.label ?? selectedVoiceLabel.value)
+
 const voiceLabel = computed(() => ({
   idle: '免费本地声线 · 首次需下载约 330 MB',
   loading: '正在载入免费本地声线，首次需下载约 330 MB…',
-  ready: 'Kokoro 固定中文声线 · 音频驱动口型',
+  ready: `Kokoro ${isSpeaking.value ? activeVoiceLabel.value : selectedVoiceLabel.value} · 音频驱动口型`,
   fallback: '当前设备使用浏览器朗读 · 音频驱动口型暂不可用',
 })[voiceState.value])
 
@@ -123,7 +132,8 @@ async function refreshProviderStatus() {
 
 function speak(text: string, delivery: Delivery = 'neutral') {
   activeDelivery.value = delivery
-  void speech?.speak(text, delivery)
+  activeVoice.value = selectedVoice.value
+  void speech?.speak(text, delivery, selectedVoice.value)
 }
 
 function replayLastResponse() {
@@ -193,12 +203,13 @@ async function sendMessage() {
         assistantMessage.text += chunk
         assistantMessage.source = 'deepseek'
         if (!speechStream.current && speech) {
+          activeVoice.value = selectedVoice.value
           speechStream.current = speech.beginStream(text, (delivery) => {
             assistantMessage.delivery = delivery
             activeDelivery.value = delivery
             if (isSpeaking.value)
               live2d?.setDelivery(delivery)
-          }, assistantMessage.delivery)
+          }, assistantMessage.delivery, selectedVoice.value)
         }
         speechStream.current?.push(chunk)
       },
@@ -308,6 +319,28 @@ function removeUserMemory() {
   }
 }
 
+function openVoiceEditor() {
+  draftVoice.value = selectedVoice.value
+  voiceOpen.value = true
+}
+
+function previewVoice(voice: VoiceId) {
+  activeDelivery.value = 'neutral'
+  activeVoice.value = voice
+  void speech?.speak('嗨，我是日和。今天想听你说一件小事，也可以让我先讲个奇怪的想法。', 'neutral', voice)
+}
+
+function applyVoice() {
+  try {
+    selectedVoice.value = saveVoice(draftVoice.value)
+    lastError.value = ''
+    voiceOpen.value = false
+  }
+  catch {
+    lastError.value = '无法保存声线，请检查浏览器是否允许本地存储。'
+  }
+}
+
 function resetConversation() {
   activeController.value?.abort()
   speech?.cancel()
@@ -372,6 +405,9 @@ function saveAccessCode() {
           </button>
           <button class="voice-button" type="button" @click="openMemoryEditor">
             记忆{{ userMemory ? ' · 已保存' : '' }}
+          </button>
+          <button class="voice-button" type="button" :disabled="isGenerating" @click="openVoiceEditor">
+            声线
           </button>
           <button class="voice-button" type="button" title="朗读最后一条回复" @click="replayLastResponse">
             朗读
@@ -482,6 +518,33 @@ function saveAccessCode() {
           <div class="persona-actions memory-actions">
             <button class="secondary-button" type="button" :disabled="!userMemory" @click="removeUserMemory">清除记忆</button>
             <button class="primary-button" type="submit">保存记忆</button>
+          </div>
+        </form>
+      </aside>
+    </div>
+
+    <div v-if="voiceOpen" class="persona-backdrop" @click.self="voiceOpen = false">
+      <aside class="persona-panel voice-panel" aria-label="声线设置">
+        <div class="persona-heading">
+          <div>
+            <p class="eyebrow">VOICE</p>
+            <h2>选择日和的声线</h2>
+          </div>
+          <button class="close-button" type="button" aria-label="关闭" @click="voiceOpen = false">×</button>
+        </div>
+
+        <p class="persona-intro">三种免费 Kokoro 中文女声使用同一个模型。用同一句话试听，再固定你喜欢的声线；这不是训练或克隆出的专属声音。试听只在当前浏览器播放，不会发送给 DeepSeek。</p>
+        <form class="persona-form" @submit.prevent="applyVoice">
+          <div v-for="option in VOICE_OPTIONS" :key="option.id" class="voice-choice">
+            <label>
+              <input v-model="draftVoice" type="radio" name="hiyori-voice" :value="option.id">
+              <span><strong>{{ option.label }}</strong><small>{{ option.description }}</small></span>
+            </label>
+            <button class="secondary-button" type="button" :aria-label="`试听${option.label}`" @click="previewVoice(option.id)">试听</button>
+          </div>
+          <p class="memory-hint" role="status">{{ voiceProblem || voiceLabel }}</p>
+          <div class="persona-actions">
+            <button class="primary-button" type="submit">设为日和声线</button>
           </div>
         </form>
       </aside>
