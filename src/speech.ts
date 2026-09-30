@@ -1,18 +1,20 @@
-import type { KokoroTTS, TextSplitterStream } from '@uzen/kokoro-js'
+import type { KokoroTTS } from '@uzen/kokoro-js'
 import type { Delivery } from './delivery'
 import type { VoiceId } from './voice'
 
-import { chooseDelivery, deliverySpeed } from './delivery'
-import { mouthFrames } from './mouth'
+import { deliverySpeed } from './delivery.ts'
+import { mouthFrames } from './mouth.ts'
 import type { MouthFrame } from './mouth'
-import { SentenceBuffer } from './sentence-buffer'
-import { DEFAULT_VOICE } from './voice'
+import { deliveryAtTime, replySentenceStream, SpeechSentenceStream } from './speech-sentences.ts'
+import type { DeliveryCue, PlaybackCue } from './speech-sentences'
+import { DEFAULT_VOICE } from './voice.ts'
 
 export type VoiceState = 'idle' | 'loading' | 'ready' | 'fallback'
 
 interface AudioClip {
   samples: Float32Array
   sampleRate: number
+  delivery: Delivery
 }
 
 interface PlaybackRun {
@@ -23,6 +25,7 @@ interface PlaybackRun {
   total: number
   synthesisFinished: boolean
   playingChunk: boolean
+  timeline: PlaybackCue[]
 }
 
 const MODEL_ID = 'onnx-community/Kokoro-82M-v1.1-zh-ONNX'
@@ -79,42 +82,63 @@ function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
   return buffer
 }
 
+type SpeechModel = Pick<KokoroTTS, 'stream'>
+
 export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   onState: (state: VoiceState) => void
   onPlaying: (playing: boolean) => void
+  onPreparing: (preparing: boolean) => void
+  onDelivery: (delivery: Delivery) => void
   onMouth: (opening: number | null, form: number) => void
   onAudioReady: (ready: boolean) => void
   onProblem: (message: string) => void
-}) {
-  let modelPromise: Promise<KokoroTTS> | null = null
+}, dependencies: { loadModel?: () => Promise<SpeechModel> } = {}) {
+  let modelPromise: Promise<SpeechModel> | null = null
   let unavailable = false
   let objectUrl: string | null = null
   let envelope: MouthFrame[] = []
   let frame = 0
   let run = 0
   let activeRun: PlaybackRun | null = null
+  let activeInput: SpeechSentenceStream | null = null
+  let playbackTimeline: PlaybackCue[] = []
+  let reportedDelivery: Delivery | null = null
+  let releaseUtterance: (() => void) | null = null
 
   audio.volume = 1
   audio.muted = false
+  const currentSource = () => objectUrl !== null && audio.currentSrc === objectUrl
   const animateMouth = () => {
     if (audio.paused)
       return
+    const delivery = deliveryAtTime(playbackTimeline, audio.currentTime)
+    if (delivery !== reportedDelivery) {
+      reportedDelivery = delivery
+      callbacks.onDelivery(delivery)
+    }
     const mouth = envelope[Math.floor(audio.currentTime * 40)]
     callbacks.onMouth(mouth?.open ?? 0, mouth?.form ?? 0)
     frame = requestAnimationFrame(animateMouth)
   }
   const onPlaying = () => {
+    if (!currentSource() || audio.paused || audio.ended)
+      return
     callbacks.onProblem('')
+    callbacks.onPreparing(false)
     callbacks.onPlaying(true)
     cancelAnimationFrame(frame)
     animateMouth()
   }
   const onStopped = () => {
+    if (!currentSource() || (!audio.paused && !audio.ended))
+      return
     cancelAnimationFrame(frame)
     callbacks.onMouth(0, 0)
     callbacks.onPlaying(false)
   }
   const onEnded = () => {
+    if (!currentSource() || !audio.ended)
+      return
     onStopped()
     if (!activeRun?.playingChunk)
       return
@@ -122,8 +146,9 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     advance(activeRun)
   }
   const onError = () => {
-    onStopped()
-    activeRun = null
+    if (!currentSource() || !audio.error)
+      return
+    cancel()
     callbacks.onProblem('音频文件无法播放。请刷新页面重试，或更换浏览器。')
   }
   audio.addEventListener('playing', onPlaying)
@@ -131,11 +156,13 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   audio.addEventListener('ended', onEnded)
   audio.addEventListener('error', onError)
 
-  function replaceAudioSource(samples: Float32Array, sampleRate: number) {
+  function replaceAudioSource(samples: Float32Array, sampleRate: number, timeline: PlaybackCue[]) {
     if (objectUrl)
       URL.revokeObjectURL(objectUrl)
     objectUrl = URL.createObjectURL(new Blob([encodeWav(samples, sampleRate)], { type: 'audio/wav' }))
     envelope = mouthFrames(samples, sampleRate)
+    playbackTimeline = timeline
+    reportedDelivery = null
     audio.src = objectUrl
     audio.load()
     callbacks.onAudioReady(true)
@@ -148,7 +175,8 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     const next = session.queue.shift()
     if (next) {
       session.playingChunk = true
-      replaceAudioSource(next.samples, next.sampleRate)
+      replaceAudioSource(next.samples, next.sampleRate, [{ time: 0, delivery: next.delivery }])
+      callbacks.onPreparing(false)
       void audio.play().catch((error) => {
         if (session !== activeRun)
           return
@@ -158,8 +186,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       return
     }
 
-    if (!session.synthesisFinished || !session.sampleRate)
+    if (!session.synthesisFinished || !session.sampleRate) {
+      callbacks.onPreparing(true)
       return
+    }
 
     const samples = new Float32Array(session.total)
     let offset = 0
@@ -168,7 +198,8 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       offset += chunk.length
     }
     activeRun = null
-    replaceAudioSource(samples, session.sampleRate)
+    callbacks.onPreparing(false)
+    replaceAudioSource(samples, session.sampleRate, session.timeline)
   }
 
   async function prepare() {
@@ -178,6 +209,8 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       return modelPromise
     callbacks.onState('loading')
     modelPromise = (async () => {
+      if (dependencies.loadModel)
+        return dependencies.loadModel()
       const { KokoroTTS } = await import('@uzen/kokoro-js')
       const voicePath = `${import.meta.env.BASE_URL}kokoro/voices`
       // Browser q4f16 returned silence and q8 returned invalid samples in testing.
@@ -207,6 +240,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
 
   function cancel() {
     run++
+    activeInput?.cancel()
+    activeInput = null
+    releaseUtterance?.()
+    releaseUtterance = null
     activeRun = null
     audio.pause()
     audio.removeAttribute('src')
@@ -215,35 +252,89 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       URL.revokeObjectURL(objectUrl)
     objectUrl = null
     envelope = []
+    playbackTimeline = []
+    reportedDelivery = null
     callbacks.onAudioReady(false)
     callbacks.onMouth(0, 0)
     callbacks.onPlaying(false)
+    callbacks.onPreparing(false)
     window.speechSynthesis?.cancel()
   }
 
-  function browserFallback(text: string, token: number, delivery: Delivery) {
+  async function browserFallback(input: SpeechSentenceStream, token: number) {
     if (token !== run)
       return
     callbacks.onState('fallback')
-    callbacks.onMouth(null, 0)
     if (!('speechSynthesis' in window)) {
+      callbacks.onPreparing(false)
       callbacks.onProblem('当前浏览器没有可用的语音播放功能。')
       return
     }
     callbacks.onProblem('本地声线不可用，正在尝试浏览器语音；若仍无声，请检查输出设备。')
-    const utterance = new SpeechSynthesisUtterance(text)
-    utterance.lang = 'zh-CN'
-    utterance.rate = deliverySpeed(delivery)
-    utterance.onstart = () => callbacks.onPlaying(true)
-    utterance.onend = () => callbacks.onPlaying(false)
-    utterance.onerror = () => {
-      callbacks.onPlaying(false)
-      callbacks.onProblem('浏览器语音播放失败。请检查网站静音、系统输出设备或改用 Chrome。')
+    for await (const sentence of input) {
+      if (token !== run)
+        return
+      callbacks.onPreparing(true)
+      const succeeded = await new Promise<boolean>((resolve) => {
+        const complete = (succeeded: boolean) => {
+          if (releaseUtterance === cancelUtterance)
+            releaseUtterance = null
+          resolve(succeeded)
+        }
+        const cancelUtterance = () => complete(false)
+        releaseUtterance = cancelUtterance
+        const utterance = new SpeechSynthesisUtterance(sentence.text)
+        utterance.lang = 'zh-CN'
+        utterance.rate = deliverySpeed(sentence.delivery)
+        utterance.onstart = () => {
+          if (token !== run) return
+          callbacks.onPreparing(false)
+          callbacks.onDelivery(sentence.delivery)
+          callbacks.onMouth(null, 0)
+          callbacks.onPlaying(true)
+        }
+        utterance.onend = () => {
+          if (token === run) {
+            callbacks.onMouth(0, 0)
+            callbacks.onPlaying(false)
+          }
+          complete(true)
+        }
+        utterance.onerror = () => {
+          if (token === run) {
+            callbacks.onPreparing(false)
+            callbacks.onPlaying(false)
+            callbacks.onMouth(0, 0)
+            callbacks.onProblem('浏览器语音播放失败。请检查网站静音、系统输出设备或改用 Chrome。')
+          }
+          complete(false)
+        }
+        window.speechSynthesis.speak(utterance)
+      })
+      if (token !== run || !succeeded)
+        return
     }
-    window.speechSynthesis.speak(utterance)
+    if (token === run)
+      callbacks.onPreparing(false)
   }
 
-  async function consumeSegments(source: ReturnType<KokoroTTS['stream']>, token: number) {
+  async function *synthesizeSentences(model: SpeechModel, input: SpeechSentenceStream, voice: VoiceId, token: number): AsyncGenerator<AudioClip> {
+    for await (const sentence of input) {
+      if (token !== run) return
+      for await (const segment of model.stream(forChineseVoice(sentence.text), {
+        voice, speed: deliverySpeed(sentence.delivery), maxChunkLength: 130,
+      })) {
+        if (token !== run) return
+        yield {
+          samples: new Float32Array(segment.audio.data as Float32Array),
+          sampleRate: segment.audio.sampling_rate,
+          delivery: sentence.delivery,
+        }
+      }
+    }
+  }
+
+  async function consumeSegments(source: AsyncIterable<AudioClip>, token: number) {
     const session: PlaybackRun = {
       token,
       queue: [],
@@ -252,14 +343,15 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       total: 0,
       synthesisFinished: false,
       playingChunk: false,
+      timeline: [],
     }
     activeRun = session
     try {
       for await (const segment of source) {
         if (token !== run)
           return
-        const data = new Float32Array(segment.audio.data as Float32Array)
-        const sampleRate = segment.audio.sampling_rate
+        const data = segment.samples
+        const sampleRate = segment.sampleRate
         if (session.sampleRate && sampleRate !== session.sampleRate)
           throw new Error('Kokoro changed its audio sample rate during synthesis')
         let energy = 0
@@ -273,9 +365,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         if (!data.length || peak < 0.001 || Math.sqrt(energy / data.length) < 0.0001)
           continue
         session.sampleRate = sampleRate
+        session.timeline.push({ time: session.total / sampleRate, delivery: segment.delivery })
         session.chunks.push(data)
         session.total += data.length
-        session.queue.push({ samples: data, sampleRate })
+        session.queue.push(segment)
         advance(session)
       }
       if (token !== run)
@@ -302,115 +395,85 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     }
   }
 
-  async function speak(text: string, delivery: Delivery = 'neutral', voice: VoiceId = DEFAULT_VOICE) {
+  async function speak(text: string, delivery: Delivery = 'neutral', voice: VoiceId = DEFAULT_VOICE, cues: DeliveryCue[] = []) {
     cancel()
     if (!text.trim())
       return
     const token = run
+    const input = replySentenceStream(text, delivery, cues)
+    activeInput = input
+    callbacks.onPreparing(true)
     callbacks.onProblem('正在生成语音…')
     try {
       const model = await prepare()
       if (token !== run)
         return
-      await consumeSegments(model.stream(forChineseVoice(text), { voice, speed: deliverySpeed(delivery), maxChunkLength: 130 }), token)
+      await consumeSegments(synthesizeSentences(model, input, voice, token), token)
     }
     catch (error) {
       if (token !== run)
         return
       console.warn('Kokoro synthesis failed; using browser speech', error)
-      browserFallback(text, token, delivery)
+      const fallbackInput = replySentenceStream(text, delivery, cues)
+      activeInput = fallbackInput
+      await browserFallback(fallbackInput, token)
+    }
+    finally {
+      if (token === run)
+        activeInput = null
     }
   }
 
-  function beginStream(userText: string, onDelivery?: (delivery: Delivery) => void, preferredDelivery?: Delivery, voice: VoiceId = DEFAULT_VOICE) {
+  function beginStream(userText: string, preferredDelivery?: Delivery, voice: VoiceId = DEFAULT_VOICE) {
     cancel()
     const token = run
-    const buffer = new SentenceBuffer()
-    const pendingSentences: string[] = []
-    let splitter: TextSplitterStream | null = null
-    let complete = false
-    let fullText = ''
-    let delivery: Delivery | null = null
-    let resolveFirst!: () => void
-    let resolveComplete!: () => void
-    const firstSentence = new Promise<void>(resolve => (resolveFirst = resolve))
-    const completion = new Promise<void>(resolve => (resolveComplete = resolve))
-
-    const feed = (sentences: string[]) => {
-      for (const sentence of sentences) {
-        if (!delivery) {
-          delivery = preferredDelivery ?? chooseDelivery(userText, sentence)
-          onDelivery?.(delivery)
-          callbacks.onProblem('正在生成语音…')
-          resolveFirst()
-        }
-        const normalised = forChineseVoice(sentence)
-        if (splitter) {
-          splitter.push(normalised)
-          splitter.flush()
-        }
-        else {
-          pendingSentences.push(normalised)
-        }
-      }
-    }
-
-    const push = (delta: string) => {
-      if (complete || token !== run)
-        return
-      fullText += delta
-      feed(buffer.push(delta))
-    }
-
-    const finish = () => {
-      if (complete || token !== run)
-        return
-      complete = true
-      feed(buffer.finish())
-      resolveFirst()
-      splitter?.close()
-      resolveComplete()
-    }
+    const input = new SpeechSentenceStream(userText, preferredDelivery)
+    const cues: DeliveryCue[] = preferredDelivery ? [{ start: 0, delivery: preferredDelivery }] : []
+    activeInput = input
+    callbacks.onPreparing(true)
+    callbacks.onProblem('正在生成语音…')
 
     const cancelStream = () => {
-      if (token !== run)
-        return
-      cancel()
-      resolveFirst()
-      resolveComplete()
+      input.cancel()
+      if (token === run)
+        cancel()
     }
 
     const synthesize = async () => {
       try {
-        const [model, { TextSplitterStream }] = await Promise.all([prepare(), import('@uzen/kokoro-js')])
+        const model = await prepare()
         if (token !== run)
           return
-        await firstSentence
-        if (token !== run || !fullText.trim())
-          return
-        splitter = new TextSplitterStream()
-        for (const sentence of pendingSentences) {
-          splitter.push(sentence)
-          splitter.flush()
-        }
-        pendingSentences.length = 0
-        if (complete)
-          splitter.close()
-        await consumeSegments(model.stream(splitter, { voice, speed: deliverySpeed(delivery ?? 'neutral'), maxChunkLength: 130 }), token)
+        await consumeSegments(synthesizeSentences(model, input, voice, token), token)
       }
       catch (error) {
         if (token !== run)
           return
-        await completion
+        await input.finished
         if (token !== run)
           return
         console.warn('Kokoro streaming synthesis failed; using browser speech', error)
-        browserFallback(fullText, token, delivery ?? 'neutral')
+        const fallbackInput = replySentenceStream(input.text, preferredDelivery, cues, userText)
+        activeInput = fallbackInput
+        await browserFallback(fallbackInput, token)
+      }
+      finally {
+        if (token === run)
+          activeInput = null
       }
     }
     void synthesize()
 
-    return { push, finish, cancel: cancelStream }
+    return {
+      push(delta: string) { if (token === run) input.push(delta) },
+      setDelivery(delivery: Delivery) {
+        if (token !== run) return
+        cues.push({ start: input.text.length, delivery })
+        input.setDelivery(delivery)
+      },
+      finish() { input.finish() },
+      cancel: cancelStream,
+    }
   }
 
   function dispose() {

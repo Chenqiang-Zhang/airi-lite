@@ -15,6 +15,7 @@ import { clearUserMemory, loadUserMemory, proposeUserMemory, saveUserMemory, USE
 import { DEFAULT_PERSONA, loadPersona, savePersona } from './persona'
 import { createSpeechController } from './speech'
 import type { VoiceState } from './speech'
+import type { DeliveryCue } from './speech-sentences'
 import { loadVoice, saveVoice, VOICE_OPTIONS } from './voice'
 import type { VoiceId } from './voice'
 
@@ -31,13 +32,14 @@ const input = ref('')
 const composerFocused = ref(false)
 const composerInput = ref<HTMLInputElement | null>(null)
 const isSpeaking = ref(false)
+const isPreparingSpeech = ref(false)
 const activeDelivery = ref<Delivery>('neutral')
 const voiceState = ref<VoiceState>('idle')
 const voiceProblem = ref('')
 const audioAvailable = ref(false)
 const speechPlayer = ref<HTMLAudioElement | null>(null)
 const isGenerating = ref(false)
-const avatarActivity = computed<AvatarActivity>(() => isSpeaking.value ? 'speaking' : isGenerating.value ? 'thinking' : composerFocused.value ? 'attentive' : 'idle')
+const avatarActivity = computed<AvatarActivity>(() => isSpeaking.value ? 'speaking' : (isGenerating.value || isPreparingSpeech.value) ? 'thinking' : composerFocused.value ? 'attentive' : 'idle')
 const personaOpen = ref(false)
 const memoryOpen = ref(false)
 const voiceOpen = ref(false)
@@ -99,6 +101,8 @@ onMounted(async () => {
   speech = createSpeechController(speechPlayer.value, {
     onState: state => (voiceState.value = state),
     onPlaying: playing => (isSpeaking.value = playing),
+    onPreparing: preparing => (isPreparingSpeech.value = preparing),
+    onDelivery: delivery => (activeDelivery.value = delivery),
     onMouth: (opening, form) => {
       latestMouth = { opening, form }
       live2d?.setMouth(opening, form)
@@ -143,17 +147,16 @@ async function refreshProviderStatus() {
   }
 }
 
-function speak(text: string, delivery: Delivery = 'neutral') {
-  activeDelivery.value = delivery
+function speak(text: string, delivery: Delivery = 'neutral', cues: DeliveryCue[] = []) {
   activeVoice.value = selectedVoice.value
-  void speech?.speak(text, delivery, selectedVoice.value)
+  void speech?.speak(text, delivery, selectedVoice.value, cues)
 }
 
 function replayLastResponse() {
   const message = messages.value.filter(item => item.role === 'assistant').at(-1)
   if (message?.text) {
     const previousUser = messages.value.filter(item => item.role === 'user').at(-1)
-    speak(message.text, message.delivery ?? chooseDelivery(previousUser?.text ?? '', message.text))
+    speak(message.text, message.delivery ?? chooseDelivery(previousUser?.text ?? '', message.text), message.deliveryCues)
   }
 }
 
@@ -200,6 +203,7 @@ async function sendMessage() {
   activeAssistantId.value = assistantMessage.id
   const speechStream: { current: ReturnType<ReturnType<typeof createSpeechController>['beginStream']> | null } = { current: null }
   let chatSucceeded = false
+  let latestDelivery: Delivery | undefined
 
   try {
     await streamChat({
@@ -211,10 +215,11 @@ async function sendMessage() {
       onDelivery: (delivery) => {
         if (controller.signal.aborted || activeController.value !== controller)
           return
-        assistantMessage.delivery = delivery
-        activeDelivery.value = delivery
-        if (isSpeaking.value)
-          live2d?.setDelivery(delivery)
+        assistantMessage.delivery ??= delivery
+        latestDelivery = delivery
+        assistantMessage.deliveryCues ??= []
+        assistantMessage.deliveryCues.push({ start: assistantMessage.text.length, delivery })
+        speechStream.current?.setDelivery(delivery)
       },
       onDelta: (chunk) => {
         if (controller.signal.aborted || activeController.value !== controller)
@@ -223,12 +228,7 @@ async function sendMessage() {
         assistantMessage.source = 'deepseek'
         if (!speechStream.current && speech) {
           activeVoice.value = selectedVoice.value
-          speechStream.current = speech.beginStream(text, (delivery) => {
-            assistantMessage.delivery = delivery
-            activeDelivery.value = delivery
-            if (isSpeaking.value)
-              live2d?.setDelivery(delivery)
-          }, assistantMessage.delivery, selectedVoice.value)
+          speechStream.current = speech.beginStream(text, latestDelivery, selectedVoice.value)
         }
         speechStream.current?.push(chunk)
       },
@@ -272,7 +272,7 @@ async function sendMessage() {
     if (!aborted)
       saveConversation(messages.value)
     if (!aborted && assistantMessage.text && !speechStream.current) {
-      speak(assistantMessage.text, assistantMessage.delivery)
+      speak(assistantMessage.text, assistantMessage.delivery, assistantMessage.deliveryCues)
     }
   }
 }
@@ -430,7 +430,7 @@ function saveAccessCode() {
 
       <div class="status-pill" :class="providerMode">
         <span class="status-dot" />
-        {{ isSpeaking ? '正在朗读' : isGenerating ? '正在思考' : providerLabel }}
+        {{ isSpeaking ? '正在朗读' : isGenerating ? '正在思考' : isPreparingSpeech ? '正在准备语音' : providerLabel }}
       </div>
     </section>
 
@@ -454,7 +454,7 @@ function saveAccessCode() {
           <button class="voice-button" type="button" :disabled="isGenerating" @click="openVoiceEditor">
             声线
           </button>
-          <button v-if="isGenerating || isSpeaking || voiceProblem === '正在生成语音…'" class="voice-button stop-button" type="button" @click="stopCurrentTurn">
+          <button v-if="isGenerating || isSpeaking || isPreparingSpeech" class="voice-button stop-button" type="button" @click="stopCurrentTurn">
             停下
           </button>
           <button class="voice-button" type="button" title="朗读最后一条回复" :disabled="isGenerating" @click="replayLastResponse">

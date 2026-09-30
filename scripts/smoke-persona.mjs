@@ -21,6 +21,7 @@ if (!response.ok)
 const body = await response.text()
 let reply = ''
 let delivery = null
+const deliveryCues = []
 for (const line of body.split('\n')) {
   if (!line.trim())
     continue
@@ -29,12 +30,16 @@ for (const line of body.split('\n')) {
     throw new Error('Chat stream ended with an error')
   if (event.type === 'delta' && typeof event.content === 'string')
     reply += event.content
-  if (event.type === 'delivery' && typeof event.value === 'string')
+  if (event.type === 'delivery' && typeof event.value === 'string') {
     delivery = event.value
+    deliveryCues.push({ start: reply.length, delivery })
+  }
 }
 
 if (!reply.trim())
   throw new Error('Chat smoke test returned an empty reply')
 if (process.env.AIRI_SMOKE_SHOW_DELIVERY === '1')
   process.stderr.write(`delivery=${delivery ?? 'missing'}\n`)
+if (process.env.AIRI_SMOKE_SHOW_CUES === '1')
+  process.stderr.write(`delivery cues=${JSON.stringify(deliveryCues)}\n`)
 process.stdout.write(`${reply}\n`)

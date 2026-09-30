@@ -49,3 +49,18 @@ test('invalid and excessive stored data is discarded or bounded', () => {
   assert.ok(loaded.every(message => message.delivery === undefined))
   assert.ok(loaded.every(message => message.source === undefined))
 })
+
+test('reply cues survive refresh and remain aligned after trimming the text', () => {
+  const storage = memoryStorage()
+  saveConversation([{ role: 'assistant', text: '  好耶！先歇一下。  ', deliveryCues: [
+    { start: 2, delivery: 'bright' },
+    { start: 5, delivery: 'soft' },
+    { start: 99, delivery: 'curious' },
+    { start: 5, delivery: 'invented' },
+  ] }], storage)
+  assert.deepEqual(loadConversation(storage)[0], {
+    role: 'assistant', text: '好耶！先歇一下。', deliveryCues: [
+      { start: 0, delivery: 'bright' }, { start: 3, delivery: 'soft' },
+    ],
+  })
+})

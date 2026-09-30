@@ -1,9 +1,12 @@
 import type { Delivery } from './delivery'
+import { normaliseDeliveryCues } from './speech-sentences.ts'
+import type { DeliveryCue } from './speech-sentences'
 
 export interface ConversationMessage {
   role: 'assistant' | 'user'
   text: string
   delivery?: Delivery
+  deliveryCues?: DeliveryCue[]
   source?: 'deepseek' | 'fallback'
 }
 
@@ -26,6 +29,16 @@ function normaliseMessages(value: unknown): ConversationMessage[] {
       }
       if (deliveries.has(item.delivery))
         message.delivery = item.delivery
+      if (item.role === 'assistant') {
+        const leading = item.text.length - item.text.trimStart().length
+        const cues = normaliseDeliveryCues(
+          normaliseDeliveryCues(item.deliveryCues, item.text.length)
+            .map(cue => ({ ...cue, start: Math.max(0, cue.start - leading) })),
+          message.text.length,
+        )
+        if (cues.length)
+          message.deliveryCues = cues
+      }
       if (item.source === 'deepseek' || item.source === 'fallback')
         message.source = item.source
       return message

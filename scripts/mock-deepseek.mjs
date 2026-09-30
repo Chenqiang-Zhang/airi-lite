@@ -7,7 +7,11 @@ const chunks = [
   'Deep',
   'Seek 这个词被拆开传过来，',
   '朗读时应该保持完整。',
-  '最后再补一句，我们慢慢聊。',
+  '\n\n[[to',
+  'ne:soft]]不过累了的话，',
+  '我们慢慢聊就好。',
+  '\n[[tone:cur',
+  'ious]]你想从哪个小游戏开始？',
 ]
 const firstGapMs = Number(process.env.MOCK_FIRST_GAP_MS) || 6_000
 

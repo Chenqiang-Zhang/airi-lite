@@ -1,0 +1,134 @@
+import { chooseDelivery } from './delivery.ts'
+import type { Delivery } from './delivery'
+import { SentenceBuffer } from './sentence-buffer.ts'
+
+export interface DeliveryCue {
+  start: number // UTF-16 character offset in the visible reply.
+  delivery: Delivery
+}
+
+export interface SpokenSentence {
+  text: string
+  delivery: Delivery
+}
+
+const DELIVERIES = new Set<Delivery>(['neutral', 'soft', 'bright', 'curious'])
+
+export function normaliseDeliveryCues(value: unknown, textLength: number): DeliveryCue[] {
+  if (!Array.isArray(value))
+    return []
+  const cues = value.slice(0, 128)
+    .filter(cue => cue && Number.isInteger(cue.start) && cue.start >= 0 && cue.start < textLength && DELIVERIES.has(cue.delivery))
+    .map(cue => ({ start: cue.start as number, delivery: cue.delivery as Delivery }))
+    .sort((a, b) => a.start - b.start)
+  const result: DeliveryCue[] = []
+  for (const cue of cues) {
+    if (result.at(-1)?.start === cue.start)
+      result[result.length - 1] = cue
+    else if (result.at(-1)?.delivery !== cue.delivery)
+      result.push(cue)
+  }
+  return result
+}
+
+// One producer (chat deltas) and one consumer (TTS). Closing from the controller
+// wakes a consumer waiting between sentences, even when no audio was generated.
+export class SpeechSentenceStream implements AsyncIterable<SpokenSentence> {
+  private buffer = new SentenceBuffer()
+  private queue: SpokenSentence[] = []
+  private closed = false
+  private wake: (() => void) | null = null
+  private resolveFinished!: () => void
+  readonly finished = new Promise<void>(resolve => (this.resolveFinished = resolve))
+  text = ''
+
+  private userText: string
+  private delivery?: Delivery
+
+  constructor(userText = '', delivery?: Delivery) {
+    this.userText = userText
+    this.delivery = delivery
+  }
+
+  private feed(sentences: string[]) {
+    for (const text of sentences)
+      this.queue.push({ text, delivery: this.delivery ?? chooseDelivery(this.userText, text) })
+    this.wake?.()
+    this.wake = null
+  }
+
+  push(fragment: string) {
+    if (this.closed)
+      return
+    this.text += fragment
+    this.feed(this.buffer.push(fragment))
+  }
+
+  setDelivery(delivery: Delivery) {
+    if (this.closed)
+      return
+    // A model may change tone before punctuation. Flush that tail with its old
+    // cue so later tokens cannot retroactively change queued speech.
+    this.feed(this.buffer.finish())
+    this.delivery = delivery
+  }
+
+  finish() {
+    if (this.closed)
+      return
+    this.feed(this.buffer.finish())
+    this.closed = true
+    this.resolveFinished()
+    this.wake?.()
+    this.wake = null
+  }
+
+  cancel() {
+    this.queue.length = 0
+    this.buffer.finish()
+    this.closed = true
+    this.resolveFinished()
+    this.wake?.()
+    this.wake = null
+  }
+
+  async *[Symbol.asyncIterator]() {
+    while (true) {
+      const sentence = this.queue.shift()
+      if (sentence)
+        yield sentence
+      else if (this.closed)
+        return
+      else
+        await new Promise<void>(resolve => (this.wake = resolve))
+    }
+  }
+}
+
+export function replySentenceStream(text: string, delivery?: Delivery, cues: DeliveryCue[] = [], userText = '') {
+  const stream = new SpeechSentenceStream(userText, delivery)
+  let start = 0
+  for (const cue of normaliseDeliveryCues(cues, text.length)) {
+    stream.push(text.slice(start, cue.start))
+    stream.setDelivery(cue.delivery)
+    start = cue.start
+  }
+  stream.push(text.slice(start))
+  stream.finish()
+  return stream
+}
+
+export interface PlaybackCue {
+  time: number // Seconds from the start of this audio source.
+  delivery: Delivery
+}
+
+export function deliveryAtTime(cues: PlaybackCue[], time: number): Delivery {
+  let delivery: Delivery = 'neutral'
+  for (const cue of cues) {
+    if (cue.time > time)
+      break
+    delivery = cue.delivery
+  }
+  return delivery
+}

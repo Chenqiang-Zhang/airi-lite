@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>日和逐句语气校验（仅本地）</title>
+<style>
+  body { margin: 0; background: #f5eee9; color: #41342c; font: 16px system-ui; }
+  main { display: flex; min-height: 100vh; }
+  #stage { width: 55vw; height: 95vh; }
+  aside { flex: 1; padding: 30px 20px; }
+  button { padding: 10px; margin: 5px; cursor: pointer; }
+  audio { width: 100%; margin-top: 20px; }
+  pre { white-space: pre-wrap; font-size: 14px; }
+</style>
+<main>
+  <div id="stage"></div>
+  <aside>
+    <h1>逐句语气校验</h1>
+    <p>使用真实 Kokoro 声线与 Live2D。第一句轻快，第二句温柔，第三句好奇；表情只随实际播放切换。</p>
+    <button id="start">合成并播放三句话</button>
+    <button id="stop">停下</button>
+    <audio controls aria-label="语气校验播放器"></audio>
+    <pre id="status">正在加载角色……</pre>
+    <pre id="trace"></pre>
+    <p>This content uses sample data owned and copyrighted by Live2D Inc.<br>Hiyori Momose · Illustration: Kani Biimu</p>
+  </aside>
+</main>
+<script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+<script type="module">
+  import { mountHiyori } from '../src/live2d.ts'
+  import { createSpeechController } from '../src/speech.ts'
+  import { loadVoice } from '../src/voice.ts'
+
+  const output = document.querySelector('#status'), trace = document.querySelector('#trace')
+  try {
+    const actor = await mountHiyori(document.querySelector('#stage'))
+    const audio = document.querySelector('audio')
+    let playing = false, preparing = false, delivery = 'neutral', state = 'idle', problem = ''
+    const history = []
+    const sync = () => {
+      actor.setActivity(playing ? 'speaking' : preparing ? 'thinking' : 'idle')
+      actor.setDelivery(playing ? delivery : 'neutral')
+      output.textContent = `声线状态: ${state}\n正在播放: ${playing}\n正在准备: ${preparing}\n当前实际语气: ${delivery}\n${problem}`
+    }
+    const controller = createSpeechController(audio, {
+      onState(value) { state = value; sync() },
+      onPlaying(value) { playing = value; sync() },
+      onPreparing(value) { preparing = value; sync() },
+      onDelivery(value) {
+        delivery = value
+        history.push(`${history.length + 1}. ${value} @ ${audio.currentTime.toFixed(2)}s`)
+        trace.textContent = history.join('\n')
+        sync()
+      },
+      onMouth: actor.setMouth,
+      onAudioReady() {},
+      onProblem(value) { problem = value; sync() },
+    })
+    document.querySelector('#start').addEventListener('click', () => {
+      history.length = 0
+      trace.textContent = ''
+      const input = controller.beginStream('', 'bright', loadVoice())
+      input.push('好耶，终于跑通啦！')
+      input.setDelivery('soft')
+      input.push('先歇一下，别太勉强自己。')
+      input.setDelivery('curious')
+      input.push('明天想从哪里开始？')
+      input.finish()
+    })
+    document.querySelector('#stop').addEventListener('click', () => controller.cancel())
+    addEventListener('pagehide', () => { controller.dispose(); actor.destroy() }, { once: true })
+    sync()
+  }
+  catch (error) { output.textContent = `加载失败: ${error.message}` }
+</script>
+</html>
