@@ -65,3 +65,24 @@ test('bounds opt-in user memory and includes it only when provided', () => {
   const withoutMemory = buildSystemPrompt(result.persona)
   assert.doesNotMatch(withoutMemory, /用户主动保存的背景信息/)
 })
+
+test('carries bounded character preferences to the prompt without a default for custom cards', () => {
+  const result = normaliseChatRequest({
+    persona: { name: '小遥', preferences: `  偏爱咸味。${'a'.repeat(2_100)}  ` },
+    messages: [{ role: 'user', content: '喜欢什么？' }],
+  })
+  assert.equal(result.persona.preferences.length, 2_000)
+  assert.ok(result.persona.preferences.startsWith('偏爱咸味。'))
+  const prompt = buildSystemPrompt(result.persona)
+  assert.match(prompt, /稳定偏好与小习惯：偏爱咸味/)
+  assert.match(prompt, /不因为对方要求附和就临时改口/)
+  assert.doesNotMatch(prompt, /草莓/)
+  for (const preferences of [undefined, '', '  ']) {
+    const empty = normaliseChatRequest({
+      persona: { name: '小遥', preferences },
+      messages: [{ role: 'user', content: '你好' }],
+    })
+    assert.equal(empty.persona.preferences, '')
+    assert.doesNotMatch(buildSystemPrompt(empty.persona), /稳定偏好与小习惯/)
+  }
+})

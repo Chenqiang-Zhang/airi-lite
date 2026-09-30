@@ -84,7 +84,43 @@ test('customised previous personas keep their settings and do not inherit exampl
     assert.equal(loaded.speakingStyle, customised.speakingStyle)
     assert.equal(loaded.personality, customised.personality)
     assert.equal(loaded.dialogueExamples, '')
+    assert.equal(loaded.preferences, '')
     savePersona(loaded)
     assert.equal(JSON.parse(getStored()).speakingStyle, customised.speakingStyle)
   })
+})
+
+test('the last seven-field default upgrades without injecting preferences into custom cards', () => {
+  // Capture the card shipped before the preferences field, including its text.
+  const previousDefault = {
+    ...priorDefault,
+    scenario: '你是通过网页文字与用户聊天的数字伙伴日和。17–18 岁日本女高中生的校园感只是形象与气质；不要虚构真实的校园生活、身边环境，或与用户共同经历过的事。',
+    speakingStyle: '主要用自然的中文口语。闲聊通常一到三句，先接住对方说的具体事，再给一个自己的看法、小联想或有趣的细节。不要习惯性把结尾写成问题；用户没有想回答时，用一句能独立成立的话继续，而不是把话题又丢回去。短句和长句交替，允许偶尔轻轻吐槽；不用固定口癖、日语词尾或客服式总结。需要解释知识或步骤时再充分展开，准确性优先。',
+    behaviorGuidelines: '有自己的偏好和判断，不无条件赞美或附和；遇到重要或低落的话题收住玩笑，认真但不过度安慰。不说“很高兴为你服务”“作为 AI”之类的套话。不了解就坦率说明，不编造见闻、关系或共同经历，也不要假装能看见用户的屏幕与周围环境。',
+    dialogueExamples: '用户：今天好累。\n日和：听起来电量见底了。先让脑子空转五分钟，也不算偷懒。\n\n用户：明天要交报告，我还没动。\n日和：截止日已经在门口敲锣了。先写三行难看的提纲，别跟完美开头较劲。\n\n用户：刚吃到一家很好吃的拉面。\n日和：那种第一口就想宣布的快乐！要是汤也好喝，今天这顿就赢了。\n\n用户：我觉得通宵写报告效率最高。\n日和：救急时可能管用，但我不站通宵那边。第二天的脑子会来收利息。\n\n用户：能解释一下注意力机制吗？\n日和：把它想成读一句话时，每个词会看看其他词，决定自己该参考谁。那些“该看谁”的权重，就是注意力机制的核心。',
+  }
+  withStoredPersona(JSON.stringify(previousDefault), () => {
+    assert.deepEqual(loadPersona(), DEFAULT_PERSONA)
+  })
+  for (const field of Object.keys(previousDefault)) {
+    const customised = { ...previousDefault, [field]: '自定义内容' }
+    withStoredPersona(JSON.stringify(customised), () => {
+      const loaded = loadPersona()
+      assert.equal(loaded[field], '自定义内容')
+      assert.equal(loaded.preferences, '')
+    })
+  }
+})
+
+test('custom and deliberately empty preferences survive save and reload', () => {
+  for (const preferences of ['喜欢咸味饼干和古典音乐', '']) {
+    const customised = { ...DEFAULT_PERSONA, preferences }
+    withStoredPersona(JSON.stringify(customised), getStored => {
+      const loaded = loadPersona()
+      assert.deepEqual(loaded, customised)
+      savePersona(loaded)
+      assert.equal(JSON.parse(getStored()).preferences, preferences)
+      assert.equal(loadPersona().preferences, preferences)
+    })
+  }
 })

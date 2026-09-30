@@ -283,6 +283,8 @@ function openPersonaEditor() {
 }
 
 function applyPersona() {
+  if (isGenerating.value)
+    return
   persona.value = {
     ...draftPersona.value,
     name: draftPersona.value.name.trim() || 'Hiyori',
@@ -503,7 +505,7 @@ function saveAccessCode() {
           <button class="close-button" type="button" aria-label="关闭" @click="personaOpen = false">×</button>
         </div>
 
-        <p class="persona-intro">参考 AIRI Character Card 的分层方式。这里保存的是人格倾向，不是要求模型机械执行的固定台词。</p>
+        <p class="persona-intro">写下日和的性格、稳定偏好和说话习惯。她会在相关的话题里自然带出这些特点。</p>
 
         <form class="persona-form" @submit.prevent="applyPersona">
           <label>
@@ -513,6 +515,10 @@ function saveAccessCode() {
           <label>
             <span>人格倾向</span>
             <textarea v-model="draftPersona.personality" rows="4" maxlength="2000" />
+          </label>
+          <label>
+            <span>稳定偏好与小习惯</span>
+            <textarea v-model="draftPersona.preferences" rows="4" maxlength="2000" placeholder="例如：喜欢草莓味、轻快的音乐和解谜；不喜欢苦味。留空则不设置固定偏好。" />
           </label>
           <label>
             <span>背景情境</span>
@@ -537,7 +543,7 @@ function saveAccessCode() {
 
           <div class="persona-actions">
             <button class="secondary-button" type="button" @click="resetPersona">恢复默认</button>
-            <button class="primary-button" type="submit">保存人格</button>
+            <button class="primary-button" type="submit" :disabled="isGenerating">{{ isGenerating ? '等回复写完再保存' : '保存人格' }}</button>
           </div>
         </form>
       </aside>

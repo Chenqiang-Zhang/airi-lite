@@ -84,6 +84,7 @@ Choose **人格** in the chat header to edit:
 
 - character name;
 - personality tendencies;
+- stable preferences and small habits;
 - background scenario;
 - speaking style;
 - behavioral boundaries;
@@ -92,7 +93,9 @@ Choose **人格** in the chat header to edit:
 
 Persona settings are stored in the browser's local storage. They are sent to the local server with recent conversation history and compiled into the system message there. The design is a reduced version of AIRI's Character Card separation of personality, scenario, system instructions, greetings, and examples.
 
-The default Hiyori persona favors concrete reactions over routine closing questions. The server also reminds the model that it cannot see browser tabs, the screen, surroundings, or live outside information, so a playful reply should not invent sensory evidence. Existing user-edited character cards are preserved when the default changes.
+The default Hiyori persona favors concrete reactions over routine closing questions. Her card now gives her stable preferences: strawberry-flavored, moderately sweet treats, upbeat J-pop, cooperative puzzles, and starting tasks with one small step. The server encourages her to acknowledge different tastes without immediately adopting the visitor's opinion; preferences are only brought up when relevant. They describe a digital character's tastes, not real meals, outings, or listening history. The server also reminds the model that it cannot see browser tabs, the screen, surroundings, or live outside information, so a playful reply should not invent sensory evidence.
+
+Existing user-edited character cards are preserved when the default changes; an older custom card receives an empty preferences field rather than Hiyori's tastes. An unchanged previous default upgrades automatically. You can edit or clear **稳定偏好与小习惯** in **人格**, then save. Saving is temporarily unavailable while a reply is being generated, so the current turn retains the card it started with. A saved card applies to subsequent replies without deleting the conversation. These prompt controls guide the model; consistency should still be checked over multiple conversations.
 
 Recent conversation is temporarily kept in this browser tab's session storage so refreshing the page does not make Hiyori forget the current exchange. **清空** removes that stored transcript. The transcript is not shared across devices or stored as long-term memory; its current context is still sent to DeepSeek when generating a reply.
 
