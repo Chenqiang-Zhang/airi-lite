@@ -94,7 +94,7 @@ onMounted(async () => {
   speech = createSpeechController(speechPlayer.value, {
     onState: state => (voiceState.value = state),
     onPlaying: playing => (isSpeaking.value = playing),
-    onMouth: opening => live2d?.setMouthOpen(opening),
+    onMouth: (opening, form) => live2d?.setMouth(opening, form),
     onAudioReady: ready => (audioAvailable.value = ready),
     onProblem: message => (voiceProblem.value = message),
   })

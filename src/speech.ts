@@ -3,6 +3,8 @@ import type { Delivery } from './delivery'
 import type { VoiceId } from './voice'
 
 import { chooseDelivery, deliverySpeed } from './delivery'
+import { mouthFrames } from './mouth'
+import type { MouthFrame } from './mouth'
 import { SentenceBuffer } from './sentence-buffer'
 import { DEFAULT_VOICE } from './voice'
 
@@ -77,30 +79,17 @@ function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
   return buffer
 }
 
-function mouthEnvelope(samples: Float32Array, sampleRate: number): number[] {
-  const step = Math.max(1, Math.floor(sampleRate / 40))
-  const envelope: number[] = []
-  for (let start = 0; start < samples.length; start += step) {
-    let energy = 0
-    const end = Math.min(samples.length, start + step)
-    for (let i = start; i < end; i++)
-      energy += samples[i] * samples[i]
-    envelope.push(Math.min(1, Math.sqrt(energy / (end - start)) * 5))
-  }
-  return envelope
-}
-
 export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   onState: (state: VoiceState) => void
   onPlaying: (playing: boolean) => void
-  onMouth: (opening: number | null) => void
+  onMouth: (opening: number | null, form: number) => void
   onAudioReady: (ready: boolean) => void
   onProblem: (message: string) => void
 }) {
   let modelPromise: Promise<KokoroTTS> | null = null
   let unavailable = false
   let objectUrl: string | null = null
-  let envelope: number[] = []
+  let envelope: MouthFrame[] = []
   let frame = 0
   let run = 0
   let activeRun: PlaybackRun | null = null
@@ -110,7 +99,8 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   const animateMouth = () => {
     if (audio.paused)
       return
-    callbacks.onMouth(envelope[Math.floor(audio.currentTime * 40)] ?? 0)
+    const mouth = envelope[Math.floor(audio.currentTime * 40)]
+    callbacks.onMouth(mouth?.open ?? 0, mouth?.form ?? 0)
     frame = requestAnimationFrame(animateMouth)
   }
   const onPlaying = () => {
@@ -121,7 +111,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   }
   const onStopped = () => {
     cancelAnimationFrame(frame)
-    callbacks.onMouth(0)
+    callbacks.onMouth(0, 0)
     callbacks.onPlaying(false)
   }
   const onEnded = () => {
@@ -145,7 +135,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     if (objectUrl)
       URL.revokeObjectURL(objectUrl)
     objectUrl = URL.createObjectURL(new Blob([encodeWav(samples, sampleRate)], { type: 'audio/wav' }))
-    envelope = mouthEnvelope(samples, sampleRate)
+    envelope = mouthFrames(samples, sampleRate)
     audio.src = objectUrl
     audio.load()
     callbacks.onAudioReady(true)
@@ -226,7 +216,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     objectUrl = null
     envelope = []
     callbacks.onAudioReady(false)
-    callbacks.onMouth(0)
+    callbacks.onMouth(0, 0)
     callbacks.onPlaying(false)
     window.speechSynthesis?.cancel()
   }
@@ -235,7 +225,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     if (token !== run)
       return
     callbacks.onState('fallback')
-    callbacks.onMouth(null)
+    callbacks.onMouth(null, 0)
     if (!('speechSynthesis' in window)) {
       callbacks.onProblem('当前浏览器没有可用的语音播放功能。')
       return

@@ -8,7 +8,7 @@ A small, self-hosted Live2D companion inspired by [Project AIRI](https://github.
 
 <sub>Screenshot of the live demo. This content uses sample data owned and copyrighted by Live2D Inc. Hiyori Momose was illustrated by Kani Biimu. The sample is used under [Live2D's terms](https://www.live2d.com/eula/live2d-sample-model-terms_en.html); the application itself is independently authored. Model files are not included in this repository.</sub>
 
-> 中文速览：这是一个精简的 AI 角色 demo，包含 Live2D 形象、可编辑人格、DeepSeek 文字对话、可选的固定中文声线及随音量变化的口型。暂不支持麦克风输入，线上聊天需要体验码。
+> 中文速览：这是一个精简的 AI 角色 demo，包含 Live2D 形象、可编辑人格、DeepSeek 文字对话、可选的固定中文声线及随音量和频谱变化的近似口型。暂不支持麦克风输入，线上聊天需要体验码。
 
 The first milestone is intentionally narrow:
 
@@ -17,13 +17,13 @@ The first milestone is intentionally narrow:
 - reply with a configurable personality;
 - read replies aloud without microphone access.
 
-The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, lets each browser edit a basic persona, and speaks completed sentences with one of three selectable fixed local Kokoro Chinese voices while later text is still arriving. Audio amplitude drives the Live2D mouth. Generated speech chunks can play before the whole reply finishes synthesizing, and the complete WAV remains available for replay afterward. A small delivery layer makes restrained changes to speech speed and facial parameters for short replies; this is not an expressive voice model. If local inference is unavailable, it falls back to browser text-to-speech. There is no microphone or speech recognition. The Hiyori artwork and this demo's configurable persona are separate from Project AIRI.
+The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, lets each browser edit a basic persona, and speaks completed sentences with one of three selectable fixed local Kokoro Chinese voices while later text is still arriving. Audio amplitude drives mouth opening, while a restrained spectral estimate varies mouth shape. Generated speech chunks can play before the whole reply finishes synthesizing, and the complete WAV remains available for replay afterward. A small delivery layer makes restrained changes to speech speed and facial parameters for short replies; this is not an expressive voice model. If local inference is unavailable, it falls back to browser text-to-speech. There is no microphone or speech recognition. The Hiyori artwork and this demo's configurable persona are separate from Project AIRI.
 
 ## What works today
 
 | Area | Current behavior |
 | --- | --- |
-| Character | Hiyori Momose Live2D model with click interaction, basic mouth movement, and subtle delivery cues |
+| Character | Hiyori Momose Live2D model with click interaction, approximate audio-synchronous mouth movement, and subtle delivery cues |
 | Personality | Editable persona and opt-in user memory stored in the visitor's browser; recent chat survives refresh in the current tab |
 | Turn-taking | Visitors can draft a new message while Hiyori replies, then stop the current reply or speech before sending it |
 | Brain | Server-side DeepSeek streaming, with an explicitly labelled local fallback when unconfigured |
@@ -136,6 +136,8 @@ These are existing presets, not a custom-trained or cloned voice. Choosing one d
 
 The ONNX model is **not** bundled in the repository or hosted on this VPS. On first use, each visitor's browser downloads the roughly 326 MB fp32 model directly from Hugging Face and caches it locally. The app tries WebGPU first and then WASM. Browser tests found that q4f16/WebGPU could return an all-zero waveform and q8/WASM could return invalid samples; fp32/WebGPU produced a non-silent WAV. This does not add a paid TTS API or VPS inference load, but it requires model-download access and a reasonably capable device. The app rejects silent output instead of presenting it as successful speech. Each complete sentence can start synthesizing while DeepSeek streams later text; raw token boundaries are buffered so names such as `DeepSeek` are normalized intact. During long replies the player progress resets for each generated chunk; after playback it holds the combined WAV for replay. If automatic playback is blocked, use the visible audio player's play button. The browser build currently fails on some English spans, so common terms are mapped to Chinese and remaining Latin words are spelled out on the same fixed voice. If model loading or synthesis fails before audio starts, the app attempts the browser's built-in voice and reports the fallback. Only Kokoro playback uses measured audio levels for the mouth; browser fallback retains the simpler speaking animation. DeepSeek chat still uses its paid API.
 
+Kokoro playback now samples the generated audio at 40 mouth frames per second. Volume controls opening; a bounded low/mid-frequency estimate adds small rounded-versus-spread mouth-form changes. The positions follow playback time, including pause and replay, but are only an audio-driven approximation: Kokoro exposes phonemes without their timing, so this is **not** phoneme-level alignment or validated viseme recognition.
+
 ## Deployment
 
 The current VPS uses the sample systemd unit in `deploy/airi-lite.service`: Node listens only on `127.0.0.1:3001`; Nginx forwards `/airi/` and disables proxy buffering for streamed replies. Keep the production `.env` outside Git and readable only by the service account. Check `GET /airi/api/health` for non-secret status, then test a chat with the access code. This route shares a domain with another app, but it runs as an independent service.
@@ -143,7 +145,7 @@ The current VPS uses the sample systemd unit in `deploy/airi-lite.service`: Node
 ## Roadmap
 
 1. Measure first-audio latency and speech gaps under real network conditions, then evaluate a genuinely expressive voice model; speed changes alone do not provide emotional prosody.
-2. Add phoneme-level mouth shapes and more nuanced expressions; the current lip sync follows volume, not exact phonemes.
+2. Evaluate phoneme-level alignment and more nuanced expressions; the current lip sync follows audio volume and spectral colour, not exact phoneme timestamps.
 3. Add per-user accounts/quotas before opening unrestricted public chat.
 
 ## License
