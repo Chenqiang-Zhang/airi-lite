@@ -47,6 +47,9 @@ test('builds a persona-led system prompt', () => {
   assert.match(prompt, /\[\[tone:soft\]\]/)
   assert.match(prompt, /没有读取用户浏览器标签页/)
   assert.match(prompt, /不要用“刚才看到”/)
+  assert.match(prompt, /用户明确更正的信息，优先于旧的保存记忆/)
+  assert.match(prompt, /不把自己的建议当成用户已经答应/)
+  assert.match(prompt, /不补造共同经历/)
 })
 
 test('bounds opt-in user memory and includes it only when provided', () => {

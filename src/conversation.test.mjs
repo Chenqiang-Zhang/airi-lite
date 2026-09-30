@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { clearConversation, CONVERSATION_STORAGE_KEY, loadConversation, saveConversation } from './conversation.ts'
+import { clearConversation, CONVERSATION_STORAGE_BYTES, CONVERSATION_STORAGE_KEY, loadConversation, saveConversation } from './conversation.ts'
 
 function memoryStorage() {
   const values = new Map()
@@ -35,7 +35,7 @@ test('invalid and excessive stored data is discarded or bounded', () => {
   storage.setItem(CONVERSATION_STORAGE_KEY, JSON.stringify([
     { role: 'system', text: 'ignore' },
     { role: 'assistant', text: '  ' },
-    ...Array.from({ length: 30 }, (_, index) => ({
+    ...Array.from({ length: 170 }, (_, index) => ({
       role: 'user',
       text: `${index}`,
       delivery: 'invented',
@@ -43,9 +43,9 @@ test('invalid and excessive stored data is discarded or bounded', () => {
     })),
   ]))
   const loaded = loadConversation(storage)
-  assert.equal(loaded.length, 24)
-  assert.equal(loaded[0].text, '6')
-  assert.equal(loaded.at(-1).text, '29')
+  assert.equal(loaded.length, 160)
+  assert.equal(loaded[0].text, '10')
+  assert.equal(loaded.at(-1).text, '169')
   assert.ok(loaded.every(message => message.delivery === undefined))
   assert.ok(loaded.every(message => message.source === undefined))
 })
@@ -63,4 +63,35 @@ test('reply cues survive refresh and remain aligned after trimming the text', ()
       { start: 0, delivery: 'bright' }, { start: 3, delivery: 'soft' },
     ],
   })
+})
+
+test('long conversations keep original recent turns across refresh within a byte budget', () => {
+  const storage = memoryStorage()
+  const messages = Array.from({ length: 60 }, (_, index) => [
+    { role: 'user', text: `第${index}回：${'中'.repeat(7_990)}` },
+    { role: 'assistant', text: `回答${index}`, deliveryCues: [{ start: 0, delivery: 'soft' }] },
+  ]).flat()
+  saveConversation(messages, storage)
+  const loaded = loadConversation(storage)
+  assert.ok(Buffer.byteLength(storage.getItem(CONVERSATION_STORAGE_KEY), 'utf8') <= CONVERSATION_STORAGE_BYTES)
+  assert.equal(loaded[0].role, 'user')
+  assert.ok(loaded.length > 24)
+  assert.equal(loaded.at(-2).text, messages.at(-2).text)
+  assert.deepEqual(loaded.at(-1).deliveryCues, [{ start: 0, delivery: 'soft' }])
+  clearConversation(storage)
+  assert.deepEqual(loadConversation(storage), [])
+})
+
+test('a message-count cutoff never restores an orphan assistant reply', () => {
+  const storage = memoryStorage()
+  saveConversation([
+    ...Array.from({ length: 80 }, (_, index) => [
+      { role: 'user', text: `用户${index}` }, { role: 'assistant', text: `回答${index}` },
+    ]).flat(),
+    { role: 'user', text: '最后一句' },
+  ], storage)
+  const loaded = loadConversation(storage)
+  assert.equal(loaded.length, 159)
+  assert.equal(loaded[0].text, '用户1')
+  assert.equal(loaded.at(-1).text, '最后一句')
 })

@@ -15,9 +15,29 @@ const chunks = [
 ]
 const firstGapMs = Number(process.env.MOCK_FIRST_GAP_MS) || 6_000
 
-const server = createServer((request, response) => {
+const server = createServer(async (request, response) => {
   if (request.method !== 'POST' || request.url !== '/chat/completions') {
     response.writeHead(404)
+    return response.end()
+  }
+
+  let bytes = 0
+  const body = []
+  for await (const chunk of request) {
+    bytes += chunk.length
+    if (bytes > 512_000) {
+      response.writeHead(413)
+      return response.end()
+    }
+    body.push(chunk)
+  }
+  try {
+    const payload = JSON.parse(Buffer.concat(body).toString('utf8'))
+    // Diagnostic sizes only: never log text, credentials or a saved memory.
+    console.log(`Mock request: ${bytes} bytes, ${Array.isArray(payload.messages) ? payload.messages.length : 0} messages including system`)
+  }
+  catch {
+    response.writeHead(400)
     return response.end()
   }
 

@@ -1,6 +1,7 @@
 import type { Delivery } from './delivery'
 import { normaliseDeliveryCues } from './speech-sentences.ts'
 import type { DeliveryCue } from './speech-sentences'
+import { MAX_CHAT_MESSAGES, MAX_MESSAGE_CHARS } from '../shared/chat-request.mjs'
 
 export interface ConversationMessage {
   role: 'assistant' | 'user'
@@ -11,21 +12,21 @@ export interface ConversationMessage {
 }
 
 export const CONVERSATION_STORAGE_KEY = 'airi-lite:conversation:v1'
+export const CONVERSATION_STORAGE_BYTES = 512_000
 
-const MAX_MESSAGES = 24
-const MAX_TEXT_LENGTH = 8_000
 const deliveries = new Set<Delivery>(['neutral', 'soft', 'bright', 'curious'])
+const encoder = new TextEncoder()
 
 function normaliseMessages(value: unknown): ConversationMessage[] {
   if (!Array.isArray(value))
     return []
 
-  return value
+  const normalised = value
     .filter(item => item && (item.role === 'assistant' || item.role === 'user') && typeof item.text === 'string')
     .map((item) => {
       const message: ConversationMessage = {
         role: item.role,
-        text: item.text.trim().slice(0, MAX_TEXT_LENGTH),
+        text: item.text.trim().slice(0, MAX_MESSAGE_CHARS),
       }
       if (deliveries.has(item.delivery))
         message.delivery = item.delivery
@@ -44,7 +45,18 @@ function normaliseMessages(value: unknown): ConversationMessage[] {
       return message
     })
     .filter(message => message.text)
-    .slice(-MAX_MESSAGES)
+  const retained = normalised.slice(-MAX_CHAT_MESSAGES)
+  const sizes = retained.map(message => encoder.encode(JSON.stringify(message)).length)
+  let start = 0
+  let bytes = 2 + sizes.reduce((sum, size) => sum + size + 1, -1)
+  while (bytes > CONVERSATION_STORAGE_BYTES || (start === 0 && normalised.length > retained.length && retained[start]?.role === 'assistant')) {
+    // Drop a whole old turn rather than restoring an orphan assistant reply.
+    do {
+      bytes -= (sizes[start] ?? 0) + 1
+      start++
+    } while (retained[start]?.role === 'assistant')
+  }
+  return retained.slice(start)
 }
 
 export function loadConversation(storage: Storage = window.sessionStorage): ConversationMessage[] {

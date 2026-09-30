@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>同标签页上下文检查 · AIRI Lite</title>
+  <style>
+    body { max-width: 900px; margin: 40px auto; padding: 0 24px; color: #33334d; background: #faf8fc; font: 16px/1.7 system-ui; }
+    button, a { display: inline-block; margin: 8px 8px 8px 0; padding: 10px 16px; border-radius: 12px; border: 1px solid #d9cce8; color: #50335f; background: #fff; font: inherit; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 24px; background: white; border-radius: 16px; }
+  </style>
+</head>
+<body>
+  <h1>同标签页上下文检查</h1>
+  <p>开发诊断页，不会调用模型。样例是合成测试数据，不是真实聊天；准备样例会替换当前标签页的对话，不改长期记忆或人格。</p>
+  <button id="recall">准备 15 轮回忆样例</button>
+  <button id="long">准备超长对话样例</button>
+  <button id="clear">清空测试对话</button>
+  <a href="../">进入 demo 验证</a>
+  <pre id="report" role="status">请选择样例，再进入 demo，发送最后的问题。</pre>
+  <script type="module">
+    import { saveConversation, loadConversation, clearConversation } from '../src/conversation.ts'
+    import { DEFAULT_PERSONA } from '../src/persona.ts'
+    import { normaliseChatRequest } from '../shared/chat-request.mjs'
+    const report = document.querySelector('#report')
+    const question = '刚才我说的盆栽叫什么？今晚的两件事是什么顺序？只说我已经讲过的，不知道别猜。'
+    function prepare(messages, prompt) {
+      saveConversation(messages)
+      const loaded = loadConversation()
+      const full = { persona: DEFAULT_PERSONA, messages: [...loaded.map(({ role, text }) => ({ role, content: text })), { role: 'user', content: prompt }] }
+      const packed = normaliseChatRequest(full)
+      const bytes = value => new TextEncoder().encode(JSON.stringify(value)).length
+      report.textContent = `保存并重新读取：${loaded.length} 条原文\n未打包请求：${bytes(full)} bytes\n实际请求：${bytes(packed)} bytes，${packed.messages.length} 条\n首条角色：${packed.messages[0].role}\n最新问题完整：${packed.messages.at(-1).content === prompt}\n\n进入 demo 后发送：\n${prompt}`
+    }
+    document.querySelector('#recall').onclick = () => prepare([
+      { role: 'user', text: '我的盆栽叫饭团。今晚先给它浇水，再练十分钟日语，别弄反。' },
+      { role: 'assistant', text: '饭团，这个名字可爱。先浇水，再练日语。' },
+      ...Array.from({ length: 14 }, (_, i) => [
+        { role: 'user', text: `换个话题，随便聊一句，第${i + 1}回。` },
+        { role: 'assistant', text: '那就随便聊一句，不用赶着做什么。' },
+      ]).flat(),
+    ], question)
+    document.querySelector('#long').onclick = () => prepare(Array.from({ length: 80 }, (_, i) => [
+      { role: 'user', text: `长文测试${i}：${'这是一段用来测上下文容量的合成文字。'.repeat(80)}` },
+      { role: 'assistant', text: `这只是第${i}轮的测试回复。` },
+    ]).flat(), '这是容量测试，回一句简短的话就好。')
+    document.querySelector('#clear').onclick = () => {
+      clearConversation()
+      report.textContent = `测试对话已清空，剩余 ${loadConversation().length} 条。长期记忆未改变。`
+    }
+  </script>
+</body>
+</html>

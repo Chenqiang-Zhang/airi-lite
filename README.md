@@ -24,7 +24,7 @@ The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, l
 | Area | Current behavior |
 | --- | --- |
 | Character | Hiyori Momose Live2D model with click interaction, audio-synchronous mouth movement, and smoothly blended attention/thinking/speaking cues |
-| Personality | Editable persona and opt-in user memory stored in the visitor's browser; recent chat survives refresh in the current tab |
+| Personality | Editable persona and opt-in user memory; up to 160 recent messages survive refresh in the current tab, subject to byte limits |
 | Turn-taking | Visitors can draft a new message while Hiyori replies, then stop the current reply or speech before sending it |
 | Brain | Server-side DeepSeek streaming, with an explicitly labelled local fallback when unconfigured |
 | Voice | Three selectable Kokoro Chinese female presets (`zf_001`–`zf_003`) with slight speed variation; browser speech fallback |
@@ -97,7 +97,11 @@ The default Hiyori persona favors concrete reactions over routine closing questi
 
 Existing user-edited character cards are preserved when the default changes; an older custom card receives an empty preferences field rather than Hiyori's tastes. An unchanged previous default upgrades automatically. You can edit or clear **稳定偏好与小习惯** in **人格**, then save. Saving is temporarily unavailable while a reply is being generated, so the current turn retains the card it started with. A saved card applies to subsequent replies without deleting the conversation. These prompt controls guide the model; consistency should still be checked over multiple conversations.
 
-Recent conversation is temporarily kept in this browser tab's session storage so refreshing the page does not make Hiyori forget the current exchange. **清空** removes that stored transcript. The transcript is not shared across devices or stored as long-term memory; its current context is still sent to DeepSeek when generating a reply.
+Recent conversation is temporarily kept in this browser tab's session storage: up to 160 messages (roughly 80 short exchanges), capped at 512 KB of serialized UTF-8 data. Refreshing retains the original words and sentence delivery cues. **清空** removes that transcript. It is not shared across devices or copied into long-term memory.
+
+The browser and server use the same context packer. Each request keeps a contiguous suffix of recent complete turns, including an unanswered latest user message; it does not skip a large turn and silently splice together unrelated older ones. Message context is capped at 80 KB and the full JSON packet at 120 KB, counting the persona, saved memory and JSON escaping. Long messages may therefore reduce how far back Hiyori can read. This replaces the previous hard cutoff of 24 messages and prevents a long visible conversation from growing into an oversized API request. It is bounded conversation context, not unlimited recall or an AI-generated summary. Messages over 8,000 characters are rejected before sending, leaving the draft intact rather than silently losing an ending correction.
+
+If you explicitly correct something in the current conversation, the prompt gives that correction priority over an old saved note or the character's earlier guess. Hiyori is also told to distinguish her own suggestions from plans you actually accepted. Saved notes are not automatically rewritten; you stay in control through **记忆**.
 
 Sentence-level delivery cues are kept with each reply in this tab, so **朗读** can regenerate the same cue sequence after refresh. The complete audio player's replay and seek also select the cue at the current playback time. Stopping cancels queued sentences as well as the current player; the avatar keeps a waiting pose while more audio is being prepared.
 
@@ -148,6 +152,8 @@ The avatar adds restrained attention cues while the input is focused, a thinking
 For local render-order checks, run the development server and open `/airi/scripts/avatar-preview.html`. It uses the actual Hiyori model and production performance controller, with fixed open/closed poses, expression controls, an idle-motion replay, and pre-render parameter assertions. It does not use the LLM or play audio and is not part of the production build.
 
 For a real Kokoro/Live2D playback check, open `/airi/scripts/speech-preview.html` in development. It plays three fixed sentences with bright, soft and curious cues and shows the cues emitted by the actual player; replay the combined WAV to check its audio timeline. This page is also excluded from production builds.
+
+For long-context checks, open `/airi/scripts/continuity-preview.html` in a fresh development tab. Its clearly labelled synthetic fixtures use the actual transcript storage and request packer. Preparing a fixture replaces that tab's conversation; it does not call DeepSeek or touch long-term memory. Follow its link to the demo and send the displayed question to test the real API path (or the local mock). This diagnostic page is excluded from production builds too.
 
 ## Deployment
 

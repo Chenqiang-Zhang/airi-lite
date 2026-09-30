@@ -1,6 +1,7 @@
 import type { PersonaConfig } from './persona'
 import type { Delivery } from './delivery'
 import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code'
+import { normaliseChatRequest } from '../shared/chat-request.mjs'
 
 export interface ChatMessage {
   role: 'assistant' | 'user'
@@ -54,11 +55,11 @@ export async function streamChat(options: {
       'Content-Type': 'application/json',
       ...(options.accessCode ? { 'X-Demo-Access-Code': options.accessCode } : {}),
     },
-    body: JSON.stringify({
+    body: JSON.stringify(normaliseChatRequest({
       messages: options.messages,
       persona: options.persona,
       userMemory: options.userMemory,
-    }),
+    })),
     signal: options.signal,
   })
 

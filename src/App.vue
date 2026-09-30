@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { PersonaConfig } from './persona'
+import { MAX_MESSAGE_CHARS, normaliseChatRequest } from '../shared/chat-request.mjs'
 
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
@@ -164,6 +165,10 @@ async function sendMessage() {
   const text = input.value.trim()
   if (!text || isGenerating.value)
     return
+  if (text.length > MAX_MESSAGE_CHARS) {
+    lastError.value = `消息太长，请缩短到 ${MAX_MESSAGE_CHARS} 字符以内。`
+    return
+  }
   if (accessProtected.value && !accessCode.value) {
     lastError.value = '请先输入体验码。'
     return
@@ -173,6 +178,22 @@ async function sendMessage() {
     accessCode.value = ''
     sessionStorage.removeItem('airi-demo-access-code')
     lastError.value = INVALID_ACCESS_CODE_MESSAGE
+    return
+  }
+
+  let chatRequest: ReturnType<typeof normaliseChatRequest>
+  try {
+    chatRequest = normaliseChatRequest({
+      messages: [
+        ...messages.value.filter(message => message.source !== 'fallback').map(message => ({ role: message.role, content: message.text })),
+        { role: 'user', content: text },
+      ],
+      persona: persona.value,
+      userMemory: userMemory.value,
+    })
+  }
+  catch (error) {
+    lastError.value = error instanceof Error ? error.message : '聊天内容过大，请精简后再发送。'
     return
   }
 
@@ -186,10 +207,6 @@ async function sendMessage() {
   input.value = ''
   await nextTick()
 
-  const requestMessages = messages.value.filter(message => message.source !== 'fallback').map(message => ({
-    role: message.role,
-    content: message.text,
-  }))
   const assistantMessage: Message = {
     id: Date.now() + 1,
     role: 'assistant',
@@ -207,9 +224,9 @@ async function sendMessage() {
 
   try {
     await streamChat({
-      messages: requestMessages,
-      persona: persona.value,
-      userMemory: userMemory.value,
+      messages: chatRequest.messages,
+      persona: chatRequest.persona,
+      userMemory: chatRequest.userMemory,
       accessCode: accessCode.value,
       signal: controller.signal,
       onDelivery: (delivery) => {
@@ -481,7 +498,7 @@ function saveAccessCode() {
       </form>
 
       <form class="composer" @submit.prevent="sendMessage">
-        <input ref="composerInput" v-model="input" :disabled="accessProtected && !accessCode" :aria-label="`发送给 ${characterName} 的消息`" autocomplete="off" :placeholder="isGenerating ? '可以先写下一句，停下后发送……' : '输入一段文字……'" @focus="composerFocused = true" @blur="composerFocused = false">
+        <input ref="composerInput" v-model="input" :maxlength="MAX_MESSAGE_CHARS" :disabled="accessProtected && !accessCode" :aria-label="`发送给 ${characterName} 的消息`" autocomplete="off" :placeholder="isGenerating ? '可以先写下一句，停下后发送……' : '输入一段文字……'" @focus="composerFocused = true" @blur="composerFocused = false">
         <button type="submit" :disabled="isGenerating || !input.trim() || (accessProtected && !accessCode)">
           {{ isGenerating ? '生成中' : '发送' }}
         </button>
@@ -490,7 +507,7 @@ function saveAccessCode() {
       <p class="notice" :class="{ error: lastError }">
         {{ lastError || interactionNotice || (providerMode === 'deepseek' ? '回复由 DeepSeek 生成，完整句子会逐步朗读；可点击角色互动。' : '尚未配置 DeepSeek Key，当前会使用明确标注的本地回复。') }}
       </p>
-      <p class="memory-notice">对话只在当前标签页保留；「清空」只删对话，不删你主动保存的记忆。</p>
+      <p class="memory-notice">当前标签页保留最近 160 条对话；长文会优先保留最近完整回合。「清空」不删你主动保存的记忆。</p>
       <p class="voice-notice" role="status">{{ voiceProblem || voiceLabel }} · <a href="https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh" target="_blank" rel="noopener noreferrer">开源模型</a></p>
       <audio ref="speechPlayer" class="speech-player" :class="{ visible: audioAvailable }" controls preload="none" aria-label="日和语音播放器" />
     </section>
