@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hiyori 加载与清理校验（仅本地）</title>
+<style>
+  body { margin: 0; background: #f5eee9; color: #41342c; font: 16px system-ui; }
+  main { display: grid; grid-template-columns: minmax(320px, 55%) 1fr; min-height: 95vh; }
+  #stage { height: 90vh; position: relative; }
+  #stage canvas { display: block; width: 100%; height: 100%; }
+  aside { padding: 24px; }
+  button { padding: 10px; margin: 4px; }
+  pre { white-space: pre-wrap; line-height: 1.6; }
+</style>
+<main>
+  <div id="stage"></div>
+  <aside>
+    <h1>Hiyori 加载与清理校验</h1>
+    <p>直接调用生产 mountHiyori。仅固定模型与合成口型输入，不调用 LLM、Kokoro 或付费语音；设备提示为显式测试输入，不是手机实测。</p>
+    <button id="cancel">加载后立即取消</button>
+    <button id="mount">正常加载 · 省电绘制</button>
+    <button id="remount">旧加载取消后重挂 · 共享纹理</button>
+    <button id="resize" disabled>只改变容器尺寸</button>
+    <button id="destroy" disabled>销毁两次</button>
+    <pre id="state">等待操作。</pre>
+    <p>This content uses sample data owned and copyrighted by Live2D Inc.<br>Hiyori Momose · Illustration: Kani Biimu</p>
+  </aside>
+</main>
+<script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+<script type="module">
+  import { mountHiyori } from '../src/live2d.ts'
+  import * as PIXI from 'pixi.js'
+  import { Live2DFactory, Live2DModel } from 'pixi-live2d-display/cubism4'
+  import { createAvatarMountScope, loadAvatarResource, releaseAvatarModel } from '../src/avatar-mount.ts'
+  const stage = document.querySelector('#stage')
+  const output = document.querySelector('#state')
+  const cancelButton = document.querySelector('#cancel')
+  const mountButton = document.querySelector('#mount')
+  const remountButton = document.querySelector('#remount')
+  const resizeButton = document.querySelector('#resize')
+  const destroyButton = document.querySelector('#destroy')
+  let avatar = null, controller = null, disposed = false
+  let sharedTextures = []
+  let runs = 0
+  function show(value) {
+    output.textContent = JSON.stringify(value, null, 2)
+    for (const [key, item] of Object.entries(value))
+      if (typeof item === 'number' || typeof item === 'boolean' || typeof item === 'string') output.dataset[key] = String(item)
+  }
+  function frame() {
+    const canvas = stage.querySelector('canvas')
+    return { canvasCount: stage.querySelectorAll('canvas').length,
+      canvasWidth: canvas?.width ?? 0, canvasHeight: canvas?.height ?? 0,
+      stageWidth: stage.clientWidth, stageHeight: stage.clientHeight }
+  }
+  function busy(value) { cancelButton.disabled = mountButton.disabled = remountButton.disabled = value }
+  cancelButton.addEventListener('click', async () => {
+    if (disposed) return
+    avatar?.destroy(); avatar = null
+    resizeButton.disabled = destroyButton.disabled = true
+    busy(true)
+    controller = new AbortController()
+    const pending = mountHiyori(stage, { signal: controller.signal })
+    const beforeCancel = frame().canvasCount
+    controller.abort()
+    const immediateCanvasCount = frame().canvasCount
+    show({ phase: 'waiting-for-loader', run: ++runs, beforeCancel, immediateCanvasCount, ...frame() })
+    try {
+      const unexpected = await pending
+      unexpected.destroy()
+      show({ phase: 'FAIL: canceled mount returned', immediateCanvasCount, ...frame() })
+    }
+    catch (error) {
+      show({ phase: error.name === 'AbortError' && immediateCanvasCount === 0 && frame().canvasCount === 0 ? 'PASS: immediate and late cancellation' : 'FAIL: cancellation',
+        error: error.name, beforeCancel, immediateCanvasCount, ...frame() })
+    }
+    finally { if (!disposed) busy(false) }
+  })
+  mountButton.addEventListener('click', async () => {
+    if (disposed) return
+    avatar?.destroy(); avatar = null
+    busy(true)
+    controller = new AbortController()
+    try {
+      avatar = await mountHiyori(stage, { signal: controller.signal, deviceHints: { cores: 2 } })
+      if (disposed) { avatar.destroy(); return }
+      avatar.setActivity('speaking')
+      avatar.setMouth(0.42, 0.2)
+      avatar.setDelivery('bright')
+      show({ phase: 'ready', maxFPS: avatar.renderBudget.maxFPS, resolution: avatar.renderBudget.resolution, ...frame() })
+      resizeButton.disabled = destroyButton.disabled = false
+    }
+    catch (error) { show({ phase: 'FAIL: load', error: error.name, ...frame() }) }
+    finally { if (!disposed) busy(false) }
+  })
+  resizeButton.addEventListener('click', () => {
+    const mounted = avatar
+    const beforeHeight = frame().canvasHeight
+    const height = stage.clientHeight > 420 ? 360 : 540
+    stage.style.height = `${height}px`
+    // ResizeObserver/render buffer results are read after two real RAFs.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (disposed || avatar !== mounted) return
+      const after = frame()
+      const expected = Math.round(after.stageHeight * avatar.renderBudget.resolution)
+      show({ phase: after.canvasHeight === expected && after.canvasHeight !== beforeHeight ? 'PASS: container resize' : 'FAIL: container resize',
+        beforeHeight, expectedHeight: expected, ...after })
+    }))
+  })
+  remountButton.addEventListener('click', async () => {
+    if (disposed) return
+    avatar?.destroy(); avatar = null
+    resizeButton.disabled = destroyButton.disabled = true
+    busy(true)
+    Object.assign(window, { PIXI })
+    const oldScope = createAvatarMountScope()
+    let oldModel, readyOld, allowOldToSettle
+    const ready = new Promise(resolve => { readyOld = resolve })
+    const gate = new Promise(resolve => { allowOldToSettle = resolve })
+    const modelOptions = { autoUpdate: false, autoInteract: false }
+    const old = loadAvatarResource(oldScope, () => (oldModel = new Live2DModel(modelOptions)), async model => {
+      await Live2DFactory.setupLive2DModel(model, `${import.meta.env.BASE_URL}models/hiyori/hiyori_free_t08.model3.json`, modelOptions)
+      readyOld()
+      await gate
+    }, model => releaseAvatarModel(model, () => PIXI.Container.prototype.destroy.call(model, { children: false })))
+    const oldResult = old.then(() => 'unexpected success', error => error.name)
+    try {
+      await Promise.race([ready, oldResult.then(outcome => { throw new Error(outcome) })])
+      oldScope.dispose()
+      controller = new AbortController()
+      avatar = await mountHiyori(stage, { signal: controller.signal, deviceHints: { cores: 2 } })
+      avatar.setActivity('speaking'); avatar.setMouth(0.42, 0.2)
+      const textures = [...oldModel.textures]
+      sharedTextures = textures
+      // Two browser RAFs can still precede the first 30fps application tick.
+      // Wait for an actual texture upload, bounded to 120 browser frames.
+      await new Promise(resolve => {
+        let attempts = 0
+        const observeUpload = () => {
+          if (textures.every(texture => Object.keys(texture.baseTexture._glTextures).length > 0) || ++attempts >= 120)
+            resolve()
+          else requestAnimationFrame(observeUpload)
+        }
+        requestAnimationFrame(observeUpload)
+      })
+      const gpuContextsBefore = textures.map(texture => Object.keys(texture.baseTexture._glTextures).length)
+      allowOldToSettle()
+      const oldOutcome = await oldResult
+      await new Promise(resolve => requestAnimationFrame(resolve))
+      const sharedTexturesValid = textures.every(texture => texture.valid && texture.baseTexture.valid)
+      const gpuContextsAfter = textures.map(texture => Object.keys(texture.baseTexture._glTextures).length)
+      const gpuCopiesPreserved = gpuContextsBefore.every((count, index) => count > 0 && gpuContextsAfter[index] === count)
+      show({ phase: oldOutcome === 'AbortError' && sharedTexturesValid && gpuCopiesPreserved && frame().canvasCount === 1
+        ? 'PASS: late old cleanup preserves new textures' : 'FAIL: shared texture race',
+        oldOutcome, sharedTexturesValid, gpuCopiesPreserved, gpuContextsBefore: gpuContextsBefore.join(','),
+        gpuContextsAfter: gpuContextsAfter.join(','), ...frame() })
+      resizeButton.disabled = destroyButton.disabled = false
+    }
+    catch (error) { show({ phase: 'FAIL: remount', error: error.name, ...frame() }) }
+    finally { allowOldToSettle(); oldScope.dispose(); if (!disposed) busy(false) }
+  })
+  destroyButton.addEventListener('click', () => {
+    avatar?.destroy(); avatar?.destroy(); avatar = null
+    controller?.abort()
+    resizeButton.disabled = destroyButton.disabled = true
+    const remainingGpuContexts = sharedTextures.reduce((count, texture) => count + Object.keys(texture.baseTexture._glTextures).length, 0)
+    show({ phase: frame().canvasCount === 0 && remainingGpuContexts === 0 ? 'PASS: idempotent destroy' : 'FAIL: destroy',
+      remainingGpuContexts, sharedCpuTexturesValid: sharedTextures.every(texture => texture.valid && texture.baseTexture.valid), ...frame() })
+  })
+  addEventListener('pagehide', () => { disposed = true; controller?.abort(); avatar?.destroy() }, { once: true })
+</script>
+</html>

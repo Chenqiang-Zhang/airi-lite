@@ -34,35 +34,218 @@
       <button data-reaction="clear">取消回应</button>
       <button data-speech="start">真实语音与动作</button>
       <button data-speech="stop">停止真实语音</button>
+      <button data-render="30">30fps 模式</button>
+      <button data-render="60">60fps 模式</button>
+      <button data-render="measure">测量真实帧率（3秒）</button>
+      <button data-render="hide">模拟隐藏再恢复（3秒）</button>
     </fieldset>
     <audio aria-label="动作同步语音播放器"></audio>
     <p><a id="download-audio" hidden download="hiyori-local-voice-check.wav">保存当前校验音频</a>（全部播放结束后保存的是合并 WAV，仅含上述测试台词。）</p>
     <pre id="state">正在加载模型……</pre>
+    <p>渲染测量使用真实 Cubism 与 WebGL。模拟隐藏只验证同一暂停接口，不等于真实切换标签页或实体手机测试；真正 document.hidden 的变化会单独记录。30/60 按钮切换帧率与像素预算，不重建抗锯齿上下文。</p>
+    <pre id="render-state">渲染验证准备中……</pre>
     <p>This content uses sample data owned and copyrighted by Live2D Inc.<br>Hiyori Momose · Illustration: Kani Biimu</p>
   </aside>
 </main>
 <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
 <script type="module">
   import * as PIXI from 'pixi.js'
-  import { Live2DModel } from 'pixi-live2d-display/cubism4'
+  import { Live2DFactory, Live2DModel } from 'pixi-live2d-display/cubism4'
   import { attachAvatarPerformance } from '../src/avatar-performance.ts'
+  import { attachAvatarRenderLoop, resolveAvatarRenderBudget } from '../src/avatar-rendering.ts'
+  import { createAvatarMountScope, loadAvatarResource, releaseAvatarModel, releaseAvatarRendererTextures } from '../src/avatar-mount.ts'
+  import { readDeviceHints } from '../src/speech-mode.ts'
   import { createSpeechController } from '../src/speech.ts'
   import { createPitchShadow, LOW_MOUTH_OPEN_THRESHOLD } from './avatar-diagnostic.mjs'
 
   const output = document.querySelector('#state')
+  const renderOutput = document.querySelector('#render-state')
   const controls = document.querySelector('#controls')
+  const scope = createAvatarMountScope()
+  addEventListener('pagehide', scope.dispose, { once: true })
+  scope.own(() => { controls.disabled = true })
   try {
     Object.assign(window, { PIXI })
     const stage = document.querySelector('#stage')
-    const app = new PIXI.Application({ resizeTo: stage, backgroundAlpha: 0, antialias: true })
+    let budget = resolveAvatarRenderBudget(readDeviceHints(), window.devicePixelRatio)
+    const app = new PIXI.Application({
+      width: Math.max(1, stage.clientWidth), height: Math.max(1, stage.clientHeight),
+      backgroundAlpha: 0, antialias: budget.antialias, resolution: budget.resolution,
+      autoDensity: true, autoStart: false, sharedTicker: false,
+    })
+    scope.own(() => app.destroy(true, { children: false }))
+    scope.own(() => releaseAvatarRendererTextures(app.renderer.texture))
+    const interaction = app.renderer.plugins.interaction
+    const interactionWasEnabled = interaction?.useSystemTicker
+    if (interaction) interaction.useSystemTicker = false
     stage.append(app.view)
-    const model = await Live2DModel.from(`${import.meta.env.BASE_URL}models/hiyori/hiyori_free_t08.model3.json`)
+    const modelOptions = { autoInteract: true, autoUpdate: false }
+    const model = await loadAvatarResource(scope, () => new Live2DModel(modelOptions),
+      model => Live2DFactory.setupLive2DModel(model,
+        `${import.meta.env.BASE_URL}models/hiyori/hiyori_free_t08.model3.json`, modelOptions),
+      model => releaseAvatarModel(model, () => PIXI.Container.prototype.destroy.call(model, { children: false })))
     model.anchor.set(0.5, 1)
     app.stage.addChild(model)
-    const scale = Math.min(stage.clientWidth * 0.9 / model.width, stage.clientHeight * 0.94 / model.height)
-    model.scale.set(scale)
-    model.position.set(stage.clientWidth / 2, stage.clientHeight * 1.04)
+    const naturalWidth = model.width, naturalHeight = model.height
+    const layout = () => {
+      if (scope.disposed || stage.clientWidth <= 0 || stage.clientHeight <= 0) return
+      if (app.screen.width !== stage.clientWidth || app.screen.height !== stage.clientHeight)
+        app.renderer.resize(stage.clientWidth, stage.clientHeight)
+      const scale = Math.min(stage.clientWidth * 0.9 / naturalWidth, stage.clientHeight * 0.94 / naturalHeight)
+      model.scale.set(scale)
+      model.position.set(stage.clientWidth / 2, stage.clientHeight * 1.04)
+    }
+    const resizeObserver = new ResizeObserver(layout)
+    resizeObserver.observe(stage)
+    scope.own(() => resizeObserver.disconnect())
+    layout()
     const internal = model.internalModel
+    let modelUpdates = 0, internalUpdates = 0, renders = 0, maxDelta = 0
+    let measurement = null, measurementTimer = null, measurementResult = null
+    let simulationTimer = null, simulationResult = null, simulatedHidden = false
+    let pendingRealResume = false, pendingSimulatedResume = false
+    let realHiddenSnapshot = null, realHideCount = 0, realResumeCount = 0
+    let realVisibilityResult = { initialHidden: document.hidden }
+    let renderLoop = null
+    const visibilityListeners = new Set()
+    const visibility = {
+      get hidden() { return document.hidden || simulatedHidden },
+      addEventListener(type, listener) { if (type === 'visibilitychange') visibilityListeners.add(listener) },
+      removeEventListener(type, listener) { if (type === 'visibilitychange') visibilityListeners.delete(listener) },
+    }
+    const counts = () => ({ modelUpdates, internalUpdates, renders })
+    const differences = start => ({
+      modelUpdates: modelUpdates - start.modelUpdates,
+      internalUpdates: internalUpdates - start.internalUpdates,
+      renders: renders - start.renders,
+    })
+    const updateRenderOutput = () => {
+      renderOutput.dataset.maxFps = String(budget.maxFPS)
+      renderOutput.dataset.resolution = String(app.renderer.resolution)
+      renderOutput.dataset.modelAutoUpdate = String(model.autoUpdate)
+      renderOutput.dataset.appStarted = String(app.ticker.started)
+      renderOutput.dataset.interactionTicker = String(interaction?.useSystemTicker)
+      renderOutput.dataset.documentHidden = String(document.hidden)
+      renderOutput.dataset.simulatedHidden = String(simulatedHidden)
+      renderOutput.dataset.modelUpdates = String(modelUpdates)
+      renderOutput.dataset.internalUpdates = String(internalUpdates)
+      renderOutput.dataset.renders = String(renders)
+      renderOutput.dataset.maxDeltaMs = maxDelta.toFixed(3)
+      renderOutput.dataset.measurementStatus = measurement ? 'running' : measurementResult?.status ?? 'idle'
+      renderOutput.dataset.measurement = JSON.stringify(measurementResult)
+      renderOutput.dataset.simulation = JSON.stringify(simulationResult)
+      renderOutput.dataset.realVisibility = JSON.stringify(realVisibilityResult)
+      renderOutput.textContent = `预算: ${budget.maxFPS}fps / resolution ${app.renderer.resolution}\n模型 autoUpdate: ${model.autoUpdate}\napp ticker started: ${app.ticker.started}\ninteraction system ticker: ${interaction?.useSystemTicker}\n真实页面隐藏: ${document.hidden} / 模拟隐藏: ${simulatedHidden}\nmodel.update / Cubism更新 / prerender: ${modelUpdates} / ${internalUpdates} / ${renders}\n最大模型 dt: ${maxDelta.toFixed(3)}ms\n3秒实测: ${measurement ? '正在测量……' : JSON.stringify(measurementResult, null, 2)}\n模拟隐藏（不是实际tab或实体手机）: ${JSON.stringify(simulationResult, null, 2)}\n真实 visibilitychange: ${JSON.stringify(realVisibilityResult, null, 2)}`
+    }
+    const originalUpdate = model.update
+    model.update = function (delta) {
+      modelUpdates++
+      maxDelta = Math.max(maxDelta, delta)
+      if (measurement) measurement.maxDeltaMs = Math.max(measurement.maxDeltaMs, delta)
+      if (pendingRealResume) {
+        realVisibilityResult.firstResumeDeltaMs = delta
+        pendingRealResume = false
+      }
+      if (pendingSimulatedResume) {
+        simulationResult.firstResumeDeltaMs = delta
+        pendingSimulatedResume = false
+      }
+      return originalUpdate.call(this, delta)
+    }
+    scope.own(() => { model.update = originalUpdate })
+    const countInternalUpdate = () => { internalUpdates++ }
+    const countRender = () => { renders++ }
+    internal.on('beforeModelUpdate', countInternalUpdate)
+    app.renderer.on('prerender', countRender)
+    scope.own(() => { internal.off('beforeModelUpdate', countInternalUpdate); app.renderer.off('prerender', countRender) })
+    const notifyVisibility = () => {
+      const event = new Event('visibilitychange')
+      for (const listener of [...visibilityListeners]) {
+        if (typeof listener === 'function') listener(event)
+        else listener.handleEvent(event)
+      }
+    }
+    const actualVisibilityChanged = () => {
+      if (scope.disposed) return
+      if (document.hidden) {
+        realHideCount++
+        realHiddenSnapshot = { ...counts(), at: performance.now() }
+        realVisibilityResult = { hidden: true, hideCount: realHideCount, resumeCount: realResumeCount,
+          hideAt: realHiddenSnapshot.at, hideCounts: counts() }
+        pendingRealResume = false
+      }
+      else {
+        realResumeCount++
+        realVisibilityResult = { ...realVisibilityResult, hidden: false,
+          hideCount: realHideCount, resumeCount: realResumeCount, resumeAt: performance.now(), resumeCounts: counts(),
+          hiddenDelta: realHiddenSnapshot ? differences(realHiddenSnapshot) : null,
+          hiddenElapsedMs: realHiddenSnapshot ? performance.now() - realHiddenSnapshot.at : null,
+          firstResumeDeltaMs: null }
+        pendingRealResume = true
+      }
+      // Real Document events and the synthetic control share only this facade;
+      // the production loop is otherwise unchanged and sees their OR state.
+      notifyVisibility()
+      const prefix = document.hidden ? 'hide' : 'resume'
+      realVisibilityResult[`${prefix}AppStarted`] = app.ticker.started
+      realVisibilityResult[`${prefix}InteractionTicker`] = interaction?.useSystemTicker
+      updateRenderOutput()
+    }
+    document.addEventListener('visibilitychange', actualVisibilityChanged)
+    scope.own(() => document.removeEventListener('visibilitychange', actualVisibilityChanged))
+    const finishMeasurement = status => {
+      if (!measurement) return
+      clearTimeout(measurementTimer)
+      measurementTimer = null
+      const elapsedMs = performance.now() - measurement.at
+      const delta = differences(measurement.counts)
+      measurementResult = { status, requestedMs: 3000, elapsedMs, maxFPS: measurement.maxFPS,
+        ...delta, modelUpdateFPS: delta.modelUpdates * 1000 / elapsedMs,
+        internalUpdateFPS: delta.internalUpdates * 1000 / elapsedMs,
+        renderFPS: delta.renders * 1000 / elapsedMs, maxDeltaMs: measurement.maxDeltaMs }
+      measurement = null
+      updateRenderOutput()
+    }
+    const startMeasurement = () => {
+      finishMeasurement('replaced')
+      measurement = { at: performance.now(), counts: counts(), maxFPS: budget.maxFPS, maxDeltaMs: 0 }
+      measurementTimer = setTimeout(() => { if (!scope.disposed) finishMeasurement('done') }, 3000)
+      updateRenderOutput()
+    }
+    const startSimulatedHide = () => {
+      if (simulationTimer !== null) return
+      const snapshot = { ...counts(), at: performance.now() }
+      pendingSimulatedResume = false
+      simulatedHidden = true
+      notifyVisibility()
+      simulationResult = { status: 'running', syntheticOnly: true, requestedMs: 3000,
+        hideCounts: counts(), hideAppStarted: app.ticker.started, hideInteractionTicker: interaction?.useSystemTicker }
+      updateRenderOutput()
+      simulationTimer = setTimeout(() => {
+        simulationTimer = null
+        if (scope.disposed) return
+        simulatedHidden = false
+        notifyVisibility()
+        simulationResult = { ...simulationResult, status: 'done', elapsedMs: performance.now() - snapshot.at,
+          hiddenDelta: differences(snapshot), resumeCounts: counts(),
+          resumeAppStarted: app.ticker.started, resumeInteractionTicker: interaction?.useSystemTicker,
+          realDocumentStillHidden: document.hidden, firstResumeDeltaMs: null }
+        pendingSimulatedResume = true
+        updateRenderOutput()
+      }, 3000)
+    }
+    const changeBudget = fps => {
+      finishMeasurement('budget-changed')
+      renderLoop?.destroy()
+      budget = resolveAvatarRenderBudget(fps === 30 ? { saveData: true } : {}, window.devicePixelRatio)
+      app.renderer.resolution = budget.resolution
+      app.renderer.resize(Math.max(1, stage.clientWidth), Math.max(1, stage.clientHeight))
+      layout()
+      renderLoop = attachAvatarRenderLoop(app, model, { visibility, budget, updatePriority: PIXI.UPDATE_PRIORITY.NORMAL })
+      updateRenderOutput()
+    }
+    const diagnosticsTimer = setInterval(updateRenderOutput, 250)
+    scope.own(() => { clearInterval(diagnosticsTimer); clearTimeout(measurementTimer); clearTimeout(simulationTimer) })
     const pitchIndex = internal.coreModel.getParameterIndex('ParamAngleY')
     const pitchShadow = createPitchShadow(
       internal.coreModel.getParameterMinimumValue(pitchIndex),
@@ -91,6 +274,7 @@
       setDelivery(value) { actualActor.setDelivery(value); shadowActor.setDelivery(value) },
       destroy() { actualActor.destroy(); shadowActor.destroy() },
     }
+    scope.own(actor.destroy)
     let activity = 'idle', delivery = 'neutral', form = 0, motionMouth = 0, frames = 0, failures = 0, overridden = 0
     let reactions = 0, reactionTime = -Infinity, reactionMaxOffset = 0
     let expectedMouth = 0.7, speechMode = false, speaking = false, preparing = false, voiceState = 'idle', voiceProblem = ''
@@ -111,6 +295,7 @@
       onAudioReady(value) { download.hidden = !value; if (value) download.href = audio.src; else download.removeAttribute('href') },
       onProblem(value) { voiceProblem = value },
     })
+    scope.own(() => speech.dispose())
     actor.setMouth(0.7, form)
     controls.addEventListener('click', ({ target }) => {
       if (controls.disabled) return
@@ -127,6 +312,12 @@
         return
       }
       if (target.dataset.speech === 'stop') { speech.cancel(); return }
+      if (target.dataset.render) {
+        if (target.dataset.render === '30' || target.dataset.render === '60') changeBudget(Number(target.dataset.render))
+        if (target.dataset.render === 'measure') startMeasurement()
+        if (target.dataset.render === 'hide') startSimulatedHide()
+        return
+      }
       if (speechMode) {
         speech.cancel()
         speechMode = false
@@ -180,11 +371,20 @@
       if (Math.abs(motionMouth - mouth) > 0.1) overridden++
       if (++frames % 15 === 0) output.textContent = `状态: ${activity} / ${delivery}\n动作写入的开口: ${motionMouth.toFixed(3)}\n实际绘制前开口: ${mouth.toFixed(3)}\n实际绘制前嘴形: ${renderedForm.toFixed(3)}\n回应前/后 Y: ${beforeHeadY.toFixed(3)} / ${headY.toFixed(3)}\n回应次数: ${reactions}\n本次最大 Y 偏移: ${reactionMaxOffset.toFixed(3)}\n检查帧数: ${frames}\n已纠正动作覆盖: ${overridden}\n口型覆盖错误: ${failures}\n声线状态: ${voiceState}\n真实音频帧: ${audioFrames}\n低开口帧（<0.06）: ${lowOpenFrames}\n伴随开口的轻点头帧: ${emphasisedFrames}\n最大语音动作偏移: ${maxEmphasis.toFixed(3)}\n低开口时的动作误差: ${lowOpenEmphasisFailures}\n${voiceProblem}`
     })
-    addEventListener('pagehide', () => { speech.dispose(); actor.destroy(); app.destroy(true, { children: true, texture: true, baseTexture: true }) }, { once: true })
+    if (interaction && interactionWasEnabled !== undefined) interaction.useSystemTicker = interactionWasEnabled
+    renderLoop = attachAvatarRenderLoop(app, model, { visibility, budget, updatePriority: PIXI.UPDATE_PRIORITY.NORMAL })
+    // Registered last so update/render stop before actors, audio, late models,
+    // renderer-local GPU copies and finally the PIXI app release.
+    scope.own(() => renderLoop?.destroy())
+    updateRenderOutput()
     audio.controls = true
     controls.disabled = false
     controls.setAttribute('aria-busy', 'false')
   }
-  catch (error) { controls.setAttribute('aria-busy', 'false'); output.textContent = `加载失败: ${error.message}` }
+  catch (error) {
+    scope.dispose()
+    controls.setAttribute('aria-busy', 'false')
+    output.textContent = error.name === 'AbortError' ? '页面已卸载，模型未重新挂载。' : `加载失败: ${error.message}`
+  }
 </script>
 </html>

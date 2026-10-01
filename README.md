@@ -24,6 +24,7 @@ The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, l
 | Area | Current behavior |
 | --- | --- |
 | Character | Hiyori Momose Live2D model with click interaction, audio-synchronous mouth movement, and smoothly blended attention/thinking/speaking cues |
+| Render budget | Independent character update/render ticker; 30fps/lower pixel budget on explicit saving or low-device hints, otherwise 60fps ceiling; hidden pages stop this character's rendering and interaction ticker |
 | Personality | Editable persona and opt-in user memory; up to 160 recent messages survive refresh in the current tab, subject to byte limits |
 | Turn-taking | Interruptible replies, a brief visual acknowledgement when sending, and streaming chat that follows the latest text without pulling visitors away from older messages |
 | Brain | Server-side DeepSeek streaming, with an explicitly labelled local fallback when unconfigured |
@@ -139,6 +140,16 @@ For local sentence-stream testing without provider charges, run `node scripts/mo
 The model files are not redistributed by this repository; only the screenshot above is included. Review the [official Live2D sample page](https://www.live2d.com/en/learn/sample/momose-hiyori/) and [license terms](https://www.live2d.com/eula/live2d-sample-model-terms_en.html) first. Download the Simplified Chinese ZIP and copy the contents of `hiyori_free/runtime/` into `public/models/hiyori/`. The expected entrypoint is `public/models/hiyori/hiyori_free_t08.model3.json`. Build only after adding those files; Vite copies them into `dist/models/hiyori/`.
 
 The app loads Cubism Core from Live2D's official URL at runtime. Internet access to that script is required. The application code and model artwork have separate licenses; the published page includes the sample's copyright/creator notice.
+
+### Rendering on different devices
+
+Live2D uses its own PIXI ticker for both model updates and rendering, rather than adding a second model update on PIXI's shared ticker. Reported memory ≤4 GB, ≤2 cores, or data-saving mode selects a 30fps ceiling, resolution capped at 1.25 and no antialiasing; other/unknown hints select 60fps and resolution capped at 2. Missing WebGPU is **not** treated as a weak WebGL GPU. These hints stay on the device and are a saving policy, not measured hardware performance or a guaranteed frame rate.
+
+While the document is hidden, this app stops its render/model ticker and its own interaction subscription; global PIXI tickers are untouched. Returning starts a fresh bounded frame delta, not a replay of hidden time. This does not stop speech, pause the audio player or prevent provider billing. Reduced-motion settings continue to limit added gestures while retaining audio mouth control. Container changes resize the actual canvas buffer through ResizeObserver, including changes without a window resize.
+
+Unmount/cancellation releases the canvas immediately; the dependency's model loading is not network-abortable, so a late or partially initialized model is cleaned up when loading settles. Shared CPU image textures remain in PIXI's finite URL cache for reuse; renderer-local GPU textures/context listeners are released without invalidating another mount. The dependency still has internal failure limitations, including a combined moc/texture rejection and failures inside core construction. This is not a claim that every possible dependency failure or all browser memory has been eliminated.
+
+For local verification, open `/airi/scripts/avatar-preview.html` after `pnpm dev`: it compares actual model-update, Cubism and WebGL render counts at 30/60fps and can play the fixed Kokoro test lines. Its synthetic visibility button is labelled as an interface test, **not** a real background-tab or physical-phone test. `/airi/scripts/avatar-lifecycle-preview.html` exercises the production mount's cancellation, container resize, repeat destruction and delayed-old/new shared-texture race. These pages are development-only and are not entries in the production build. See [the rendering verification record](docs/verification/2026-10-01-avatar-rendering.md).
 
 ## Local voice and lip sync
 

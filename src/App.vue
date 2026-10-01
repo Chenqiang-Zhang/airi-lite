@@ -84,6 +84,8 @@ if (savedAccessCode && !accessCode.value) {
 const activeController = ref<AbortController | null>(null)
 const activeAssistantId = ref<number | null>(null)
 let live2d: Awaited<ReturnType<typeof mountHiyori>> | null = null
+const avatarMountController = new AbortController()
+let viewDisposed = false
 let latestMouth: { opening: number | null, form: number } = { opening: 0, form: 0 }
 let speech: ReturnType<typeof createSpeechController> | null = null
 let chatScroll: ReturnType<typeof createChatScrollController> | null = null
@@ -143,21 +145,30 @@ onMounted(async () => {
   if (!modelStage.value)
     return
   try {
-    live2d = await mountHiyori(modelStage.value)
+    const avatar = await mountHiyori(modelStage.value, { signal: avatarMountController.signal, deviceHints })
+    if (viewDisposed) {
+      avatar.destroy()
+      return
+    }
+    live2d = avatar
     live2d.setMouth(latestMouth.opening, latestMouth.form)
     syncAvatarActivity()
     modelStatus.value = ''
   }
   catch (error) {
+    if (viewDisposed || avatarMountController.signal.aborted) return
     console.error('Live2D load failed', error)
     modelStatus.value = 'Live2D 加载失败，请刷新页面重试。'
   }
 })
 onUnmounted(() => {
+  viewDisposed = true
+  avatarMountController.abort()
   chatScroll?.destroy()
   activeController.value?.abort()
   speech?.dispose()
   live2d?.destroy()
+  live2d = null
 })
 function syncAvatarActivity() {
   live2d?.setActivity(avatarActivity.value)
