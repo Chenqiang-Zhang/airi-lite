@@ -6,6 +6,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code'
 import { ChatApiError, fetchProviderStatus, streamChat } from './api'
+import { fetchCloudSpeech } from './cloud-speech'
 import { clearConversation, loadConversation, saveConversation } from './conversation'
 import type { ConversationMessage } from './conversation'
 import { createChatScrollController } from './chat-scroll'
@@ -18,6 +19,8 @@ import { clearUserMemory, loadUserMemory, proposeUserMemory, saveUserMemory, USE
 import { DEFAULT_PERSONA, loadPersona, savePersona } from './persona'
 import { createSpeechController } from './speech'
 import type { VoiceState } from './speech'
+import { loadSpeechMode, readDeviceHints, resolveSpeechMode, saveSpeechMode } from './speech-mode'
+import type { SpeechEngine, SpeechMode } from './speech-mode'
 import type { DeliveryCue } from './speech-sentences'
 import { loadVoice, saveVoice, VOICE_OPTIONS } from './voice'
 import type { VoiceId } from './voice'
@@ -49,9 +52,18 @@ const avatarActivity = computed<AvatarActivity>(() => isSpeaking.value ? 'speaki
 const personaOpen = ref(false)
 const memoryOpen = ref(false)
 const voiceOpen = ref(false)
+const voiceSettingsError = ref('')
 const selectedVoice = ref<VoiceId>(loadVoice())
 const draftVoice = ref<VoiceId>(selectedVoice.value)
 const activeVoice = ref<VoiceId>(selectedVoice.value)
+const deviceHints = readDeviceHints()
+const selectedSpeechMode = ref<SpeechMode>(loadSpeechMode())
+const draftSpeechMode = ref<SpeechMode>(selectedSpeechMode.value)
+const cloudAvailable = ref(false)
+const cloudModel = ref('speech-2.8-turbo')
+const speechPolicy = computed(() => resolveSpeechMode(selectedSpeechMode.value, deviceHints, cloudAvailable.value))
+const draftSpeechPolicy = computed(() => resolveSpeechMode(draftSpeechMode.value, deviceHints, cloudAvailable.value))
+const activeSpeechEngine = ref<SpeechEngine>(speechPolicy.value.engine)
 const userMemory = ref(loadUserMemory())
 const draftUserMemory = ref(userMemory.value)
 const memoryDraftWarning = ref('')
@@ -90,10 +102,14 @@ const selectedVoiceLabel = computed(() => VOICE_OPTIONS.find(option => option.id
 const activeVoiceLabel = computed(() => VOICE_OPTIONS.find(option => option.id === activeVoice.value)?.label ?? selectedVoiceLabel.value)
 
 const voiceLabel = computed(() => ({
-  idle: '免费本地声线 · 首次需下载约 330 MB',
+  idle: speechPolicy.value.engine === 'local' ? '免费本地声线 · 首次需下载约 330 MB'
+    : speechPolicy.value.engine === 'cloud' ? `MiniMax · ${cloudModel.value} · 服务端固定声线`
+      : '轻量浏览器语音 · 无需下载 Kokoro',
   loading: '正在载入免费本地声线，首次需下载约 330 MB…',
   ready: `Kokoro ${isSpeaking.value ? activeVoiceLabel.value : selectedVoiceLabel.value} · 音频驱动口型`,
   fallback: '当前设备使用浏览器朗读 · 音频驱动口型暂不可用',
+  browser: '轻量浏览器语音 · 系统声线 · 简化说话动画',
+  cloud: `MiniMax · ${cloudModel.value} · 服务端固定声线 · 音频驱动口型`,
 })[voiceState.value])
 
 const fallbackReplies = [
@@ -118,6 +134,10 @@ onMounted(async () => {
     },
     onAudioReady: ready => (audioAvailable.value = ready),
     onProblem: message => (voiceProblem.value = message),
+  }, {
+    synthesizeCloud: (sentence, signal) => fetchCloudSpeech({
+      text: sentence.text, delivery: sentence.delivery, accessCode: accessCode.value, signal,
+    }),
   })
   refreshProviderStatus()
   if (!modelStage.value)
@@ -161,15 +181,20 @@ async function refreshProviderStatus() {
     providerModel.value = status.model
     providerMode.value = status.configured ? 'deepseek' : 'fallback'
     accessProtected.value = status.accessProtected
+    cloudAvailable.value = status.speech?.configured === true && status.speech.provider === 'minimax'
+    if (cloudAvailable.value && status.speech)
+      cloudModel.value = status.speech.model
   }
   catch {
     providerMode.value = 'fallback'
+    cloudAvailable.value = false
   }
 }
 
 function speak(text: string, delivery: Delivery = 'neutral', cues: DeliveryCue[] = []) {
   activeVoice.value = selectedVoice.value
-  void speech?.speak(text, delivery, selectedVoice.value, cues)
+  activeSpeechEngine.value = speechPolicy.value.engine
+  void speech?.speak(text, delivery, selectedVoice.value, cues, activeSpeechEngine.value)
 }
 
 function replayLastResponse() {
@@ -237,6 +262,8 @@ async function sendMessage() {
   const speechStream: { current: ReturnType<ReturnType<typeof createSpeechController>['beginStream']> | null } = { current: null }
   let chatSucceeded = false
   let latestDelivery: Delivery | undefined
+  const turnVoice = selectedVoice.value
+  const turnSpeechEngine = speechPolicy.value.engine
 
   try {
     await streamChat({
@@ -260,8 +287,9 @@ async function sendMessage() {
         assistantMessage.text += chunk
         assistantMessage.source = 'deepseek'
         if (!speechStream.current && speech) {
-          activeVoice.value = selectedVoice.value
-          speechStream.current = speech.beginStream(text, latestDelivery, selectedVoice.value)
+          activeVoice.value = turnVoice
+          activeSpeechEngine.value = turnSpeechEngine
+          speechStream.current = speech.beginStream(text, latestDelivery, turnVoice, turnSpeechEngine)
         }
         speechStream.current?.push(chunk)
       },
@@ -381,23 +409,45 @@ function removeUserMemory() {
 function openVoiceEditor() {
   closeChatSettings()
   draftVoice.value = selectedVoice.value
+  draftSpeechMode.value = selectedSpeechMode.value
+  voiceSettingsError.value = ''
   voiceOpen.value = true
 }
 
 function previewVoice(voice: VoiceId) {
+  if (isGenerating.value) return
   activeDelivery.value = 'neutral'
   activeVoice.value = voice
-  void speech?.speak('嗨，我是日和。今天想听你说一件小事，也可以让我先讲个奇怪的想法。', 'neutral', voice)
+  activeSpeechEngine.value = 'local'
+  void speech?.speak('嗨，我是日和。今天想听你说一件小事，也可以让我先讲个奇怪的想法。', 'neutral', voice, [], 'local')
+}
+
+function previewSpeechMode() {
+  if (isGenerating.value) return
+  voiceSettingsError.value = ''
+  const engine = draftSpeechPolicy.value.engine
+  if (engine === 'cloud' && accessProtected.value && !accessCode.value) {
+    voiceSettingsError.value = '请先在设置中保存体验码，再试听云端语音。'
+    lastError.value = voiceSettingsError.value
+    return
+  }
+  activeVoice.value = draftVoice.value
+  activeSpeechEngine.value = engine
+  void speech?.speak('诶，你终于来了！我刚才还在想，今天要不要偷偷多吃一块蛋糕。', 'bright', draftVoice.value, [], engine)
 }
 
 function applyVoice() {
+  if (isGenerating.value) return
+  voiceSettingsError.value = ''
   try {
+    selectedSpeechMode.value = saveSpeechMode(draftSpeechMode.value)
     selectedVoice.value = saveVoice(draftVoice.value)
     lastError.value = ''
     voiceOpen.value = false
   }
   catch {
-    lastError.value = '无法保存声线，请检查浏览器是否允许本地存储。'
+    voiceSettingsError.value = '语音设置未能全部保存，请检查浏览器本地存储；草稿已保留。'
+    lastError.value = voiceSettingsError.value
   }
 }
 
@@ -630,18 +680,31 @@ function saveAccessCode() {
           <button class="close-button" type="button" aria-label="关闭" @click="voiceOpen = false">×</button>
         </div>
 
-        <p class="persona-intro">三种免费 Kokoro 中文女声使用同一个模型。用同一句话试听，再固定你喜欢的声线；这不是训练或克隆出的专属声音。试听只在当前浏览器播放，不会发送给 DeepSeek。</p>
+        <p class="persona-intro">自动模式按设备信息选择本地或轻量语音，绝不会自动调用云端。云端声音由服务器固定，不使用下面的本地 A/B/C 预设；这不是训练或克隆出的专属声音。</p>
         <form class="persona-form" @submit.prevent="applyVoice">
-          <div v-for="option in VOICE_OPTIONS" :key="option.id" class="voice-choice">
+          <label class="speech-mode-field">
+            <span>语音方式</span>
+            <select v-model="draftSpeechMode" aria-label="语音方式">
+              <option value="auto">自动 · 按设备选择</option>
+              <option value="local">固定本地 · Kokoro</option>
+              <option value="browser">轻量 · 浏览器语音</option>
+              <option value="cloud" :disabled="!cloudAvailable">云端 · MiniMax{{ cloudAvailable ? '' : '（服务未启用）' }}</option>
+            </select>
+          </label>
+          <p class="memory-hint">{{ draftSpeechPolicy.notice }}</p>
+          <p class="memory-hint">本地 Kokoro 合成不上传朗读正文；浏览器语音可能使用系统联网声线。只有你选择云端模式时，需朗读的回复正文才会发给 MiniMax，密钥仅保存在服务器。聊天内容仍会发给 DeepSeek。</p>
+          <button class="secondary-button" type="button" :disabled="isGenerating" @click="previewSpeechMode">试听当前模式</button>
+          <div v-for="option in draftSpeechPolicy.engine === 'local' ? VOICE_OPTIONS : []" :key="option.id" class="voice-choice">
             <label>
               <input v-model="draftVoice" type="radio" name="hiyori-voice" :value="option.id">
               <span><strong>{{ option.label }}</strong><small>{{ option.description }}</small></span>
             </label>
-            <button class="secondary-button" type="button" :aria-label="`试听${option.label}`" @click="previewVoice(option.id)">试听</button>
+            <button class="secondary-button" type="button" :aria-label="`试听${option.label}`" :disabled="isGenerating" @click="previewVoice(option.id)">试听</button>
           </div>
           <p class="memory-hint" role="status">{{ voiceProblem || voiceLabel }}</p>
+          <p v-if="voiceSettingsError" class="memory-warning" role="alert">{{ voiceSettingsError }}</p>
           <div class="persona-actions">
-            <button class="primary-button" type="submit">设为日和声线</button>
+            <button class="primary-button" type="submit" :disabled="isGenerating">保存语音设置</button>
           </div>
         </form>
       </aside>

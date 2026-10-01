@@ -1,7 +1,10 @@
 import type { KokoroTTS } from '@uzen/kokoro-js'
 import type { Delivery } from './delivery'
 import type { VoiceId } from './voice'
+import type { SpeechEngine } from './speech-mode'
+import type { CloudSpeechClip } from './cloud-speech'
 
+import { SpeechApiError } from './cloud-speech.ts'
 import { deliverySpeed } from './delivery.ts'
 import { mouthFrames } from './mouth.ts'
 import type { MouthFrame } from './mouth'
@@ -9,7 +12,7 @@ import { deliveryAtTime, replySentenceStream, SpeechSentenceStream } from './spe
 import type { DeliveryCue, PlaybackCue, SpokenSentence } from './speech-sentences'
 import { DEFAULT_VOICE } from './voice.ts'
 
-export type VoiceState = 'idle' | 'loading' | 'ready' | 'fallback'
+export type VoiceState = 'idle' | 'loading' | 'ready' | 'fallback' | 'browser' | 'cloud'
 
 interface AudioClip {
   samples: Float32Array
@@ -92,7 +95,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   onMouth: (opening: number | null, form: number) => void
   onAudioReady: (ready: boolean) => void
   onProblem: (message: string) => void
-}, dependencies: { loadModel?: () => Promise<SpeechModel> } = {}) {
+}, dependencies: {
+  loadModel?: () => Promise<SpeechModel>
+  synthesizeCloud?: (sentence: SpokenSentence, signal: AbortSignal) => Promise<CloudSpeechClip>
+} = {}) {
   let modelPromise: Promise<SpeechModel> | null = null
   let unavailable = false
   let objectUrl: string | null = null
@@ -104,6 +110,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   let playbackTimeline: PlaybackCue[] = []
   let reportedDelivery: Delivery | null = null
   let releaseUtterance: (() => void) | null = null
+  let activeVoiceAbort: AbortController | null = null
 
   audio.volume = 1
   audio.muted = false
@@ -202,44 +209,49 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     replaceAudioSource(samples, session.sampleRate, session.timeline)
   }
 
-  async function prepare() {
+  async function prepare(token: number = run) {
+    const report = (state: VoiceState) => {
+      if (token === run) callbacks.onState(state)
+    }
     if (unavailable)
       throw new Error('Kokoro is unavailable in this browser')
-    if (modelPromise)
-      return modelPromise
-    callbacks.onState('loading')
-    modelPromise = (async () => {
-      if (dependencies.loadModel)
-        return dependencies.loadModel()
-      const { KokoroTTS } = await import('@uzen/kokoro-js')
-      const voicePath = `${import.meta.env.BASE_URL}kokoro/voices`
-      // Browser q4f16 returned silence and q8 returned invalid samples in testing.
-      // The upstream browser demo recommends fp32 for both execution providers.
-      if ('gpu' in navigator) {
-        try {
-          return await KokoroTTS.from_pretrained(MODEL_ID, { device: 'webgpu', dtype: 'fp32', voicePath })
+    if (!modelPromise) {
+      report('loading')
+      modelPromise = (async () => {
+        if (dependencies.loadModel)
+          return dependencies.loadModel()
+        const { KokoroTTS } = await import('@uzen/kokoro-js')
+        const voicePath = `${import.meta.env.BASE_URL}kokoro/voices`
+        // Browser q4f16 returned silence and q8 returned invalid samples in testing.
+        // The upstream browser demo recommends fp32 for both execution providers.
+        if ('gpu' in navigator) {
+          try {
+            return await KokoroTTS.from_pretrained(MODEL_ID, { device: 'webgpu', dtype: 'fp32', voicePath })
+          }
+          catch (error) {
+            console.warn('Kokoro WebGPU load failed; retrying with WASM', error)
+          }
         }
-        catch (error) {
-          console.warn('Kokoro WebGPU load failed; retrying with WASM', error)
-        }
-      }
-      return KokoroTTS.from_pretrained(MODEL_ID, { device: 'wasm', dtype: 'fp32', voicePath })
-    })()
+        return KokoroTTS.from_pretrained(MODEL_ID, { device: 'wasm', dtype: 'fp32', voicePath })
+      })()
+    }
     try {
       const model = await modelPromise
-      callbacks.onState('ready')
+      report('ready')
       return model
     }
     catch (error) {
       unavailable = true
       modelPromise = null
-      callbacks.onState('fallback')
+      report('fallback')
       throw error
     }
   }
 
   function cancel() {
     run++
+    activeVoiceAbort?.abort()
+    activeVoiceAbort = null
     activeInput?.cancel()
     activeInput = null
     releaseUtterance?.()
@@ -261,22 +273,25 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     window.speechSynthesis?.cancel()
   }
 
-  async function browserFallback(input: SpeechSentenceStream, token: number) {
+  async function browserSpeech(input: AsyncIterable<SpokenSentence>, token: number, fallbackMessage?: string) {
     if (token !== run)
       return
-    callbacks.onState('fallback')
+    callbacks.onState(fallbackMessage ? 'fallback' : 'browser')
     if (!('speechSynthesis' in window)) {
       callbacks.onPreparing(false)
       callbacks.onProblem('当前浏览器没有可用的语音播放功能。')
       return
     }
-    callbacks.onProblem('本地声线不可用，正在尝试浏览器语音；若仍无声，请检查输出设备。')
+    callbacks.onProblem(fallbackMessage ?? '')
     for await (const sentence of input) {
       if (token !== run)
         return
       callbacks.onPreparing(true)
       const succeeded = await new Promise<boolean>((resolve) => {
+        let completed = false
         const complete = (succeeded: boolean) => {
+          if (completed) return
+          completed = true
           if (releaseUtterance === cancelUtterance)
             releaseUtterance = null
           resolve(succeeded)
@@ -287,21 +302,21 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         utterance.lang = 'zh-CN'
         utterance.rate = deliverySpeed(sentence.delivery)
         utterance.onstart = () => {
-          if (token !== run) return
+          if (token !== run || releaseUtterance !== cancelUtterance) return
           callbacks.onPreparing(false)
           callbacks.onDelivery(sentence.delivery)
           callbacks.onMouth(null, 0)
           callbacks.onPlaying(true)
         }
         utterance.onend = () => {
-          if (token === run) {
+          if (token === run && releaseUtterance === cancelUtterance) {
             callbacks.onMouth(0, 0)
             callbacks.onPlaying(false)
           }
           complete(true)
         }
         utterance.onerror = () => {
-          if (token === run) {
+          if (token === run && releaseUtterance === cancelUtterance) {
             callbacks.onPreparing(false)
             callbacks.onPlaying(false)
             callbacks.onMouth(0, 0)
@@ -309,13 +324,34 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
           }
           complete(false)
         }
-        window.speechSynthesis.speak(utterance)
+        try { window.speechSynthesis.speak(utterance) }
+        catch { utterance.onerror?.(new Event('error') as SpeechSynthesisErrorEvent) }
       })
       if (token !== run || !succeeded)
         return
     }
     if (token === run)
       callbacks.onPreparing(false)
+  }
+
+  async function *synthesizeCloudSentences(input: AsyncIterable<SpokenSentence>, token: number): AsyncGenerator<AudioClip> {
+    if (!dependencies.synthesizeCloud)
+      throw new Error('Cloud voice is not configured')
+    const controller = new AbortController()
+    activeVoiceAbort = controller
+    try {
+      for await (const sentence of input) {
+        if (token !== run) return
+        // Preserve real Chinese/English text; Kokoro's browser workaround must
+        // never rewrite a cloud provider's input. No retries of paid requests.
+        const clip = await dependencies.synthesizeCloud(sentence, controller.signal)
+        if (token !== run || controller.signal.aborted) return
+        yield { ...clip, delivery: sentence.delivery }
+      }
+    }
+    finally {
+      if (activeVoiceAbort === controller) activeVoiceAbort = null
+    }
   }
 
   async function *synthesizeSentences(model: SpeechModel, input: AsyncIterable<SpokenSentence>, voice: VoiceId, token: number): AsyncGenerator<AudioClip> {
@@ -344,7 +380,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     }
   }
 
-  async function synthesizeInput(input: SpeechSentenceStream, voice: VoiceId, token: number) {
+  async function synthesizeInput(input: SpeechSentenceStream, voice: VoiceId, token: number, engine: SpeechEngine) {
     // Do not load a large voice model for a reply containing only code/markup.
     // Waiting for the first *spoken* sentence also keeps fallback from treating
     // intentional omission as invalid or silent synthesized audio.
@@ -359,13 +395,23 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     }
     callbacks.onPreparing(true)
     callbacks.onProblem('正在生成语音…')
-    const model = await prepare()
+    const resumed = resumeSentences(first.value, sentences)
+    if (engine === 'browser') {
+      await browserSpeech(resumed, token)
+      return
+    }
+    if (engine === 'cloud') {
+      callbacks.onState('cloud')
+      await consumeSegments(synthesizeCloudSentences(resumed, token), token, 'cloud')
+      return
+    }
+    const model = await prepare(token)
     if (token !== run)
       return
-    await consumeSegments(synthesizeSentences(model, resumeSentences(first.value, sentences), voice, token), token)
+    await consumeSegments(synthesizeSentences(model, resumed, voice, token), token, 'ready')
   }
 
-  async function consumeSegments(source: AsyncIterable<AudioClip>, token: number) {
+  async function consumeSegments(source: AsyncIterable<AudioClip>, token: number, state: 'ready' | 'cloud') {
     const session: PlaybackRun = {
       token,
       queue: [],
@@ -384,12 +430,14 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         const data = segment.samples
         const sampleRate = segment.sampleRate
         if (session.sampleRate && sampleRate !== session.sampleRate)
-          throw new Error('Kokoro changed its audio sample rate during synthesis')
+          throw new Error('Speech sample rate changed during synthesis')
+        if (!Number.isInteger(sampleRate) || sampleRate <= 0)
+          throw new Error('Speech returned an invalid sample rate')
         let energy = 0
         let peak = 0
         for (const sample of data) {
           if (!Number.isFinite(sample))
-            throw new Error('Kokoro returned invalid audio samples')
+            throw new Error('Speech returned invalid audio samples')
           energy += sample * sample
           peak = Math.max(peak, Math.abs(sample))
         }
@@ -405,16 +453,16 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       if (token !== run)
         return
       if (!session.total)
-        throw new Error('Kokoro returned silent audio')
+        throw new Error('Speech returned silent audio')
       session.synthesisFinished = true
-      callbacks.onState('ready')
+      callbacks.onState(state)
       advance(session)
     }
     catch (error) {
       if (token !== run)
         return
       if (session.total) {
-        console.warn('Kokoro synthesis stopped after partial audio', error)
+        console.warn('Speech synthesis stopped after partial audio', error)
         session.synthesisFinished = true
         callbacks.onProblem('后续语音生成中断；可以点击「朗读」重试。')
         advance(session)
@@ -426,7 +474,13 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     }
   }
 
-  async function speak(text: string, delivery: Delivery = 'neutral', voice: VoiceId = DEFAULT_VOICE, cues: DeliveryCue[] = []) {
+  function fallbackProblem(engine: SpeechEngine, error: unknown): string {
+    return engine === 'cloud'
+      ? `${error instanceof SpeechApiError ? error.message : '云端语音生成失败。'}已尝试轻量浏览器语音，不会下载本地大模型。`
+      : '本地声线不可用，正在尝试浏览器语音；若仍无声，请检查输出设备。'
+  }
+
+  async function speak(text: string, delivery: Delivery = 'neutral', voice: VoiceId = DEFAULT_VOICE, cues: DeliveryCue[] = [], engine: SpeechEngine = 'local') {
     cancel()
     if (!text.trim())
       return
@@ -435,15 +489,15 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     activeInput = input
     callbacks.onProblem('')
     try {
-      await synthesizeInput(input, voice, token)
+      await synthesizeInput(input, voice, token, engine)
     }
     catch (error) {
       if (token !== run)
         return
-      console.warn('Kokoro synthesis failed; using browser speech', error)
+      console.warn('Speech synthesis failed; using browser speech', error)
       const fallbackInput = replySentenceStream(text, delivery, cues)
       activeInput = fallbackInput
-      await browserFallback(fallbackInput, token)
+      await browserSpeech(fallbackInput, token, fallbackProblem(engine, error))
     }
     finally {
       if (token === run)
@@ -451,7 +505,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     }
   }
 
-  function beginStream(userText: string, preferredDelivery?: Delivery, voice: VoiceId = DEFAULT_VOICE) {
+  function beginStream(userText: string, preferredDelivery?: Delivery, voice: VoiceId = DEFAULT_VOICE, engine: SpeechEngine = 'local') {
     cancel()
     const token = run
     const input = new SpeechSentenceStream(userText, preferredDelivery)
@@ -467,7 +521,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
 
     const synthesize = async () => {
       try {
-        await synthesizeInput(input, voice, token)
+        await synthesizeInput(input, voice, token, engine)
       }
       catch (error) {
         if (token !== run)
@@ -475,10 +529,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         await input.finished
         if (token !== run)
           return
-        console.warn('Kokoro streaming synthesis failed; using browser speech', error)
+        console.warn('Speech streaming synthesis failed; using browser speech', error)
         const fallbackInput = replySentenceStream(input.text, preferredDelivery, cues, userText)
         activeInput = fallbackInput
-        await browserFallback(fallbackInput, token)
+        await browserSpeech(fallbackInput, token, fallbackProblem(engine, error))
       }
       finally {
         if (token === run)

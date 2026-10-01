@@ -27,8 +27,8 @@ The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, l
 | Personality | Editable persona and opt-in user memory; up to 160 recent messages survive refresh in the current tab, subject to byte limits |
 | Turn-taking | Interruptible replies, a brief visual acknowledgement when sending, and streaming chat that follows the latest text without pulling visitors away from older messages |
 | Brain | Server-side DeepSeek streaming, with an explicitly labelled local fallback when unconfigured |
-| Voice | Three selectable Kokoro Chinese female presets (`zf_001`–`zf_003`) with slight speed variation; browser speech fallback |
-| Not yet built | Microphone input, learned emotional prosody, phoneme-level lip sync, automatic memory extraction, cross-device sync, and user accounts |
+| Voice | Auto/local/lightweight modes; three Kokoro Chinese presets; optional server-side MiniMax Speech 2.8 adapter, disabled until explicitly configured |
+| Not yet built or validated | Microphone input, phoneme-level lip sync, automatic memory extraction, cross-device sync, user accounts, and real-provider emotional-voice quality/latency evaluation |
 
 ## How it fits together
 
@@ -39,11 +39,17 @@ flowchart LR
   DS -->|text + hidden delivery cue| API
   API -->|visible reply + delivery event| U
   U -->|completed sentences| TTS[Kokoro in the browser]
+  U -->|explicit cloud choice only| SAPI[Protected /api/speech]
+  SAPI --> MTTS[Optional MiniMax, disabled by default]
+  MTTS -->|MP3| SAPI
+  SAPI -->|decoded audio| Player
   TTS -->|audio| Player[Audio player]
   Player -->|audio level| L2D[Live2D mouth]
 ```
 
 The DeepSeek key stays on the server. Kokoro inference runs on the visitor's device; the VPS does not generate the audio. Speech can start when the first complete sentence arrives, but this is **not** a low-latency full-duplex voice chat. DeepSeek chooses a hidden `neutral`/`soft`/`bright`/`curious` delivery cue at the start and may change it before a new sentence or paragraph when the tone changes. The server removes these markers from visible text. The browser queues each sentence with its cue, adjusts its synthesis speed slightly, and changes the Live2D face when that audio actually plays. Untagged replies retain the local heuristic. Each chosen preset remains a fixed TTS voice, not trained expressive speech.
+
+The optional cloud path uses the same sentence/playback controller. Enabling the server alone never silently switches visitors to a new provider: each visitor must explicitly select cloud mode. The lightweight browser mode uses system voices and a simpler speaking animation, not measured audio-driven mouth movement.
 
 ## Run locally
 
@@ -147,17 +153,48 @@ curl -fL https://huggingface.co/onnx-community/Kokoro-82M-v1.1-zh-ONNX/resolve/m
 
 These are existing presets, not a custom-trained or cloned voice. Choosing one does not add learned emotional prosody.
 
+The **语音方式** selector also has **自动**, **固定本地**, **轻量**, and optional **云端** choices. Auto is a conservative device-hint policy, not a speed benchmark: data-saving mode, reported memory ≤4 GB, ≤2 cores, or absent WebGPU selects browser speech; unknown hints default to local Kokoro. Explicit local mode still permits WASM on devices without WebGPU. Auto never selects MiniMax, even when the server has credentials. Device hints stay in the browser. Lightweight mode does not download Kokoro and cannot guarantee a consistent voice or emotional delivery across systems. Some system speech voices themselves use network services; browser speech is not a promise of fully offline synthesis.
+
 Speech uses a separate, incremental spoken-text path: fenced code blocks and Markdown image syntax are omitted; links speak their labels instead of destinations; heading/list/quote/emphasis markers are removed and inline code keeps its text. Bare HTTP(S) URLs become a single “网址”. This is a conservative speech filter, not a full Markdown renderer, and the displayed reply/history are unchanged. Both Kokoro and browser fallback use it, including replay. Replies containing only code, images, emoji or punctuation have no spoken body: the app explains that visually and does not load the large voice model for that reply. Ordinary replies start preparing the voice after the first readable sentence; explicit voice auditions still load it. Skipping code does not create a silent waveform or invent a spoken summary. Original visible-text offsets remain the source of delivery cues even when some content is omitted.
 
 The speech filter does not interpret arbitrary HTML, tables, four-space-indented code, or reference-definition lines. It intentionally suppresses unfinished fenced blocks and link destinations. This improves what the character reads, not the emotional range of the fixed voice.
 
-The ONNX model is **not** bundled in the repository or hosted on this VPS. On first use, each visitor's browser downloads the roughly 326 MB fp32 model directly from Hugging Face and caches it locally. The app tries WebGPU first and then WASM. Browser tests found that q4f16/WebGPU could return an all-zero waveform and q8/WASM could return invalid samples; fp32/WebGPU produced a non-silent WAV. This does not add a paid TTS API or VPS inference load, but it requires model-download access and a reasonably capable device. The app rejects silent output instead of presenting it as successful speech. Each complete sentence can start synthesizing while DeepSeek streams later text; raw token boundaries are buffered so names such as `DeepSeek` are normalized intact. During long replies the player progress resets for each generated chunk; after playback it holds the combined WAV for replay. If automatic playback is blocked, use the visible audio player's play button. The browser build currently fails on some English spans, so common terms are mapped to Chinese and remaining Latin words are spelled out on the same fixed voice. If model loading or synthesis fails before audio starts, the app attempts the browser's built-in voice and reports the fallback. Only Kokoro playback uses measured audio levels for the mouth; browser fallback retains the simpler speaking animation. DeepSeek chat still uses its paid API.
+The ONNX model is **not** bundled in the repository or hosted on this VPS. In local mode, the visitor's browser downloads the roughly 326 MB fp32 model directly from Hugging Face on first use and caches it locally. The app tries WebGPU first and then WASM. Browser tests found that q4f16/WebGPU could return an all-zero waveform and q8/WASM could return invalid samples; fp32/WebGPU produced a non-silent WAV. This local path does not add a paid TTS API or VPS inference load, but it requires model-download access and a reasonably capable device. The app rejects silent output instead of presenting it as successful speech.
+
+Each complete sentence can start synthesizing while DeepSeek streams later text; raw token boundaries are buffered so names such as `DeepSeek` are normalized intact. During long replies the player progress resets for each generated chunk; after playback it holds the combined WAV for replay. If automatic playback is blocked, use the visible audio player's play button. The Kokoro browser build currently fails on some English spans, so common terms are mapped to Chinese and remaining Latin words are spelled out on that fixed local voice. This workaround is not applied to cloud speech.
+
+If local model loading or synthesis fails before any valid clip is generated, the app attempts the browser's built-in voice and reports the fallback. Kokoro and decoded cloud playback use measured audio levels for the mouth; browser speech retains the simpler speaking animation. DeepSeek chat still uses its paid API.
 
 Kokoro playback samples the generated audio at 40 mouth frames per second. Volume controls opening; a bounded low/mid-frequency estimate adds small mouth-form changes. The positions follow playback time, including pause and replay, but are only an audio-driven approximation: Kokoro exposes phonemes without their timing, so this is **not** phoneme-level alignment or validated viseme recognition.
 
 The avatar adds restrained attention cues while the input is focused, a thinking pose while a reply is pending, and small head movements during speech. These react to UI state, not cameras or observation of the visitor. Expressions fade between states; soft delivery also tones down the idle animation's blush and smiling eyes. Additional head movement respects `prefers-reduced-motion` (the model's original idle motion remains). Mouth and facial controls are applied just before Cubism updates its vertices, after idle motions, so idle animation cannot overwrite the speaking mouth or leave it open in silence.
 
 For local render-order checks, run the development server and open `/airi/scripts/avatar-preview.html`. It uses the actual Hiyori model and production performance controller, with fixed open/closed poses, expression controls, an idle-motion replay, and pre-render parameter assertions. It does not use the LLM or play audio and is not part of the production build.
+
+## Optional MiniMax voice (paid, disabled by default)
+
+This adapter is preparation for real-provider auditions, **not proof that MiniMax has already been connected or that its voice is more natural in this demo**. No real synthesis was called during implementation. Use the [official API console](https://platform.minimax.cn/) and ordinary API key for pay-as-you-go; do not assume a web voice subscription or coding Token Plan covers these calls. Start with a built-in voice rather than paid voice design/cloning.
+
+Set these fields only in the server environment after choosing a voice and accepting the cost; never use a `VITE_` prefix or paste keys into a public issue:
+
+```dotenv
+MINIMAX_TTS_ENABLED=1
+MINIMAX_API_KEY=your-server-only-api-key
+MINIMAX_VOICE_ID=your-selected-system-voice-id
+MINIMAX_TTS_MODEL=speech-2.8-hd
+MINIMAX_TTS_REGION=cn
+MINIMAX_TTS_DAILY_CHAR_LIMIT=2000
+```
+
+All four activation fields (switch, key, voice ID, positive integer daily limit) are required. The only supported models are `speech-2.8-hd`/`speech-2.8-turbo`; absent model defaults to Turbo. Only the fixed mainland-China endpoint is supported for now, not international keys. A configured health response indicates local settings, **not** validated credentials, provider availability, a successful audition, or account balance. After configuration/restart, visitors choose **设置 → 选择声线 → 云端 · MiniMax** explicitly. That choice or a cloud audition sends the filtered reply text to MiniMax; A/B/C apply only to Kokoro.
+
+`POST /airi/api/speech` accepts only `{text, delivery}`; clients cannot pick another provider URL, model or voice. It shares the experience-code check, has separate IP rate limits and four concurrent requests, and reserves a conservative `2 * text.length` allowance before fetch. The UTC-day ledger is **`.data/tts-budget.json`**: preserve it across deployments/restarts and use a single service process. Failed/canceled requests are not refunded because the provider may already charge. Corrupt/unwritable ledgers or an unreleased crash lock fail closed; do not delete them to reset spending. This is an application reservation cap, not the actual provider balance or protection for other callers using the same key. Replaying via **朗读** regenerates audio and may incur another call; the completed player's play/seek reuses its existing WAV.
+
+The server collects one short sentence's MP3/subtitles before returning it (≤360 UTF-16 characters, ≤30 seconds, ≤2 MiB audio, 30-second timeout). It excludes the provider's final aggregate audio to prevent duplicates and replaces cumulative subtitles for the same segment. The browser decodes MP3, checks for a finite non-silent waveform, then uses actual playback time for mouth/expression cues. `bright` requests `happy`, `soft` requests `calm`; other delivery cues leave emotion unspecified. No automatic laugh/breath tags are added. Validated word timestamps are transported, but they are **not phonemes and are not yet used as visemes**. MP3 encoder delay and real-provider subtitle alignment/latency still require an actual audition. See the [official HTTP API](https://platform.minimax.cn/docs/api-reference/speech-t2a-http).
+
+Cloud failure before any valid clip is generated attempts lightweight browser speech, never a large local-model download or automatic paid retry. Failure after a valid clip preserves the partial audio rather than speaking the whole reply twice. Stop aborts the cloud request and discards queued audio; this cannot undo provider billing already incurred.
+
+For free local codec/UI checks, supply your own synthetic 32 kHz mono MP3 of about one second to `node scripts/mock-voice-app.mjs /absolute/path/synthetic.mp3`, then open `http://127.0.0.1:4175/airi/`. This **loopback-only mock** ignores environment credentials, injects a fake MiniMax fetch, uses a temporary quota ledger, and returns clearly labelled canned chat. Never interpret its sound as MiniMax voice quality. Protocol/unit tests inject fake compressed frames/decoders; separate browser checks have decoded and played a real locally encoded sine-wave MP3. Weak-device policy tests do not establish physical-phone keyboard, touch or performance behavior.
 
 The chat now has a bounded scrolling area rather than stretching the whole page with every exchange. The character and composer stay in view in desktop and tested narrow-window layouts. While at the bottom, streamed text follows automatically; scrolling up suspends following and a **回到最新** button appears when more text arrives. Sending your own message or clearing the chat returns to the latest exchange. Streaming callbacks use a reactive message reference so text updates immediately, independently of audio/player state changes. Settings and connection details are grouped into collapsible controls; voice errors and first-download progress remain visible.
 

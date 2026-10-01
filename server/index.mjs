@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 import { buildSystemPrompt, normaliseChatRequest } from './persona.mjs'
 import { createDeliveryCueParser } from './delivery-cue.mjs'
+import { createSpeechHandler } from './speech.mjs'
 
 const rootDirectory = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const production = process.env.NODE_ENV === 'production'
@@ -17,6 +18,11 @@ const baseUrl = process.env.DEEPSEEK_BASE_URL?.trim() || 'https://api.deepseek.c
 const accessCode = process.env.AIRI_DEMO_ACCESS_CODE?.trim() || ''
 const rateWindows = new Map()
 let activeChats = 0
+const speech = createSpeechHandler({
+  rootDirectory,
+  isValidCode: candidate => !accessCode || validCode(candidate),
+  getClientIp: clientIp,
+})
 
 if (production && accessCode.length < 16)
   throw new Error('Production requires AIRI_DEMO_ACCESS_CODE with at least 16 characters')
@@ -45,11 +51,15 @@ const server = createServer(async (request, response) => {
         model,
         provider: 'deepseek',
         accessProtected: Boolean(accessCode),
+        speech: speech.health(),
       })
     }
 
     if (request.method === 'POST' && pathname === '/api/chat')
       return await handleProtectedChat(request, response)
+
+    if (request.method === 'POST' && pathname === '/api/speech')
+      return await speech.handle(request, response)
 
     if (pathname.startsWith('/api/'))
       return sendJson(response, 404, { message: 'API 路径不存在' })

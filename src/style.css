@@ -648,7 +648,8 @@ h1 {
 }
 
 .persona-form input,
-.persona-form textarea {
+.persona-form textarea,
+.persona-form select {
   width: 100%;
   padding: 12px 14px;
   border: 1px solid #e2d8d3;
@@ -661,7 +662,8 @@ h1 {
 }
 
 .persona-form input:focus,
-.persona-form textarea:focus {
+.persona-form textarea:focus,
+.persona-form select:focus {
   border-color: #a98075;
   box-shadow: 0 0 0 3px rgb(169 128 117 / 12%);
 }
