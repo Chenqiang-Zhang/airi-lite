@@ -344,6 +344,7 @@ test('cloud stream/replay preserve English, omit Markdown secrets and apply cues
       },
     })
     try {
+      let speaking
       if (playback === 'stream') {
         const input = f.controller.beginStream('', 'bright', undefined, 'cloud')
         input.push(first)
@@ -354,13 +355,12 @@ test('cloud stream/replay preserve English, omit Markdown secrets and apply cues
         input.finish()
       }
       else {
-        await f.controller.speak(text, 'bright', undefined, cues, 'cloud')
+        speaking = f.controller.speak(text, 'bright', undefined, cues, 'cloud')
       }
       await settle()
       assert.deepEqual(calls.map(({ text, delivery }) => ({ text, delivery })), [
         { text: 'Hello Hiyori!', delivery: 'bright' },
         { text: 'Rest with DeepSeek.', delivery: 'soft' },
-        { text: '明天用 API Key?', delivery: 'curious' },
       ])
       assert.ok(calls.every(call => call.signal instanceof AbortSignal && !call.signal.aborted))
       assert.equal(new Set(calls.map(call => call.signal)).size, 1)
@@ -369,6 +369,13 @@ test('cloud stream/replay preserve English, omit Markdown secrets and apply cues
       assert.deepEqual(f.events.delivery, ['bright'])
       f.audio.end()
       assert.deepEqual(f.events.delivery, ['bright', 'soft'])
+      await settle()
+      await speaking
+      assert.deepEqual(calls.map(({ text, delivery }) => ({ text, delivery })), [
+        { text: 'Hello Hiyori!', delivery: 'bright' },
+        { text: 'Rest with DeepSeek.', delivery: 'soft' },
+        { text: '明天用 API Key?', delivery: 'curious' },
+      ])
       f.audio.end()
       assert.deepEqual(f.events.delivery, ['bright', 'soft', 'curious'])
       f.audio.end()
@@ -600,4 +607,198 @@ test('partial cloud failure keeps valid audio without fallback duplication or re
     }
     finally { f.close() }
   }
+})
+
+test('cloud lookahead is bounded to one queued clip and follows pause/resume and actual endings', async () => {
+  const calls = []
+  const f = fixture(undefined, { async synthesizeCloud(sentence) { calls.push(sentence.text); return cloudClip() } })
+  try {
+    const speaking = f.controller.speak('一。二。三。四。五。', 'neutral', undefined, [], 'cloud')
+    await settle()
+    assert.deepEqual(calls, ['一。', '二。'])
+    f.audio.pause()
+    for (let i = 0; i < 3; i++) await settle()
+    assert.equal(calls.length, 2, 'pause cannot buy the remainder of the reply')
+    await f.audio.play()
+    await settle()
+    assert.equal(calls.length, 2, 'resume alone does not free an existing queued clip')
+    for (const count of [3, 4, 5]) {
+      f.audio.end()
+      await settle()
+      assert.equal(calls.length, count)
+    }
+    await speaking
+    f.audio.end()
+    f.audio.end()
+    const wav = await (await fetch(f.audio.src)).arrayBuffer()
+    assert.equal(wav.byteLength, 44 + 2400 * 5 * 2)
+  }
+  finally { f.close() }
+})
+
+test('pausing during an in-flight cloud lookahead allows it to finish but cannot start another', async () => {
+  const lookahead = deferred()
+  const calls = []
+  const f = fixture(undefined, { async synthesizeCloud(sentence) {
+    calls.push(sentence.text)
+    return calls.length === 2 ? lookahead.promise : cloudClip()
+  } })
+  try {
+    const speaking = f.controller.speak('一。二。三。', 'neutral', undefined, [], 'cloud')
+    await settle()
+    assert.deepEqual(calls, ['一。', '二。'])
+    f.audio.pause()
+    lookahead.resolve(cloudClip())
+    await settle()
+    assert.deepEqual(calls, ['一。', '二。'])
+    await f.audio.play()
+    await settle()
+    assert.equal(calls.length, 2, 'a completed queued clip still occupies lookahead capacity')
+    f.audio.end()
+    await settle()
+    await speaking
+    assert.deepEqual(calls, ['一。', '二。', '三。'])
+  }
+  finally { f.close() }
+})
+
+test('a real player error cancels a cloud capacity wait without generating more sentences', { timeout: 1000 }, async () => {
+  const calls = []
+  const f = fixture(undefined, { async synthesizeCloud(sentence, signal) {
+    calls.push({ text: sentence.text, signal })
+    return cloudClip()
+  } })
+  try {
+    const speaking = f.controller.speak('一。二。三。', 'neutral', undefined, [], 'cloud')
+    await settle()
+    assert.equal(calls.length, 2)
+    f.audio.error = { code: 3 }
+    f.audio.dispatchEvent(new Event('error'))
+    await speaking
+    assert.equal(calls.length, 2)
+    assert.ok(calls.every(call => call.signal.aborted))
+    assert.equal(f.audio.src, '')
+    assert.match(f.events.problem.at(-1), /音频文件无法播放/)
+  }
+  finally { f.close() }
+})
+
+test('pause between a resolved capacity check and fetch cannot buy or skip the waiting sentence', { timeout: 1000 }, async () => {
+  const calls = []
+  const f = fixture(undefined, { async synthesizeCloud(sentence) {
+    calls.push({ text: sentence.text, paused: f.audio.paused })
+    return cloudClip()
+  } })
+  try {
+    f.audio.addEventListener('playing', () => {
+      // Reproducibly land after the second sentence's successful capacity
+      // check, but before its awaiting generator resumes to start fetch.
+      let microtasks = Promise.resolve()
+      for (let index = 0; index < 4; index++) microtasks = microtasks.then(() => {})
+      void microtasks.then(() => f.audio.pause())
+    }, { once: true })
+    const speaking = f.controller.speak('一。二。三。', 'neutral', undefined, [], 'cloud')
+    await settle()
+    assert.equal(f.audio.paused, true)
+    assert.deepEqual(calls.map(call => call.text), ['一。'])
+    for (let index = 0; index < 3; index++) await settle()
+    assert.equal(calls.length, 1, 'a revoked permit must suspend instead of buying or busy-looping')
+
+    await f.audio.play()
+    await settle()
+    assert.deepEqual(calls.map(call => call.text), ['一。', '二。'], 'resuming must retain the exact waiting sentence')
+    f.audio.end()
+    await settle()
+    await speaking
+    assert.deepEqual(calls.map(call => call.text), ['一。', '二。', '三。'])
+    assert.ok(calls.slice(1).every(call => !call.paused))
+  }
+  finally { f.close() }
+})
+
+test('blocked initial cloud playback buys only its first clip until a real playing event', async () => {
+  const calls = []
+  const f = fixture(undefined, { async synthesizeCloud(sentence) { calls.push(sentence.text); return cloudClip() } })
+  try {
+    const manualPlay = f.audio.play.bind(f.audio)
+    f.audio.play = async () => { throw new DOMException('test: autoplay blocked', 'NotAllowedError') }
+    const speaking = f.controller.speak('一。二。三。', 'neutral', undefined, [], 'cloud')
+    await settle()
+    assert.deepEqual(calls, ['一。'])
+    assert.equal(f.audio.paused, true)
+    assert.match(f.events.problem.at(-1), /自动播放被浏览器拦截/)
+    // Even a spurious event before real playback must not release capacity.
+    f.audio.dispatchEvent(new Event('playing'))
+    await settle()
+    assert.equal(calls.length, 1)
+    f.audio.play = manualPlay
+    await f.audio.play()
+    await settle()
+    assert.deepEqual(calls, ['一。', '二。'])
+    f.audio.end()
+    await settle()
+    await speaking
+    assert.deepEqual(calls, ['一。', '二。', '三。'])
+  }
+  finally { f.close() }
+})
+
+test('cancel and dispose release a cloud capacity wait without another paid request', { timeout: 1000 }, async () => {
+  for (const method of ['cancel', 'dispose']) {
+    const calls = []
+    const f = fixture(undefined, { async synthesizeCloud(sentence, signal) { calls.push({ ...sentence, signal }); return cloudClip() } })
+    try {
+      const speaking = f.controller.speak('一。二。三。四。', 'neutral', undefined, [], 'cloud')
+      await settle()
+      assert.equal(calls.length, 2)
+      f.controller[method]()
+      const stopped = structuredClone(f.events)
+      await speaking
+      await settle()
+      assert.equal(calls.length, 2)
+      assert.ok(calls.every(call => call.signal.aborted))
+      assert.deepEqual(f.events, stopped)
+      assert.equal(f.audio.src, '')
+    }
+    finally { f.close() }
+  }
+})
+
+test('replacing a cloud capacity wait keeps only the new turn active', { timeout: 1000 }, async () => {
+  const calls = []
+  const f = fixture(undefined, { async synthesizeCloud(sentence, signal) { calls.push({ ...sentence, signal }); return cloudClip() } })
+  try {
+    const old = f.controller.speak('旧一。旧二。旧三。', 'bright', undefined, [], 'cloud')
+    await settle()
+    const fresh = f.controller.speak('新一。新二。新三。', 'soft', undefined, [], 'cloud')
+    await old
+    await settle()
+    assert.deepEqual(calls.map(call => call.text), ['旧一。', '旧二。', '新一。', '新二。'])
+    assert.ok(calls.slice(0, 2).every(call => call.signal.aborted))
+    assert.ok(calls.slice(2).every(call => !call.signal.aborted))
+    f.audio.end()
+    await settle()
+    await fresh
+    assert.equal(calls.at(-1).text, '新三。')
+    assert.equal(f.events.delivery.at(-1), 'soft')
+  }
+  finally { f.close() }
+})
+
+test('a silent initial cloud clip cannot trigger paid attempts for later sentences', async () => {
+  let calls = 0
+  const f = fixture(undefined, { async synthesizeCloud() {
+    calls++
+    return { samples: new Float32Array(2400), sampleRate: 24000, words: [] }
+  } })
+  try {
+    const input = f.controller.beginStream('', 'neutral', undefined, 'cloud')
+    input.push('一。二。三。')
+    input.finish()
+    await settle()
+    assert.equal(calls, 1)
+    assert.equal(f.audio.src, '')
+    assert.equal(f.utterances[0].text, '一。')
+  }
+  finally { f.close() }
 })

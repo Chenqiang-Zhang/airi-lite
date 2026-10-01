@@ -9,14 +9,15 @@
   #stage { width: 60vw; height: 95vh; }
   aside { flex: 1; padding: 30px 20px; }
   button { margin: 5px; padding: 10px; cursor: pointer; }
+  #controls { border: 0; margin: 0; padding: 0; min-width: 0; }
   pre { white-space: pre-wrap; }
 </style>
 <main>
   <div id="stage"></div>
   <aside>
     <h1>Hiyori 动作校验</h1>
-    <p>仅开发页面。固定姿态用于检查真实 Cubism 绘制顺序，不播放音频、不调用 LLM。</p>
-    <div id="controls">
+    <p>仅开发页面。固定姿态检查 Cubism 绘制顺序；真实语音按钮使用免费本地 Kokoro，不调用 LLM 或云端语音 API。</p>
+    <fieldset id="controls" disabled aria-busy="true" aria-label="动作校验操作">
       <button data-activity="idle">静默</button>
       <button data-activity="attentive">注意输入</button>
       <button data-activity="thinking">等待回复</button>
@@ -31,7 +32,11 @@
       <button data-motion="2">重播大幅抬头待机动作</button>
       <button data-reaction="acknowledge">发送回应（轻点头）</button>
       <button data-reaction="clear">取消回应</button>
-    </div>
+      <button data-speech="start">真实语音与动作</button>
+      <button data-speech="stop">停止真实语音</button>
+    </fieldset>
+    <audio aria-label="动作同步语音播放器"></audio>
+    <p><a id="download-audio" hidden download="hiyori-local-voice-check.wav">保存当前校验音频</a>（全部播放结束后保存的是合并 WAV，仅含上述测试台词。）</p>
     <pre id="state">正在加载模型……</pre>
     <p>This content uses sample data owned and copyrighted by Live2D Inc.<br>Hiyori Momose · Illustration: Kani Biimu</p>
   </aside>
@@ -41,8 +46,11 @@
   import * as PIXI from 'pixi.js'
   import { Live2DModel } from 'pixi-live2d-display/cubism4'
   import { attachAvatarPerformance } from '../src/avatar-performance.ts'
+  import { createSpeechController } from '../src/speech.ts'
+  import { createPitchShadow, LOW_MOUTH_OPEN_THRESHOLD } from './avatar-diagnostic.mjs'
 
   const output = document.querySelector('#state')
+  const controls = document.querySelector('#controls')
   try {
     Object.assign(window, { PIXI })
     const stage = document.querySelector('#stage')
@@ -55,21 +63,78 @@
     model.scale.set(scale)
     model.position.set(stage.clientWidth / 2, stage.clientHeight * 1.04)
     const internal = model.internalModel
-    let beforeHeadY = 0
+    const pitchIndex = internal.coreModel.getParameterIndex('ParamAngleY')
+    const pitchShadow = createPitchShadow(
+      internal.coreModel.getParameterMinimumValue(pitchIndex),
+      internal.coreModel.getParameterMaximumValue(pitchIndex),
+    )
+    let beforeHeadY = 0, frameTime = performance.now(), shadowApply = null
     internal.on('beforeModelUpdate', () => {
+      frameTime = performance.now()
       beforeHeadY = internal.coreModel.getParameterValueById('ParamAngleY')
+      pitchShadow.setBaseline(beforeHeadY)
+      shadowApply?.()
     })
-    const actor = attachAvatarPerformance(internal, {
+    const actualActor = attachAvatarPerformance(internal, {
+      now: () => frameTime,
       reducedMotion: () => matchMedia('(prefers-reduced-motion: reduce)').matches,
     })
+    // Same frame clock and UI state, with zero audio input. This diagnostic
+    // shadow isolates the added speech emphasis from thinking/attention fade.
+    const shadowActor = attachAvatarPerformance({
+      coreModel: pitchShadow.coreModel,
+      on(_event, listener) { shadowApply = listener },
+      off() { shadowApply = null },
+    }, { now: () => frameTime, reducedMotion: () => matchMedia('(prefers-reduced-motion: reduce)').matches })
+    const actor = { ...actualActor,
+      setActivity(value) { actualActor.setActivity(value); shadowActor.setActivity(value) },
+      setDelivery(value) { actualActor.setDelivery(value); shadowActor.setDelivery(value) },
+      destroy() { actualActor.destroy(); shadowActor.destroy() },
+    }
     let activity = 'idle', delivery = 'neutral', form = 0, motionMouth = 0, frames = 0, failures = 0, overridden = 0
     let reactions = 0, reactionTime = -Infinity, reactionMaxOffset = 0
+    let expectedMouth = 0.7, speechMode = false, speaking = false, preparing = false, voiceState = 'idle', voiceProblem = ''
+    let audioFrames = 0, lowOpenFrames = 0, emphasisedFrames = 0, maxEmphasis = 0, lowOpenEmphasisFailures = 0
+    const audio = document.querySelector('audio')
+    const download = document.querySelector('#download-audio')
+    const syncSpeech = () => {
+      if (!speechMode) return
+      actor.setActivity(activity = speaking ? 'speaking' : preparing ? 'thinking' : 'idle')
+      actor.setDelivery(speaking ? delivery : 'neutral')
+    }
+    const speech = createSpeechController(audio, {
+      onState(value) { voiceState = value },
+      onPlaying(value) { speaking = value; syncSpeech() },
+      onPreparing(value) { preparing = value; syncSpeech() },
+      onDelivery(value) { delivery = value; syncSpeech() },
+      onMouth(open, value) { expectedMouth = open ?? 0; actor.setMouth(open, value) },
+      onAudioReady(value) { download.hidden = !value; if (value) download.href = audio.src; else download.removeAttribute('href') },
+      onProblem(value) { voiceProblem = value },
+    })
     actor.setMouth(0.7, form)
-    document.querySelector('#controls').addEventListener('click', ({ target }) => {
+    controls.addEventListener('click', ({ target }) => {
+      if (controls.disabled) return
       if (!(target instanceof HTMLButtonElement)) return
+      if (target.dataset.speech === 'start') {
+        speechMode = true
+        actor.clearReaction()
+        audioFrames = lowOpenFrames = emphasisedFrames = maxEmphasis = lowOpenEmphasisFailures = 0
+        const input = speech.beginStream('', 'bright')
+        input.push('诶，终于来了！今天居然一口气把这段跑通了。')
+        input.setDelivery('soft')
+        input.push('先慢一点说也没关系。')
+        input.finish()
+        return
+      }
+      if (target.dataset.speech === 'stop') { speech.cancel(); return }
+      if (speechMode) {
+        speech.cancel()
+        speechMode = false
+        actor.setMouth(expectedMouth = 0.7, form)
+      }
       if (target.dataset.activity) actor.setActivity(activity = target.dataset.activity)
       if (target.dataset.delivery) actor.setDelivery(delivery = target.dataset.delivery)
-      if (target.dataset.form) actor.setMouth(0.7, form = Number(target.dataset.form))
+      if (target.dataset.form) actor.setMouth(expectedMouth = 0.7, form = Number(target.dataset.form))
       if (target.dataset.motion) void model.motion('Idle', Number(target.dataset.motion), 3)
       if (target.dataset.reaction === 'acknowledge') {
         reactions++
@@ -95,12 +160,31 @@
       output.dataset.headYAfter = headY.toFixed(3)
       output.dataset.reactions = String(reactions)
       output.dataset.reactionMaxOffset = reactionMaxOffset.toFixed(3)
-      if (Math.abs(mouth - (activity === 'speaking' ? 0.7 : 0)) > 0.001) failures++
+      if (Math.abs(mouth - (activity === 'speaking' ? expectedMouth : 0)) > 0.001) failures++
+      if (speechMode && activity === 'speaking') {
+        audioFrames++
+        const offset = Math.abs(headY - pitchShadow.getPitch())
+        if (expectedMouth < LOW_MOUTH_OPEN_THRESHOLD) {
+          lowOpenFrames++
+          if (offset > 0.001) lowOpenEmphasisFailures++
+        }
+        if (offset > 0.08 && expectedMouth >= LOW_MOUTH_OPEN_THRESHOLD) emphasisedFrames++
+        maxEmphasis = Math.max(maxEmphasis, offset)
+      }
+      output.dataset.audioFrames = String(audioFrames)
+      output.dataset.lowOpenFrames = String(lowOpenFrames)
+      output.dataset.emphasisedFrames = String(emphasisedFrames)
+      output.dataset.maxEmphasis = maxEmphasis.toFixed(3)
+      output.dataset.lowOpenEmphasisFailures = String(lowOpenEmphasisFailures)
+      output.dataset.voiceState = voiceState
       if (Math.abs(motionMouth - mouth) > 0.1) overridden++
-      if (++frames % 15 === 0) output.textContent = `状态: ${activity} / ${delivery}\n动作写入的开口: ${motionMouth.toFixed(3)}\n实际绘制前开口: ${mouth.toFixed(3)}\n实际绘制前嘴形: ${renderedForm.toFixed(3)}\n回应前/后 Y: ${beforeHeadY.toFixed(3)} / ${headY.toFixed(3)}\n回应次数: ${reactions}\n本次最大 Y 偏移: ${reactionMaxOffset.toFixed(3)}\n检查帧数: ${frames}\n已纠正动作覆盖: ${overridden}\n口型覆盖错误: ${failures}`
+      if (++frames % 15 === 0) output.textContent = `状态: ${activity} / ${delivery}\n动作写入的开口: ${motionMouth.toFixed(3)}\n实际绘制前开口: ${mouth.toFixed(3)}\n实际绘制前嘴形: ${renderedForm.toFixed(3)}\n回应前/后 Y: ${beforeHeadY.toFixed(3)} / ${headY.toFixed(3)}\n回应次数: ${reactions}\n本次最大 Y 偏移: ${reactionMaxOffset.toFixed(3)}\n检查帧数: ${frames}\n已纠正动作覆盖: ${overridden}\n口型覆盖错误: ${failures}\n声线状态: ${voiceState}\n真实音频帧: ${audioFrames}\n低开口帧（<0.06）: ${lowOpenFrames}\n伴随开口的轻点头帧: ${emphasisedFrames}\n最大语音动作偏移: ${maxEmphasis.toFixed(3)}\n低开口时的动作误差: ${lowOpenEmphasisFailures}\n${voiceProblem}`
     })
-    addEventListener('pagehide', () => { actor.destroy(); app.destroy(true, { children: true, texture: true, baseTexture: true }) }, { once: true })
+    addEventListener('pagehide', () => { speech.dispose(); actor.destroy(); app.destroy(true, { children: true, texture: true, baseTexture: true }) }, { once: true })
+    audio.controls = true
+    controls.disabled = false
+    controls.setAttribute('aria-busy', 'false')
   }
-  catch (error) { output.textContent = `加载失败: ${error.message}` }
+  catch (error) { controls.setAttribute('aria-busy', 'false'); output.textContent = `加载失败: ${error.message}` }
 </script>
 </html>

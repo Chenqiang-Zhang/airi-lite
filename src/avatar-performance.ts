@@ -4,6 +4,7 @@ export type AvatarActivity = 'idle' | 'attentive' | 'thinking' | 'speaking'
 
 interface ParameterModel {
   coreModel: {
+    getParameterValueById: (id: string) => number
     setParameterValueById: (id: string, value: number, weight?: number) => void
     addParameterValueById: (id: string, value: number, weight?: number) => void
   }
@@ -24,13 +25,19 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
   let delivery: Delivery = 'neutral'
   let mouthOpen: number | null = 0
   let mouthForm = 0
+  let previousAudioOpen = 0
+  let emphasisStartedAt: number | null = null
+  let emphasisStrength = 0
+  let lastEmphasisAt = -Infinity
+  let previouslyReduced = false
   let reactionStartedAt: number | null = null
   const reactionDuration = 650
   const weights = { attentive: 0, thinking: 0, speaking: 0, bright: 0, soft: 0, curious: 0 }
 
   const apply = () => {
     const time = now()
-    const delta = Math.max(0, Math.min(100, time - previousTime)) / 1_000
+    const gap = time - previousTime
+    const delta = Math.max(0, Math.min(100, gap)) / 1_000
     previousTime = time
     elapsed += delta
     const blend = 1 - Math.exp(-delta / 0.28)
@@ -41,6 +48,27 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
 
     const core = model.coreModel
     const speaking = activity === 'speaking'
+    const reducedMotion = options.reducedMotion?.() ?? false
+    const audioOpen = speaking && mouthOpen !== null ? mouthOpen : null
+    // Numeric mouth opening comes from the current audio envelope; browser
+    // speech has no measured envelope. Do not invent prosodic beats for it.
+    if (audioOpen === null || reducedMotion || previouslyReduced || gap > 250 || gap < 0) {
+      emphasisStartedAt = null
+      emphasisStrength = 0
+      previousAudioOpen = audioOpen ?? 0
+      lastEmphasisAt = -Infinity
+    }
+    else {
+      const rise = audioOpen - previousAudioOpen
+      previousAudioOpen = audioOpen
+      if (audioOpen < 0.06)
+        emphasisStartedAt = null
+      if (audioOpen >= 0.1 && rise >= 0.06 && time - lastEmphasisAt >= 400) {
+        emphasisStartedAt = lastEmphasisAt = time
+        emphasisStrength = Math.min(1, (rise - 0.05) / 0.2) * Math.min(1, audioOpen / 0.35)
+      }
+    }
+    previouslyReduced = reducedMotion
     // Closing is immediate on pause/cancel, even if an Idle motion opens its mouth.
     core.setParameterValueById('ParamMouthOpenY', speaking
       ? mouthOpen ?? (0.2 + Math.abs(Math.sin(elapsed * 9.6)) * 0.5)
@@ -59,16 +87,28 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
     core.addParameterValueById('ParamBrowLForm', brow)
     core.addParameterValueById('ParamBrowRForm', brow)
 
-    const reducedMotion = options.reducedMotion?.() ?? false
     if (reactionStartedAt !== null && (reducedMotion || time - reactionStartedAt >= reactionDuration))
       reactionStartedAt = null
     if (!reducedMotion) {
       // Small offsets preserve the original blink, breathing and pointer tracking.
-      core.addParameterValueById('ParamAngleX', -weights.thinking * 3 + weights.speaking * Math.sin(elapsed * 1.7) * 0.7)
-      core.addParameterValueById('ParamAngleY', weights.attentive * 1.5 + weights.thinking * 1.8 + weights.speaking * Math.sin(elapsed * 2.3) * 0.6)
+      core.addParameterValueById('ParamAngleX', -weights.thinking * 3)
+      core.addParameterValueById('ParamAngleY', weights.attentive * 1.5 + weights.thinking * 1.8)
       core.addParameterValueById('ParamAngleZ', -weights.attentive * 1.2 + weights.thinking * 2.2)
       core.addParameterValueById('ParamEyeBallX', -weights.thinking * 0.12)
       core.addParameterValueById('ParamEyeBallY', weights.attentive * 0.06 + weights.thinking * 0.1)
+      if (emphasisStartedAt !== null) {
+        const age = time - emphasisStartedAt
+        if (age >= 360) emphasisStartedAt = null
+        else {
+          const progress = age <= 80 ? age / 80 : 1 - (age - 80) / 280
+          const smooth = progress * progress * (3 - 2 * progress)
+          const baseline = core.getParameterValueById('ParamAngleY')
+          // A small pitch-only emphasis avoids coupling X/Z into hair physics.
+          // Clamp relative to this frame's real Idle baseline, not a fake zero.
+          const pitch = Math.max(-30, Math.min(30, baseline - smooth * emphasisStrength * 0.9))
+          core.addParameterValueById('ParamAngleY', pitch - baseline)
+        }
+      }
       if (reactionStartedAt !== null) {
         const progress = Math.max(0, (time - reactionStartedAt) / reactionDuration)
         const reaction = Math.sin(Math.PI * progress) ** 2
@@ -84,11 +124,22 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
   return {
     acknowledge() { reactionStartedAt = options.reducedMotion?.() ? null : now() },
     clearReaction() { reactionStartedAt = null },
-    setActivity(value: AvatarActivity) { activity = value },
+    setActivity(value: AvatarActivity) {
+      if (value !== 'speaking') {
+        emphasisStartedAt = null
+        emphasisStrength = previousAudioOpen = 0
+        lastEmphasisAt = -Infinity
+      }
+      activity = value
+    },
     setDelivery(value: Delivery) { delivery = value },
     setMouth(open: number | null, form: number) {
-      mouthOpen = open === null ? null : Math.max(0, Math.min(1, open))
-      mouthForm = Math.max(-0.32, Math.min(0.32, form))
+      mouthOpen = open === null ? null : Number.isFinite(open) ? Math.max(0, Math.min(1, open)) : 0
+      mouthForm = Number.isFinite(form) ? Math.max(-0.32, Math.min(0.32, form)) : 0
+      if (mouthOpen === null || mouthOpen < 0.06) {
+        emphasisStartedAt = null
+        previousAudioOpen = mouthOpen ?? 0
+      }
     },
     destroy() { model.off('beforeModelUpdate', apply) },
   }

@@ -9,6 +9,7 @@ function fixture(reducedMotion = false) {
   const values = new Map()
   const model = new EventEmitter()
   model.coreModel = {
+    getParameterValueById: id => values.get(id) ?? 0,
     setParameterValueById: (id, value, weight = 1) => values.set(id, (values.get(id) ?? 0) * (1 - weight) + value * weight),
     addParameterValueById: (id, value) => values.set(id, (values.get(id) ?? 0) + value),
   }
@@ -96,6 +97,93 @@ test('browser voice fallback animates over elapsed time and closes immediately',
   assert.notEqual(first, second)
   actor.setActivity('idle')
   assert.equal(frame().ParamMouthOpenY, 0)
+})
+
+test('a real audio onset adds one bounded pitch emphasis, not a repeating clock-driven sway', () => {
+  const { actor, frame } = fixture()
+  actor.setActivity('speaking')
+  actor.setMouth(0, 0)
+  assert.equal(frame().ParamAngleY, 0)
+  actor.setMouth(0.4, 0)
+  frame(25)
+  assert.ok(frame(80).ParamAngleY <= -0.8)
+  assert.ok(frame(80).ParamAngleY < 0)
+  for (let i = 0; i < 40; i++) {
+    const pose = frame(25)
+    assert.ok(pose.ParamAngleY >= -0.9 && pose.ParamAngleY <= 0)
+    assert.equal(pose.ParamAngleX, 0)
+  }
+  assert.equal(frame().ParamAngleY, 0, 'constant audio level must not trigger another beat')
+  actor.setMouth(0, 0)
+  assert.equal(frame().ParamAngleY, 0)
+  actor.setMouth(0.4, 0)
+  frame(25)
+  assert.ok(frame(80).ParamAngleY < -0.8, 'a later genuine onset may add a new emphasis')
+})
+
+test('silence, browser speech, pause and reduced-motion never retain an audio emphasis', () => {
+  const { actor, frame, setReducedMotion } = fixture()
+  actor.setActivity('speaking')
+  actor.setMouth(0.5, 0)
+  frame()
+  assert.ok(frame(80).ParamAngleY < 0)
+  actor.setMouth(0, 0)
+  assert.equal(frame().ParamAngleY, 0)
+  actor.setMouth(0.5, 0)
+  frame(500)
+  assert.equal(frame(80).ParamAngleY, 0, 'background gap must prime, not invent an onset')
+  actor.setMouth(0, 0)
+  frame()
+  actor.setMouth(0.5, 0)
+  frame()
+  assert.ok(frame(80).ParamAngleY < 0)
+  actor.setActivity('idle')
+  const idle = frame()
+  assert.equal(idle.ParamAngleY, 0)
+  assert.equal(idle.ParamMouthOpenY, 0)
+  actor.setActivity('speaking')
+  actor.setMouth(null, 0)
+  for (let i = 0; i < 15; i++) assert.equal(frame(50).ParamAngleY, 0)
+  actor.setMouth(0.5, 0)
+  setReducedMotion(true)
+  const reduced = frame()
+  assert.equal(reduced.ParamAngleY, undefined)
+  assert.equal(reduced.ParamMouthOpenY, 0.5)
+  setReducedMotion(false)
+  assert.equal(frame().ParamAngleY, 0)
+  assert.equal(frame(80).ParamAngleY, 0)
+})
+
+test('speech emphasis respects the model pitch bounds and never changes invalid mouth values into NaN', () => {
+  for (const pitch of [-30, 0, 30]) {
+    const { actor, frame } = fixture()
+    actor.setActivity('speaking')
+    actor.setMouth(0.5, 0)
+    frame(16, 0, 0, pitch)
+    const pose = frame(80, 0, 0, pitch)
+    assert.ok(pose.ParamAngleY >= -30 && pose.ParamAngleY <= 30)
+    assert.ok(Math.abs(pose.ParamAngleY - pitch) <= 0.9)
+    actor.setMouth(NaN, Infinity)
+    const invalid = frame(16, 0, 0, pitch)
+    assert.equal(invalid.ParamMouthOpenY, 0)
+    assert.equal(invalid.ParamMouthForm, 0)
+  }
+})
+
+test('pause and silence clear a gesture even when playback resumes before the next render', () => {
+  const { actor, frame } = fixture()
+  actor.setActivity('speaking')
+  actor.setMouth(0.5, 0)
+  frame()
+  assert.ok(frame(80).ParamAngleY < 0)
+  actor.setActivity('idle')
+  actor.setActivity('speaking')
+  actor.setMouth(0.5, 0)
+  assert.equal(frame(0).ParamAngleY, 0)
+  assert.ok(frame(80).ParamAngleY < 0)
+  actor.setMouth(0, 0)
+  actor.setMouth(0.5, 0)
+  assert.equal(frame(0).ParamAngleY, 0)
 })
 
 test('acknowledgement is one silent nod, can be cancelled, and does not replay after a background gap', () => {

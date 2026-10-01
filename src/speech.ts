@@ -28,6 +28,8 @@ interface PlaybackRun {
   total: number
   synthesisFinished: boolean
   playingChunk: boolean
+  chunkStarted: boolean
+  resumeCloudGeneration: (() => void) | null
   timeline: PlaybackCue[]
 }
 
@@ -130,6 +132,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   const onPlaying = () => {
     if (!currentSource() || audio.paused || audio.ended)
       return
+    if (activeRun?.playingChunk) {
+      activeRun.chunkStarted = true
+      wakeCloudGeneration(activeRun)
+    }
     callbacks.onProblem('')
     callbacks.onPreparing(false)
     callbacks.onPlaying(true)
@@ -150,6 +156,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     if (!activeRun?.playingChunk)
       return
     activeRun.playingChunk = false
+    activeRun.chunkStarted = false
     advance(activeRun)
   }
   const onError = () => {
@@ -180,8 +187,12 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       return
 
     const next = session.queue.shift()
+    // The queued lookahead is now the current clip, so a cloud producer may
+    // consider fetching its next sentence after this clip actually starts.
+    wakeCloudGeneration(session)
     if (next) {
       session.playingChunk = true
+      session.chunkStarted = false
       replaceAudioSource(next.samples, next.sampleRate, [{ time: 0, delivery: next.delivery }])
       callbacks.onPreparing(false)
       void audio.play().catch((error) => {
@@ -207,6 +218,29 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     activeRun = null
     callbacks.onPreparing(false)
     replaceAudioSource(samples, session.sampleRate, session.timeline)
+  }
+
+  function wakeCloudGeneration(session: PlaybackRun) {
+    const resume = session.resumeCloudGeneration
+    session.resumeCloudGeneration = null
+    resume?.()
+  }
+
+  function hasCloudCapacity(session: PlaybackRun): boolean {
+    // A paid request may produce the initial clip, or one lookahead while a
+    // real current clip is playing. A paused/blocked initial player must not
+    // keep buying the rest of a reply simply because play() was attempted.
+    return !session.queue.length && (!session.playingChunk
+      || (session.chunkStarted && currentSource() && !audio.paused && !audio.ended))
+  }
+
+  async function waitForCloudCapacity(session: PlaybackRun, signal: AbortSignal): Promise<boolean> {
+    while (session === activeRun && session.token === run && !signal.aborted) {
+      if (hasCloudCapacity(session))
+        return true
+      await new Promise<void>((resolve) => { session.resumeCloudGeneration = resolve })
+    }
+    return false
   }
 
   async function prepare(token: number = run) {
@@ -252,6 +286,8 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     run++
     activeVoiceAbort?.abort()
     activeVoiceAbort = null
+    if (activeRun)
+      wakeCloudGeneration(activeRun)
     activeInput?.cancel()
     activeInput = null
     releaseUtterance?.()
@@ -337,11 +373,24 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   async function *synthesizeCloudSentences(input: AsyncIterable<SpokenSentence>, token: number): AsyncGenerator<AudioClip> {
     if (!dependencies.synthesizeCloud)
       throw new Error('Cloud voice is not configured')
+    // consumeSegments installs this exact run before pulling the generator.
+    // Never use a newer activeRun after an old capacity wait resumes.
+    const session = activeRun
+    if (!session || session.token !== token || token !== run)
+      return
     const controller = new AbortController()
     activeVoiceAbort = controller
     try {
       for await (const sentence of input) {
-        if (token !== run) return
+        while (true) {
+          if (!await waitForCloudCapacity(session, controller.signal)
+            || session !== activeRun || token !== run || controller.signal.aborted) return
+          // Awaiting even an already-resolved capacity promise yields a
+          // microtask. A pause in that gap revokes the permit; wait again for
+          // this same sentence rather than dropping it or buying it paused.
+          if (hasCloudCapacity(session))
+            break
+        }
         // Preserve real Chinese/English text; Kokoro's browser workaround must
         // never rewrite a cloud provider's input. No retries of paid requests.
         const clip = await dependencies.synthesizeCloud(sentence, controller.signal)
@@ -420,6 +469,8 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       total: 0,
       synthesisFinished: false,
       playingChunk: false,
+      chunkStarted: false,
+      resumeCloudGeneration: null,
       timeline: [],
     }
     activeRun = session
@@ -441,8 +492,13 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
           energy += sample * sample
           peak = Math.max(peak, Math.abs(sample))
         }
-        if (!data.length || peak < 0.001 || Math.sqrt(energy / data.length) < 0.0001)
+        if (!data.length || peak < 0.001 || Math.sqrt(energy / data.length) < 0.0001) {
+          // Do not pay for more cloud sentences when the initial result cannot
+          // produce a playable current clip. Local chunk filtering is unchanged.
+          if (state === 'cloud')
+            throw new Error('Cloud speech returned silent audio')
           continue
+        }
         session.sampleRate = sampleRate
         session.timeline.push({ time: session.total / sampleRate, delivery: segment.delivery })
         session.chunks.push(data)
