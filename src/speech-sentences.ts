@@ -1,6 +1,7 @@
 import { chooseDelivery } from './delivery.ts'
 import type { Delivery } from './delivery'
 import { SentenceBuffer } from './sentence-buffer.ts'
+import { cleanSpokenText, hasSpokenContent, SpokenTextFilter } from './spoken-text.ts'
 
 export interface DeliveryCue {
   start: number // UTF-16 character offset in the visible reply.
@@ -35,6 +36,7 @@ export function normaliseDeliveryCues(value: unknown, textLength: number): Deliv
 // wakes a consumer waiting between sentences, even when no audio was generated.
 export class SpeechSentenceStream implements AsyncIterable<SpokenSentence> {
   private buffer = new SentenceBuffer()
+  private filter = new SpokenTextFilter()
   private queue: SpokenSentence[] = []
   private closed = false
   private wake: (() => void) | null = null
@@ -51,8 +53,11 @@ export class SpeechSentenceStream implements AsyncIterable<SpokenSentence> {
   }
 
   private feed(sentences: string[]) {
-    for (const text of sentences)
-      this.queue.push({ text, delivery: this.delivery ?? chooseDelivery(this.userText, text) })
+    for (const text of sentences) {
+      const spoken = cleanSpokenText(text)
+      if (hasSpokenContent(spoken))
+        this.queue.push({ text: spoken, delivery: this.delivery ?? chooseDelivery(this.userText, spoken) })
+    }
     this.wake?.()
     this.wake = null
   }
@@ -61,21 +66,28 @@ export class SpeechSentenceStream implements AsyncIterable<SpokenSentence> {
     if (this.closed)
       return
     this.text += fragment
-    this.feed(this.buffer.push(fragment))
+    this.feed(this.buffer.push(this.filter.push(fragment)))
   }
 
   setDelivery(delivery: Delivery) {
     if (this.closed)
       return
-    // A model may change tone before punctuation. Flush that tail with its old
-    // cue so later tokens cannot retroactively change queued speech.
-    this.feed(this.buffer.finish())
-    this.delivery = delivery
+    // A held keycap base is either a real old-tone digit or a silent emoji.
+    // Resolve it before flushing the old clause, then apply the newest cue
+    // before the next ordinary character is emitted by the filter.
+    this.filter.atSentenceBoundary(pendingOutput => {
+      if (this.closed)
+        return
+      this.feed(this.buffer.push(pendingOutput))
+      this.feed(this.buffer.finish())
+      this.delivery = delivery
+    })
   }
 
   finish() {
     if (this.closed)
       return
+    this.feed(this.buffer.push(this.filter.finish()))
     this.feed(this.buffer.finish())
     this.closed = true
     this.resolveFinished()
@@ -85,6 +97,7 @@ export class SpeechSentenceStream implements AsyncIterable<SpokenSentence> {
 
   cancel() {
     this.queue.length = 0
+    this.filter.cancel()
     this.buffer.finish()
     this.closed = true
     this.resolveFinished()

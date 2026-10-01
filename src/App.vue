@@ -9,7 +9,7 @@ import { ChatApiError, fetchProviderStatus, streamChat } from './api'
 import { clearConversation, loadConversation, saveConversation } from './conversation'
 import type { ConversationMessage } from './conversation'
 import { createChatScrollController } from './chat-scroll'
-import { createAssistantMessage } from './chat-turn'
+import { createAssistantMessage, interruptAssistantMessage } from './chat-turn'
 import type { AvatarActivity } from './avatar-performance'
 import { chooseDelivery } from './delivery'
 import type { Delivery } from './delivery'
@@ -217,7 +217,6 @@ async function sendMessage() {
   }
 
   speech?.cancel()
-  void speech?.prepare().catch(() => {})
 
   lastError.value = ''
   interactionNotice.value = ''
@@ -409,8 +408,7 @@ function stopCurrentTurn() {
     controller.abort()
     activeController.value = null
     isGenerating.value = false
-    if (activeAssistantId.value !== null)
-      messages.value = messages.value.filter(message => message.id !== activeAssistantId.value)
+    messages.value = interruptAssistantMessage(messages.value, activeAssistantId.value)
     activeAssistantId.value = null
     saveConversation(messages.value)
   }
@@ -503,7 +501,7 @@ function saveAccessCode() {
       <div class="chat-history">
       <div ref="messagesViewport" class="messages" aria-live="polite" tabindex="0" aria-label="聊天记录">
         <article v-for="message in messages" :key="message.id" class="message" :class="[message.role, { generating: isGenerating && message.role === 'assistant' && !message.text }]">
-          <span>{{ message.role === 'assistant' ? characterName : 'You' }}{{ message.source === 'fallback' ? ' · 本地演示' : '' }}</span>
+          <span>{{ message.role === 'assistant' ? characterName : 'You' }}{{ message.source === 'fallback' ? ' · 本地演示' : '' }}{{ message.role === 'assistant' && message.interrupted ? ' · 已停下' : '' }}</span>
           <p v-if="message.text">{{ message.text }}</p>
           <p v-else class="typing"><i /><i /><i /></p>
           <button v-if="message.role === 'user' && message.text" class="remember-button" type="button" aria-label="把这条消息加入记忆草稿" @click="rememberMessage(message)">记住这句…</button>

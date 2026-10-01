@@ -9,6 +9,7 @@ export interface ConversationMessage {
   delivery?: Delivery
   deliveryCues?: DeliveryCue[]
   source?: 'deepseek' | 'fallback'
+  interrupted?: true
 }
 
 export const CONVERSATION_STORAGE_KEY = 'airi-lite:conversation:v1'
@@ -31,6 +32,8 @@ function normaliseMessages(value: unknown): ConversationMessage[] {
       if (deliveries.has(item.delivery))
         message.delivery = item.delivery
       if (item.role === 'assistant') {
+        if (item.interrupted === true)
+          message.interrupted = true
         const leading = item.text.length - item.text.trimStart().length
         const cues = normaliseDeliveryCues(
           normaliseDeliveryCues(item.deliveryCues, item.text.length)

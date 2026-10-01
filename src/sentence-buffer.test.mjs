@@ -24,3 +24,12 @@ test('bounds long unpunctuated text at a comma when possible', () => {
   assert.ok(ready.length >= 1)
   assert.equal([...ready, ...buffer.finish()].join(''), text)
 })
+
+test('a forced length boundary never splits a supplementary character pair', () => {
+  const buffer = new SentenceBuffer()
+  const text = '啊'.repeat(179) + '𠮷' + '再继续'.repeat(90)
+  const sentences = [...buffer.push(text), ...buffer.finish()]
+  assert.equal(sentences.join(''), text)
+  for (const sentence of sentences)
+    assert.ok(sentence.isWellFormed())
+})

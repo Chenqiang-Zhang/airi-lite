@@ -44,9 +44,10 @@ function fixture(loadModel) {
   globalThis.requestAnimationFrame = callback => { frames.set(++nextFrame, callback); return nextFrame }
   globalThis.cancelAnimationFrame = id => frames.delete(id)
   const audio = new AudioStub()
-  const events = { delivery: [], problem: [], playing: [], preparing: [], mouth: [] }
+  const events = { delivery: [], problem: [], playing: [], preparing: [], mouth: [], ready: [], state: [] }
   const controller = createSpeechController(audio, {
-    onState() {}, onAudioReady() {},
+    onState: value => events.state.push(value),
+    onAudioReady: value => events.ready.push(value),
     onDelivery: value => events.delivery.push(value),
     onProblem: value => events.problem.push(value),
     onPlaying: value => events.playing.push(value),
@@ -192,6 +193,82 @@ test('stale media events cannot reopen silence, advance or cancel the new source
     assert.equal(f.audio.src, source)
     assert.deepEqual(f.events, activeEvents)
     assert.equal(f.events.playing.at(-1), true)
+  }
+  finally { f.close() }
+})
+
+test('nonspoken replies never load a model or use fallback, in stream and replay', async () => {
+  let loads = 0
+  const f = fixture(async () => { loads++; throw new Error('should not load') })
+  try {
+    for (const text of ['```python\n[x * 2 for x in [1,2,3]]\n```', '😊✨！！！', '😊'.repeat(89) + '1️⃣', '![日和](https://example.invalid/image.png)']) {
+      const input = f.controller.beginStream('', 'bright')
+      for (const char of text) input.push(char)
+      input.setDelivery('soft')
+      input.finish()
+      await settle()
+      await f.controller.speak(text, 'bright')
+      assert.equal(loads, 0)
+      assert.equal(f.audio.src, '')
+      assert.equal(f.utterances.length, 0)
+      assert.equal(f.events.preparing.at(-1), false)
+      assert.equal(f.events.ready.at(-1), false)
+      assert.match(f.events.problem.at(-1), /没有可朗读/)
+      assert.deepEqual(f.events.state, [])
+    }
+  }
+  finally { f.close() }
+})
+
+test('a canceled code block cannot leak its pending text into a new voice turn', async () => {
+  const calls = []
+  const f = fixture(async () => ({ async *stream(text) { calls.push(text); yield clip() } }))
+  try {
+    const old = f.controller.beginStream('', 'bright')
+    old.push('```python\nprint("旧正文。")')
+    await settle()
+    f.controller.cancel()
+    old.finish()
+    const fresh = f.controller.beginStream('', 'soft')
+    fresh.push('新正文。')
+    fresh.finish()
+    await settle()
+    assert.deepEqual(calls, ['新正文。'])
+    assert.equal(f.events.playing.at(-1), true)
+    assert.equal(f.utterances.length, 0)
+  }
+  finally { f.close() }
+})
+
+test('fallback keeps the first sentence but skips code and link destinations', async () => {
+  const f = fixture(async () => { throw new Error('test: no local model') })
+  try {
+    const speaking = f.controller.speak('**第一句。**\n```python\nprint("秘密。")\n```\n[第二句。](https://example.invalid/path)', 'soft')
+    await settle()
+    assert.equal(f.utterances[0].text, '第一句。')
+    f.utterances[0].onstart()
+    f.utterances[0].onend()
+    await settle()
+    assert.equal(f.utterances[1].text, '第二句。')
+    f.utterances[1].onend()
+    await speaking
+    assert.equal(f.utterances.length, 2)
+    assert.deepEqual(f.events.state, ['loading', 'fallback', 'fallback'])
+  }
+  finally { f.close() }
+})
+
+test('actual silence for a readable sentence is still a synthesis failure', async () => {
+  const f = fixture(async () => ({ async *stream() {
+    yield { audio: { data: new Float32Array(2400), sampling_rate: 24000 } }
+  } }))
+  try {
+    const speaking = f.controller.speak('这句需要出声。')
+    await settle()
+    assert.equal(f.utterances[0].text, '这句需要出声。')
+    assert.match(f.events.problem.at(-1), /本地声线不可用/)
+    f.utterances[0].onend()
+    await speaking
   }
   finally { f.close() }
 })

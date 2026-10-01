@@ -65,6 +65,42 @@ test('reply cues survive refresh and remain aligned after trimming the text', ()
   })
 })
 
+test('an interrupted assistant fragment and its delivery cues survive storage and refresh', () => {
+  const storage = memoryStorage()
+  saveConversation([
+    { role: 'user', text: '有点烦。' },
+    { role: 'assistant', text: '先去河边散步。', interrupted: true, delivery: 'soft', deliveryCues: [{ start: 0, delivery: 'soft' }], source: 'deepseek' },
+  ], storage)
+  const expected = [
+    { role: 'user', text: '有点烦。' },
+    { role: 'assistant', text: '先去河边散步。', interrupted: true, delivery: 'soft', deliveryCues: [{ start: 0, delivery: 'soft' }], source: 'deepseek' },
+  ]
+  assert.deepEqual(JSON.parse(storage.getItem(CONVERSATION_STORAGE_KEY)), expected)
+  assert.deepEqual(loadConversation(storage), expected)
+})
+
+test('only literal true interruption flags on assistant messages are stored or restored', () => {
+  const storage = memoryStorage()
+  const messages = [
+    { role: 'user', text: '用户消息', interrupted: true },
+    { role: 'assistant', text: '保留中断状态', interrupted: true },
+    ...[false, 'true', 1, {}, null].map((interrupted, index) => ({ role: 'assistant', text: `无效状态${index}`, interrupted })),
+    { role: 'system', text: '不允许的角色', interrupted: true },
+    { role: 'assistant', text: '  ', interrupted: true },
+  ]
+  const expected = [
+    { role: 'user', text: '用户消息' },
+    { role: 'assistant', text: '保留中断状态', interrupted: true },
+    ...Array.from({ length: 5 }, (_, index) => ({ role: 'assistant', text: `无效状态${index}` })),
+  ]
+  saveConversation(messages, storage)
+  assert.deepEqual(JSON.parse(storage.getItem(CONVERSATION_STORAGE_KEY)), expected)
+  assert.deepEqual(loadConversation(storage), expected)
+
+  storage.setItem(CONVERSATION_STORAGE_KEY, JSON.stringify(messages))
+  assert.deepEqual(loadConversation(storage), expected)
+})
+
 test('long conversations keep original recent turns across refresh within a byte budget', () => {
   const storage = memoryStorage()
   const messages = Array.from({ length: 60 }, (_, index) => [

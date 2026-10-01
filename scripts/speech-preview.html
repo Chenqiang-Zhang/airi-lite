@@ -18,7 +18,11 @@
     <h1>逐句语气校验</h1>
     <p>使用真实 Kokoro 声线与 Live2D。第一句轻快，第二句温柔，第三句好奇；表情只随实际播放切换。</p>
     <button id="start">合成并播放三句话</button>
+    <button id="code">验证纯代码（不生成语音）</button>
+    <button id="symbols">验证纯符号（不生成语音）</button>
+    <button id="mixed">朗读含代码与链接的正文</button>
     <button id="stop">停下</button>
+    <pre id="visible"></pre>
     <audio controls aria-label="语气校验播放器"></audio>
     <pre id="status">正在加载角色……</pre>
     <pre id="trace"></pre>
@@ -35,15 +39,19 @@
   try {
     const actor = await mountHiyori(document.querySelector('#stage'))
     const audio = document.querySelector('audio')
-    let playing = false, preparing = false, delivery = 'neutral', state = 'idle', problem = ''
+    let playing = false, preparing = false, delivery = 'neutral', state = 'idle', problem = '', audioReady = false, loads = 0
     const history = []
     const sync = () => {
       actor.setActivity(playing ? 'speaking' : preparing ? 'thinking' : 'idle')
       actor.setDelivery(playing ? delivery : 'neutral')
-      output.textContent = `声线状态: ${state}\n正在播放: ${playing}\n正在准备: ${preparing}\n当前实际语气: ${delivery}\n${problem}`
+      output.textContent = `声线状态: ${state}\n模型加载调用: ${loads}\n正在播放: ${playing}\n正在准备: ${preparing}\n有可播放音频: ${audioReady}\n当前实际语气: ${delivery}\n${problem}`
+      output.dataset.loads = String(loads)
+      output.dataset.playing = String(playing)
+      output.dataset.preparing = String(preparing)
+      output.dataset.audioReady = String(audioReady)
     }
     const controller = createSpeechController(audio, {
-      onState(value) { state = value; sync() },
+      onState(value) { if (value === 'loading') loads++; state = value; sync() },
       onPlaying(value) { playing = value; sync() },
       onPreparing(value) { preparing = value; sync() },
       onDelivery(value) {
@@ -53,7 +61,7 @@
         sync()
       },
       onMouth: actor.setMouth,
-      onAudioReady() {},
+      onAudioReady(value) { audioReady = value; sync() },
       onProblem(value) { problem = value; sync() },
     })
     document.querySelector('#start').addEventListener('click', () => {
@@ -65,6 +73,36 @@
       input.push('先歇一下，别太勉强自己。')
       input.setDelivery('curious')
       input.push('明天想从哪里开始？')
+      input.finish()
+    })
+    const showText = text => { document.querySelector('#visible').textContent = text }
+    const clearTrace = () => { history.length = 0; trace.textContent = '' }
+    document.querySelector('#code').addEventListener('click', () => {
+      clearTrace()
+      const text = '```python\n[x * 2 for x in [1, 2, 3]]\n```'
+      showText(text)
+      const input = controller.beginStream('', 'bright', loadVoice())
+      for (const char of text) input.push(char)
+      input.finish()
+    })
+    document.querySelector('#symbols').addEventListener('click', () => {
+      clearTrace()
+      const text = '😊'.repeat(89) + '1️⃣✨！！！'
+      showText(text)
+      void controller.speak(text)
+    })
+    document.querySelector('#mixed').addEventListener('click', () => {
+      clearTrace()
+      const text = '好耶，这段代码留在屏幕上！\n```python\nprint("这句不会被朗读。")\n```\n[先歇一下。](https://example.invalid/path_(example))\n等会儿再继续？'
+      showText(text)
+      const input = controller.beginStream('', 'bright', loadVoice())
+      const split = text.indexOf('print') + 2, soft = text.indexOf('[先'), curious = text.indexOf('等会儿')
+      for (let index = 0; index < text.length; index++) {
+        if (index === split) input.setDelivery('curious')
+        if (index === soft) input.setDelivery('soft')
+        if (index === curious) input.setDelivery('curious')
+        input.push(text[index])
+      }
       input.finish()
     })
     document.querySelector('#stop').addEventListener('click', () => controller.cancel())

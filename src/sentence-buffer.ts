@@ -23,7 +23,12 @@ export class SentenceBuffer {
 
     while (this.pending.length > MAX_BUFFER) {
       const comma = Math.max(this.pending.lastIndexOf('，', MAX_BUFFER), this.pending.lastIndexOf(',', MAX_BUFFER))
-      const end = comma >= 60 ? comma + 1 : MAX_BUFFER
+      let end = comma >= 60 ? comma + 1 : MAX_BUFFER
+      // Even after emoji removal, supplementary-plane letters can occupy two
+      // UTF-16 units. Do not send a lone half to the voice phonemizer.
+      if (/[\uD800-\uDBFF]/.test(this.pending[end - 1] ?? '')
+        && /[\uDC00-\uDFFF]/.test(this.pending[end] ?? ''))
+        end--
       ready.push(this.pending.slice(0, end).trim())
       this.pending = this.pending.slice(end)
     }

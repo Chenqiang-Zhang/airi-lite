@@ -6,7 +6,7 @@ import { deliverySpeed } from './delivery.ts'
 import { mouthFrames } from './mouth.ts'
 import type { MouthFrame } from './mouth'
 import { deliveryAtTime, replySentenceStream, SpeechSentenceStream } from './speech-sentences.ts'
-import type { DeliveryCue, PlaybackCue } from './speech-sentences'
+import type { DeliveryCue, PlaybackCue, SpokenSentence } from './speech-sentences'
 import { DEFAULT_VOICE } from './voice.ts'
 
 export type VoiceState = 'idle' | 'loading' | 'ready' | 'fallback'
@@ -318,7 +318,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       callbacks.onPreparing(false)
   }
 
-  async function *synthesizeSentences(model: SpeechModel, input: SpeechSentenceStream, voice: VoiceId, token: number): AsyncGenerator<AudioClip> {
+  async function *synthesizeSentences(model: SpeechModel, input: AsyncIterable<SpokenSentence>, voice: VoiceId, token: number): AsyncGenerator<AudioClip> {
     for await (const sentence of input) {
       if (token !== run) return
       for await (const segment of model.stream(forChineseVoice(sentence.text), {
@@ -332,6 +332,37 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         }
       }
     }
+  }
+
+  async function *resumeSentences(first: SpokenSentence, rest: AsyncIterator<SpokenSentence>): AsyncGenerator<SpokenSentence> {
+    yield first
+    while (true) {
+      const next = await rest.next()
+      if (next.done)
+        return
+      yield next.value
+    }
+  }
+
+  async function synthesizeInput(input: SpeechSentenceStream, voice: VoiceId, token: number) {
+    // Do not load a large voice model for a reply containing only code/markup.
+    // Waiting for the first *spoken* sentence also keeps fallback from treating
+    // intentional omission as invalid or silent synthesized audio.
+    const sentences = input[Symbol.asyncIterator]()
+    const first = await sentences.next()
+    if (token !== run)
+      return
+    if (first.done) {
+      callbacks.onPreparing(false)
+      callbacks.onProblem('这条回复没有可朗读的正文；代码或符号只在消息里展示。')
+      return
+    }
+    callbacks.onPreparing(true)
+    callbacks.onProblem('正在生成语音…')
+    const model = await prepare()
+    if (token !== run)
+      return
+    await consumeSegments(synthesizeSentences(model, resumeSentences(first.value, sentences), voice, token), token)
   }
 
   async function consumeSegments(source: AsyncIterable<AudioClip>, token: number) {
@@ -402,13 +433,9 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     const token = run
     const input = replySentenceStream(text, delivery, cues)
     activeInput = input
-    callbacks.onPreparing(true)
-    callbacks.onProblem('正在生成语音…')
+    callbacks.onProblem('')
     try {
-      const model = await prepare()
-      if (token !== run)
-        return
-      await consumeSegments(synthesizeSentences(model, input, voice, token), token)
+      await synthesizeInput(input, voice, token)
     }
     catch (error) {
       if (token !== run)
@@ -430,8 +457,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     const input = new SpeechSentenceStream(userText, preferredDelivery)
     const cues: DeliveryCue[] = preferredDelivery ? [{ start: 0, delivery: preferredDelivery }] : []
     activeInput = input
-    callbacks.onPreparing(true)
-    callbacks.onProblem('正在生成语音…')
+    callbacks.onProblem('')
 
     const cancelStream = () => {
       input.cancel()
@@ -441,10 +467,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
 
     const synthesize = async () => {
       try {
-        const model = await prepare()
-        if (token !== run)
-          return
-        await consumeSegments(synthesizeSentences(model, input, voice, token), token)
+        await synthesizeInput(input, voice, token)
       }
       catch (error) {
         if (token !== run)
