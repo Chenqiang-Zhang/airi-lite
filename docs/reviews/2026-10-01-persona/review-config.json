@@ -1,0 +1,79 @@
+{
+  "protocol_id": "hiyori-dialogue-spotcheck-2026-10-01-v1",
+  "seed": "hiyori-20261001",
+  "dimensions": {
+    "register": {
+      "labels": [
+        "fits",
+        "assistant_like",
+        "uncertain"
+      ],
+      "required": true,
+      "threshold": 1
+    },
+    "attunement": {
+      "labels": [
+        "fits",
+        "misses",
+        "uncertain"
+      ],
+      "required": true,
+      "threshold": 1
+    },
+    "grounding": {
+      "labels": [
+        "clear",
+        "invented",
+        "uncertain"
+      ],
+      "required": true,
+      "threshold": 1
+    }
+  },
+  "reviewers": {
+    "reviewer_a": {
+      "role": "primary",
+      "dimensions": [
+        "register",
+        "attunement",
+        "grounding"
+      ],
+      "routes": [
+        "*"
+      ]
+    },
+    "reviewer_b": {
+      "role": "specialist",
+      "dimensions": [
+        "register",
+        "attunement",
+        "grounding"
+      ],
+      "routes": [
+        "language",
+        "context"
+      ]
+    }
+  },
+  "routing": {
+    "calibration_fraction": 0.2,
+    "audit_fraction": 0.1,
+    "high_risk_values": [
+      "high"
+    ],
+    "min_votes": 2,
+    "allow_single_calibrated_primary": false
+  },
+  "weights": {
+    "reviewer_a": {
+      "register": 1,
+      "attunement": 1,
+      "grounding": 1
+    },
+    "reviewer_b": {
+      "register": 1,
+      "attunement": 1,
+      "grounding": 1
+    }
+  }
+}

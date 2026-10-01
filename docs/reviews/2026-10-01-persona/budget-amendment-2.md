@@ -1,0 +1,5 @@
+# Second diagnostic correction
+
+The two additional contexts did not establish clean grounding: the book reply added a concrete search scene; the program reply asserted that it worked yesterday without that context. These outputs are retained in raw/post-review-new-cases.jsonl with their exact post-review-card.json input. They are not successful final-card validation.
+
+Strengthen the distinction between relating to an experience and inventing its history; add grounded conversational examples, and remove an apology example's unsupported earlier action. Extend the real-provider budget to 16 total requests: the original 8 comparison, 2 new-context diagnostic, and at most 6 checks of the revised final card (the 2 diagnostic contexts repeated plus 4 different synthetic contexts). One draw per context at each card version, no output selection. No additional independent reviewer call; these later checks have orchestrator inspection only. Preserve the original blinded comparison and its boundaries.

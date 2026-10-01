@@ -1,0 +1,3 @@
+{"id":"ordinary-joke-baseline","dimension":"register","label":"assistant_like","weighted_share":0.5,"votes":2,"status":"provisional"}
+{"id":"ordinary-joke-baseline","dimension":"attunement","label":"misses","weighted_share":0.5,"votes":2,"status":"provisional"}
+{"id":"ordinary-joke-baseline","dimension":"grounding","label":"invented","weighted_share":1.0,"votes":2,"status":"provisional"}

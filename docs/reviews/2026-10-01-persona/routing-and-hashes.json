@@ -1,0 +1,32 @@
+{
+  "rubric_sha256": "07ed38d02e0371eb07db36508addcb11067104d9d8edcc67051ee598079f93f8",
+  "baseline_card_sha256": "db25007d720fadc8c53b95eee03bbe049f75eeb65d47c5263bbbadfbf0239629",
+  "candidate_card_sha256": "916df0d05f9513bd7c058e610dbc47cb62718cdc7b67952b89279b8efffed355",
+  "post_review_card_sha256": "f1e9be46512eb6915706c73d6fab95b2de106e73c8f85a3a4bdabc465b9af31d",
+  "shipped_card_sha256": "8e78c39a37969624b03e2315e7c08a313b3bebbdd8a5fec73744cf116cbb9a66",
+  "calibration_ids": [
+    "code-only-candidate",
+    "ordinary-joke-candidate",
+    "repair-taste-loop-baseline"
+  ],
+  "audit_ids": [
+    "code-only-baseline",
+    "no-fixing-baseline"
+  ],
+  "routing": {
+    "reviewer_a": "primary all",
+    "reviewer_b": "language/context specialist routes cover all items, plus deterministic calibration/audit",
+    "adjudicator": "only two disagreeing fields on one original item"
+  },
+  "human_review_queue": [
+    "ordinary-joke-baseline",
+    "code-only-baseline",
+    "no-fixing-baseline"
+  ],
+  "human_review_executed": false,
+  "verification": {
+    "artifact_preflight": "pass: distinct reviewer ids and requested labels, manifest hashes, complete server event text, shipped card matches source",
+    "unit_tests": { "passed": 91, "failed": 0 },
+    "production_build": "pass with existing bundle size warning"
+  }
+}

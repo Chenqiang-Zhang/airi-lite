@@ -1,0 +1,39 @@
+{
+  "tool": "collaboration.spawn_agent",
+  "isolation": "fresh fork_turns:none; only frozen definitions and reviewer-specific blind packet",
+  "reviewer_a": {
+    "task": "/root/dialogue_reviewer_a",
+    "status": "succeeded",
+    "items": 8,
+    "model": "inherited parent model; exact identity/version not exposed",
+    "tokens": null
+  },
+  "reviewer_b": {
+    "task": "/root/dialogue_reviewer_b",
+    "status": "succeeded",
+    "items": 8,
+    "model": "inherited parent model; exact identity/version not exposed",
+    "tokens": null
+  },
+  "generator": {
+    "calls": 16,
+    "originalComparisonCalls": 8,
+    "postReviewDiagnosticCalls": 2,
+    "shippedCardCalls": 6,
+    "healthReportedRequestedModel": "deepseek-flash",
+    "nativeRevision": null,
+    "usage": null
+  },
+  "fieldAdjudicator": {
+    "task": "/root/dialogue_field_adjudicator",
+    "status": "succeeded",
+    "items": 1,
+    "dimensions": ["register", "attunement"],
+    "model": "inherited parent model; exact identity/version not exposed",
+    "tokens": null,
+    "integration": "separate provisional opinion; original two-reviewer aggregation unchanged"
+  },
+  "humanCalibration": 0,
+  "humanFinalLabels": 0,
+  "rawFormat": "Agent final JSONL, not provider-native API response. Normalized rows add empty issues/revision only."
+}

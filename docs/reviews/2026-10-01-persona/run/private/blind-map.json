@@ -1,0 +1,22 @@
+{
+  "reviewer_a": {
+    "0dc06969107c6783": "code-only-baseline",
+    "a897a3822fa2b658": "repair-taste-loop-baseline",
+    "ec1da32078c3c546": "repair-taste-loop-candidate",
+    "0464999d44bb46bc": "no-fixing-baseline",
+    "1e913ad6800abac0": "code-only-candidate",
+    "2dd7100bb4896bef": "no-fixing-candidate",
+    "00268f7626ccb5f1": "ordinary-joke-baseline",
+    "1993c85ed26871fd": "ordinary-joke-candidate"
+  },
+  "reviewer_b": {
+    "12e1812a6142ee66": "no-fixing-baseline",
+    "8112980c9ac7e3da": "code-only-candidate",
+    "c33171ea554288d7": "repair-taste-loop-baseline",
+    "e6b7ad0193f88b0b": "code-only-baseline",
+    "072245ab09eeb990": "repair-taste-loop-candidate",
+    "9e38a005d9280b6c": "no-fixing-candidate",
+    "7159471bea635699": "ordinary-joke-baseline",
+    "323b144853154d9a": "ordinary-joke-candidate"
+  }
+}

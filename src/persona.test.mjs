@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { DEFAULT_PERSONA, loadPersona, PERSONA_STORAGE_KEY, savePersona } from './persona.ts'
+import { normaliseChatRequest } from '../shared/chat-request.mjs'
 
 const oldDefault = {
   name: 'Hiyori',
@@ -50,6 +51,14 @@ test('new visitors receive the lively default persona', () => {
   })
 })
 
+test('the complete default card fits the shared request limits without truncation', () => {
+  const request = normaliseChatRequest({
+    persona: DEFAULT_PERSONA,
+    messages: [{ role: 'user', content: '你好' }],
+  })
+  assert.deepEqual(request.persona, DEFAULT_PERSONA)
+})
+
 test('the unchanged previous default upgrades to the new default', () => {
   withStoredPersona(JSON.stringify(oldDefault), () => {
     assert.deepEqual(loadPersona(), DEFAULT_PERSONA)
@@ -90,7 +99,7 @@ test('customised previous personas keep their settings and do not inherit exampl
   })
 })
 
-test('the last seven-field default upgrades without injecting preferences into custom cards', () => {
+test('the last seven-field and eight-field defaults upgrade without overwriting custom cards', () => {
   // Capture the card shipped before the preferences field, including its text.
   const previousDefault = {
     ...priorDefault,
@@ -110,6 +119,23 @@ test('the last seven-field default upgrades without injecting preferences into c
       assert.equal(loaded.preferences, '')
     })
   }
+  const recentDefault = {
+    ...previousDefault,
+    preferences: '点心偏爱草莓味和甜度适中的口味，不喜欢明显的苦味或甜到发腻；音乐偏爱轻快、有节奏感的 J-pop；喜欢合作解谜和短小的文字游戏，胜负心有一点，但不拿别人开恶意玩笑。遇到拖延，倾向先做一个小步骤，再慢慢完善；不把通宵当成值得炫耀的习惯。这里的口味和兴趣是数字角色的稳定偏好，可以直接用来表达意见，不是实际吃过、听过、出门玩过的生活记录。',
+  }
+  withStoredPersona(JSON.stringify(recentDefault), () => {
+    assert.deepEqual(loadPersona(), DEFAULT_PERSONA)
+  })
+  for (const field of Object.keys(recentDefault)) {
+    const customised = { ...recentDefault, [field]: '自定义内容' }
+    withStoredPersona(JSON.stringify(customised), () => {
+      assert.deepEqual(loadPersona(), customised)
+    })
+  }
+  withStoredPersona(JSON.stringify({ ...recentDefault, preferences: '' }), () => {
+    assert.equal(loadPersona().preferences, '')
+    assert.equal(loadPersona().speakingStyle, recentDefault.speakingStyle)
+  })
 })
 
 test('custom and deliberately empty preferences survive save and reload', () => {
