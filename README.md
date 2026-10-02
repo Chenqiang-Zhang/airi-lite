@@ -54,6 +54,8 @@ The optional cloud path uses the same sentence/playback controller. Enabling the
 
 Audio-driven mouth tracks are calibrated once per accepted clip, so quiet and loud TTS outputs can both open the jaw without changing playback volume or flattening quieter syllables. Exact 40 Hz time boundaries avoid accumulated 44.1 kHz drift. Full-reply replay and seeking reuse the original per-clip tracks; short pauses close the mouth, and pause/cancel close it immediately. This remains an amplitude/spectrum approximation, not speech detection or phoneme alignment. See the [real local Chinese audio and replay checks](docs/verification/2026-10-02-mouth-calibration.md).
 
+Repeated identical delivery cues no longer split a forming clause. Consecutive, already-ready clips with the same delivery can share one audio source (up to three clips and 12 seconds when adding clips), preserving all PCM samples, pauses and each clip's mouth calibration. No waiting is added to fill a batch, and cloud lookahead/pause spending limits are unchanged. This reduces eligible player restarts, not Kokoro's internal sentence splitting or learned prosody. See the [speech-flow verification and current browser limitation](docs/verification/2026-10-03-speech-flow.md).
+
 ## Run locally
 
 Requirements: Node.js 24+ and pnpm 10+.

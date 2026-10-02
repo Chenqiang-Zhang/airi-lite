@@ -68,6 +68,44 @@ const collect = async stream => {
   return sentences
 }
 
+test('repeated explicit delivery is idempotent and matches replay without cutting a clause', async () => {
+  const prefix = '我刚才还'
+  const text = `${prefix}在想，要不要换个话题。`
+  for (const preferred of [undefined, 'bright']) {
+    const stream = new SpeechSentenceStream('', preferred)
+    stream.setDelivery('bright')
+    stream.push(prefix)
+    stream.setDelivery('bright')
+    stream.setDelivery('bright')
+    stream.push(text.slice(prefix.length))
+    stream.finish()
+    const actual = await collect(stream)
+    assert.deepEqual(actual, [{ text, delivery: 'bright' }])
+    assert.deepEqual(actual, await collect(replySentenceStream(text, preferred, [
+      { start: 0, delivery: 'bright' },
+      { start: prefix.length, delivery: 'bright' },
+    ])))
+  }
+})
+
+test('duplicate requested cues preserve a deferred keycap boundary and a newer reversion replaces it', async () => {
+  for (const suffix of ['个步骤。', '\uFE0F\u20E3下一句。']) {
+    const stream = new SpeechSentenceStream('', 'bright')
+    stream.push('嗨1')
+    stream.setDelivery('soft')
+    stream.setDelivery('soft')
+    stream.setDelivery('bright')
+    stream.setDelivery('bright')
+    stream.push(suffix)
+    stream.finish()
+    const actual = await collect(stream)
+    assert.deepEqual(actual, [{
+      text: suffix.startsWith('\uFE0F') ? '嗨下一句。' : '嗨1个步骤。',
+      delivery: 'bright',
+    }], 'a reverted pending cue neither survives nor cuts the original clause')
+  }
+})
+
 test('streaming and replay omit code/destinations while retaining visible cue offsets', async () => {
   const text = '太好啦！\n```python\nprint("不该念出来。")\n```\n[先歇一下。](https://example.invalid/a_(b))\n明天呢？'
   const cues = [

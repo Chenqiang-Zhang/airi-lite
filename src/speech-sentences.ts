@@ -46,10 +46,12 @@ export class SpeechSentenceStream implements AsyncIterable<SpokenSentence> {
 
   private userText: string
   private delivery?: Delivery
+  private requestedDelivery?: Delivery
 
   constructor(userText = '', delivery?: Delivery) {
     this.userText = userText
     this.delivery = delivery
+    this.requestedDelivery = delivery
   }
 
   private feed(sentences: string[]) {
@@ -70,8 +72,11 @@ export class SpeechSentenceStream implements AsyncIterable<SpokenSentence> {
   }
 
   setDelivery(delivery: Delivery) {
-    if (this.closed)
+    if (this.closed || this.requestedDelivery === delivery)
       return
+    // Compare the latest request, not just the applied tone: a keycap may
+    // defer the callback, and a newer cue must still be able to replace it.
+    this.requestedDelivery = delivery
     // A held keycap base is either a real old-tone digit or a silent emoji.
     // Resolve it before flushing the old clause, then apply the newest cue
     // before the next ordinary character is emitted by the filter.
@@ -79,7 +84,8 @@ export class SpeechSentenceStream implements AsyncIterable<SpokenSentence> {
       if (this.closed)
         return
       this.feed(this.buffer.push(pendingOutput))
-      this.feed(this.buffer.finish())
+      if (this.delivery !== delivery)
+        this.feed(this.buffer.finish())
       this.delivery = delivery
     })
   }

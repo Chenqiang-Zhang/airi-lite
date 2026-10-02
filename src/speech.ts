@@ -39,6 +39,8 @@ interface PlaybackRun {
 }
 
 const MODEL_ID = 'onnx-community/Kokoro-82M-v1.1-zh-ONNX'
+const MAX_READY_PLAYBACK_CLIPS = 3
+const MAX_READY_PLAYBACK_SECONDS = 12
 const LETTERS: Record<string, string> = {
   A: '诶', B: '比', C: '西', D: '迪', E: '伊', F: '艾弗', G: '吉',
   H: '艾尺', I: '艾', J: '杰', K: '凯', L: '艾勒', M: '艾姆',
@@ -198,9 +200,31 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     // consider fetching its next sentence after this clip actually starts.
     wakeCloudGeneration(session)
     if (next) {
+      // Reuse only already-ready, same-tone PCM. Never wait to fill a batch,
+      // trim a real pause, or generate more cloud audio to join it. A tone
+      // change remains a separate source; original per-clip calibration stays.
+      const ready = [next]
+      let total = next.samples.length
+      while (ready.length < MAX_READY_PLAYBACK_CLIPS) {
+        const candidate = session.queue[0]
+        if (!candidate || candidate.delivery !== next.delivery
+          || (total + candidate.samples.length) / next.sampleRate > MAX_READY_PLAYBACK_SECONDS)
+          break
+        ready.push(session.queue.shift()!)
+        total += candidate.samples.length
+      }
+      const samples = ready.length === 1 ? next.samples : new Float32Array(total)
+      const mouth: MouthSegment[] = []
+      let offset = 0
+      for (const clip of ready) {
+        if (ready.length > 1)
+          samples.set(clip.samples, offset)
+        mouth.push({ ...clip.mouth, time: offset / next.sampleRate })
+        offset += clip.samples.length
+      }
       session.playingChunk = true
       session.chunkStarted = false
-      replaceAudioSource(next.samples, next.sampleRate, [{ time: 0, delivery: next.delivery }], [next.mouth])
+      replaceAudioSource(samples, next.sampleRate, [{ time: 0, delivery: next.delivery }], mouth)
       callbacks.onPreparing(false)
       void audio.play().catch((error) => {
         if (session !== activeRun)

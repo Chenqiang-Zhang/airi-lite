@@ -10,8 +10,10 @@ class AudioStub extends EventTarget {
   src = ''
   ended = false
   error = null
+  loads = 0
+  plays = 0
   get currentSrc() { return this.src }
-  load() { this.currentTime = 0; this.ended = false; this.error = null }
+  load() { this.loads++; this.currentTime = 0; this.ended = false; this.error = null }
   removeAttribute(name) { if (name === 'src') this.src = '' }
   pause() {
     if (this.paused) return
@@ -19,6 +21,7 @@ class AudioStub extends EventTarget {
     this.dispatchEvent(new Event('pause'))
   }
   async play() {
+    this.plays++
     this.paused = false
     this.ended = false
     this.dispatchEvent(new Event('playing'))
@@ -123,6 +126,108 @@ test('sentence rates and expressions follow actual chunks, full replay and seeki
     assert.deepEqual(f.events.delivery.slice(-4), ['bright', 'soft', 'curious', 'bright'])
   }
   finally { f.close() }
+})
+
+test('a redundant streamed cue cannot add a local, cloud or browser utterance', async () => {
+  for (const engine of ['local', 'cloud', 'browser']) {
+    const calls = []
+    const f = fixture(async () => ({ async *stream(text) {
+      calls.push(text)
+      yield clip()
+    } }), { async synthesizeCloud(sentence) { calls.push(sentence.text); return cloudClip() } })
+    try {
+      const input = f.controller.beginStream('', 'bright', undefined, engine)
+      input.push('我刚才还')
+      input.setDelivery('bright')
+      input.push('在想，要不要换个话题。')
+      input.finish()
+      await settle()
+      if (engine === 'browser') {
+        assert.deepEqual(f.utterances.map(u => u.text), ['我刚才还在想，要不要换个话题。'])
+        f.utterances[0].onstart()
+        f.utterances[0].onend()
+        await settle()
+        assert.equal(f.utterances.length, 1)
+        assert.equal(calls.length, 0)
+      }
+      else {
+        assert.deepEqual(calls, ['我刚才还在想，要不要换个话题。'])
+        assert.equal(f.audio.plays, 1)
+      }
+    }
+    finally { f.close() }
+  }
+})
+
+test('already-ready same-tone clips share playback without altering PCM, pauses or per-clip mouth calibration', async () => {
+  const clips = [shapedClip(0.05, 6615), shapedClip(0.006, 8260), shapedClip(0.34, 10438)]
+  const calls = []
+  const f = fixture(async () => ({ async *stream(text) {
+    calls.push(text)
+    const c = clips[calls.length - 1]
+    yield { audio: { data: c.samples, sampling_rate: c.sampleRate } }
+  } }))
+  const assertPcm = (wav, expected) => {
+    assert.equal(wav.byteLength, 44 + expected.length * 2)
+    const view = new DataView(wav)
+    for (let i = 0; i < expected.length; i++) {
+      const value = Math.max(-1, Math.min(1, expected[i]))
+      assert.equal(view.getInt16(44 + i * 2, true), Math.trunc(value < 0 ? value * 0x8000 : value * 0x7fff) || 0)
+    }
+  }
+  try {
+    await f.controller.speak('一。二。三。', 'bright')
+    assert.deepEqual(calls, ['一。', '二。', '三。'], 'synthesis text/context is intentionally unchanged')
+    assert.equal(f.audio.plays, 1, 'the initial clip does not wait for a batch')
+    const secondDuration = clips[1].samples.length / clips[1].sampleRate
+    f.audio.end()
+    assert.equal(f.audio.plays, 2, 'both queued clips use one source startup')
+    const joined = Float32Array.from([...clips[1].samples, ...clips[2].samples])
+    assertPcm(await (await fetch(f.audio.src)).arrayBuffer(), joined)
+    const track = clips.slice(1).map(c => ({ time: 0, duration: c.samples.length / c.sampleRate, frames: mouthFrames(c.samples, c.sampleRate) }))
+    for (const time of [0, 0.08, secondDuration - 0.02, secondDuration + 0.09, 0.09]) {
+      f.tick(time)
+      const c = time >= secondDuration ? 1 : 0
+      const expected = mouthAtTime([track[c]], time - (c ? secondDuration : 0))
+      assert.deepEqual(f.events.mouth.at(-1), [expected.open, expected.form])
+    }
+    f.audio.pause()
+    const count = f.events.mouth.length
+    f.tick(secondDuration + 0.09)
+    assert.equal(f.events.mouth.length, count, 'a paused joined clip cannot animate its mouth')
+    await f.audio.play()
+    f.audio.end()
+    assert.equal(f.audio.plays, 3, 'full-reply replacement does not automatically replay')
+    assertPcm(await (await fetch(f.audio.src)).arrayBuffer(), Float32Array.from(clips.flatMap(c => [...c.samples])))
+    assert.equal(calls.length, 3, 'replay preparation never resynthesizes')
+  }
+  finally { f.close() }
+})
+
+test('ready playback joining is bounded by clip count, duration and tone changes', async () => {
+  for (const sample of [
+    { text: '一。二。三。四。五。', counts: [2400, 2400, 2400, 2400, 2400], cues: [], expected: 7200 },
+    { text: '一。二。三。', counts: [2400, 168000, 144000], cues: [], expected: 168000 },
+    { text: '一。二。三。', counts: [2400, 2400, 2400], cues: [{ start: 4, delivery: 'soft' }], expected: 2400 },
+  ]) {
+    let generated = 0
+    const f = fixture(async () => ({ async *stream() {
+      const c = shapedClip(0.02, sample.counts[generated++], 24000)
+      yield { audio: { data: c.samples, sampling_rate: c.sampleRate } }
+    } }))
+    try {
+      await f.controller.speak(sample.text, 'bright', undefined, sample.cues)
+      assert.equal(generated, sample.counts.length)
+      f.audio.end()
+      const wav = await (await fetch(f.audio.src)).arrayBuffer()
+      assert.equal(wav.byteLength, 44 + sample.expected * 2)
+      assert.equal(f.events.delivery.at(-1), 'bright', 'a queued new tone cannot leak into the joined source')
+      f.controller.cancel()
+      assert.equal(f.audio.src, '')
+      assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    }
+    finally { f.close() }
+  }
 })
 
 test('quiet and loud clips keep their original mouth tracks through merged replay and backward seeks', async () => {

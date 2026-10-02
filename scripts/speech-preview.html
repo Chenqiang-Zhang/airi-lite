@@ -18,6 +18,9 @@
     <h1>逐句语气校验</h1>
     <p>使用真实 Kokoro 声线与 Live2D。第一句轻快，第二句温柔，第三句好奇；表情只随实际播放切换。</p>
     <button id="start">合成并播放三句话</button>
+    <button id="same">同语气衔接校验（首段暂停等生成）</button>
+    <button id="resume">播放 / 继续</button>
+    <button id="pause">暂停</button>
     <button id="code">验证纯代码（不生成语音）</button>
     <button id="symbols">验证纯符号（不生成语音）</button>
     <button id="mixed">朗读含代码与链接的正文</button>
@@ -26,6 +29,8 @@
     <audio controls aria-label="语气校验播放器"></audio>
     <pre id="status">正在加载角色……</pre>
     <pre id="trace"></pre>
+    <pre id="media"></pre>
+    <p>衔接校验会主动暂停第一段，让免费本地合成继续；它用于验证已就绪片段合并，不代表自然流式延迟或听感。</p>
     <p>This content uses sample data owned and copyrighted by Live2D Inc.<br>Hiyori Momose · Illustration: Kani Biimu</p>
   </aside>
 </main>
@@ -40,7 +45,12 @@
     const actor = await mountHiyori(document.querySelector('#stage'))
     const audio = document.querySelector('audio')
     let playing = false, preparing = false, delivery = 'neutral', state = 'idle', problem = '', audioReady = false, loads = 0
+    let pauseFirst = false, sourceLoads = 0, playStarts = 0, mouth = 0, maxMouth = 0
     const history = []
+    const note = text => { history.push(text); trace.textContent = history.join('\n') }
+    const media = () => {
+      document.querySelector('#media').textContent = `已加载音源: ${sourceLoads}\nplaying 事件次数: ${playStarts}\n音频: ${audio.currentTime.toFixed(2)} / ${Number.isFinite(audio.duration) ? audio.duration.toFixed(3) : '—'} 秒\n暂停: ${audio.paused}\n嘴形开口: ${mouth.toFixed(3)}\n最大开口: ${maxMouth.toFixed(3)}\n媒体错误: ${audio.error?.code ?? '无'}`
+    }
     const sync = () => {
       actor.setActivity(playing ? 'speaking' : preparing ? 'thinking' : 'idle')
       actor.setDelivery(playing ? delivery : 'neutral')
@@ -56,17 +66,37 @@
       onPreparing(value) { preparing = value; sync() },
       onDelivery(value) {
         delivery = value
-        history.push(`${history.length + 1}. ${value} @ ${audio.currentTime.toFixed(2)}s`)
-        trace.textContent = history.join('\n')
+        note(`语气 ${value} @ ${audio.currentTime.toFixed(2)}s`)
         sync()
       },
-      onMouth: actor.setMouth,
+      onMouth(opening, form) {
+        actor.setMouth(opening, form)
+        mouth = opening ?? 0
+        maxMouth = Math.max(maxMouth, mouth)
+        media()
+      },
       onAudioReady(value) { audioReady = value; sync() },
       onProblem(value) { problem = value; sync() },
     })
+    audio.addEventListener('loadedmetadata', () => {
+      sourceLoads++
+      note(`音源 ${sourceLoads}: ${audio.duration.toFixed(3)} 秒`)
+      media()
+    })
+    audio.addEventListener('playing', () => {
+      playStarts++
+      note(`playing 事件 ${playStarts} @ ${audio.currentTime.toFixed(2)}s`)
+      if (pauseFirst) {
+        pauseFirst = false
+        audio.pause()
+        note('校验夹具主动暂停首段；点击“播放 / 继续”恢复')
+      }
+      media()
+    })
+    for (const event of ['pause', 'ended', 'timeupdate', 'emptied'])
+      audio.addEventListener(event, media)
     document.querySelector('#start').addEventListener('click', () => {
-      history.length = 0
-      trace.textContent = ''
+      clearTrace()
       const input = controller.beginStream('', 'bright', loadVoice())
       input.push('好耶，终于跑通啦！')
       input.setDelivery('soft')
@@ -76,7 +106,26 @@
       input.finish()
     })
     const showText = text => { document.querySelector('#visible').textContent = text }
-    const clearTrace = () => { history.length = 0; trace.textContent = '' }
+    const clearTrace = () => {
+      history.length = 0; trace.textContent = ''
+      pauseFirst = false; sourceLoads = 0; playStarts = 0; maxMouth = 0
+    }
+    document.querySelector('#same').addEventListener('click', () => {
+      clearTrace()
+      pauseFirst = true
+      showText('嗯，我刚才还在想，要不要换个话题。你先说，我听着呢。等我一下，马上回来。')
+      const input = controller.beginStream('', 'neutral', loadVoice())
+      input.push('嗯，我刚才还')
+      input.setDelivery('neutral')
+      input.push('在想，要不要换个话题。')
+      input.push('你先说，我听着呢。')
+      input.push('等我一下，马上回来。')
+      input.finish()
+    })
+    document.querySelector('#resume').addEventListener('click', () => {
+      if (audioReady) void audio.play().catch(error => { problem = error.message; sync() })
+    })
+    document.querySelector('#pause').addEventListener('click', () => audio.pause())
     document.querySelector('#code').addEventListener('click', () => {
       clearTrace()
       const text = '```python\n[x * 2 for x in [1, 2, 3]]\n```'
