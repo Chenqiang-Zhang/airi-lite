@@ -141,7 +141,13 @@ For local sentence-stream testing without provider charges, run `node scripts/mo
 
 The model files are not redistributed by this repository; only the screenshot above is included. Review the [official Live2D sample page](https://www.live2d.com/en/learn/sample/momose-hiyori/) and [license terms](https://www.live2d.com/eula/live2d-sample-model-terms_en.html) first. Download the Simplified Chinese ZIP and copy the contents of `hiyori_free/runtime/` into `public/models/hiyori/`. The expected entrypoint is `public/models/hiyori/hiyori_free_t08.model3.json`. Build only after adding those files; Vite copies them into `dist/models/hiyori/`.
 
-The app loads Cubism Core from Live2D's official URL at runtime. Internet access to that script is required. The application code and model artwork have separate licenses; the published page includes the sample's copyright/creator notice.
+The app loads Cubism Core from Live2D's official URL at runtime. The character requires access to that script; the chat interface does not. The application code and model artwork have separate licenses; the published page includes the sample's copyright/creator notice.
+
+### Startup without blocking chat
+
+Chat, settings, provider health and the speech controller initialize without importing Pixi/Live2D. An asynchronous, fixed-URL Core loader checks the methods required by the installed Cubism plugin before dynamically importing the character chunk. Core has a 15-second deadline; failure leaves a visible character notice while text chat and speech remain available. Refreshing retries. The loader shares concurrent Core requests, but canceling one consumer only cancels its wait, not the shared script or a dynamic import already in progress.
+
+The delayed character receives the latest mouth, activity and delivery state, rather than a pre-download snapshot. This splits startup dependencies; it does not remove the character download, measure phone performance, or make rendering costs disappear. See the [startup verification record](docs/verification/2026-10-02-avatar-startup.md).
 
 ### Rendering on different devices
 

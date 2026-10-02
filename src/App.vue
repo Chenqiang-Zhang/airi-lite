@@ -14,9 +14,9 @@ import { createChatScrollController } from './chat-scroll'
 import { createAssistantMessage, interruptAssistantMessage } from './chat-turn'
 import type { AvatarActivity } from './avatar-performance'
 import { createAvatarContext } from './avatar-context'
+import { loadAvatarModule } from './avatar-startup'
 import { chooseDelivery } from './delivery'
 import type { Delivery } from './delivery'
-import { mountHiyori } from './live2d'
 import { clearUserMemory, loadUserMemory, proposeUserMemory, saveUserMemory, USER_MEMORY_LIMIT } from './memory'
 import { DEFAULT_PERSONA, loadPersona, savePersona } from './persona'
 import { createSpeechController } from './speech'
@@ -93,7 +93,7 @@ if (savedAccessCode && !accessCode.value) {
 }
 const activeController = ref<AbortController | null>(null)
 const activeAssistantId = ref<number | null>(null)
-let live2d: Awaited<ReturnType<typeof mountHiyori>> | null = null
+let live2d: Awaited<ReturnType<typeof import('./live2d')['mountHiyori']>> | null = null
 const avatarContext = createAvatarContext({ onChange: delivery => live2d?.setDelivery(delivery) })
 const avatarMountController = new AbortController()
 let viewDisposed = false
@@ -158,6 +158,9 @@ onMounted(async () => {
   if (!modelStage.value)
     return
   try {
+    const { mountHiyori } = await loadAvatarModule({ signal: avatarMountController.signal })
+    // Read the current stage and state, not a snapshot from before downloads.
+    if (viewDisposed || avatarMountController.signal.aborted || !modelStage.value) return
     const avatar = await mountHiyori(modelStage.value, { signal: avatarMountController.signal, deviceHints })
     if (viewDisposed) {
       avatar.destroy()
@@ -171,7 +174,7 @@ onMounted(async () => {
   catch (error) {
     if (viewDisposed || avatarMountController.signal.aborted) return
     console.error('Live2D load failed', error)
-    modelStatus.value = 'Live2D 加载失败，请刷新页面重试。'
+    modelStatus.value = '角色暂时未载入，仍可文字聊天与朗读。刷新可重试。'
   }
 })
 onUnmounted(() => {
@@ -570,7 +573,7 @@ function saveAccessCode() {
       </div>
 
       <div ref="modelStage" class="model-stage" />
-      <p v-if="modelStatus" class="model-status">{{ modelStatus }}</p>
+      <p v-if="modelStatus" class="model-status" role="status">{{ modelStatus }}</p>
       <a class="model-credit" href="https://www.live2d.com/en/learn/sample/momose-hiyori/" target="_blank" rel="noopener noreferrer">桃濑日和 © Live2D Inc. · 插画 Kani Biimu</a>
 
       <div class="status-pill" :class="providerMode">

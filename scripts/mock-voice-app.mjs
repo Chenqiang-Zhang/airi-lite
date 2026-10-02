@@ -10,9 +10,11 @@ import { readSpeechConfig } from '../server/speech-provider.mjs'
 import { createSpeechHandler } from '../server/speech.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
-if (!process.argv[2]) throw new Error('Pass a synthetic MP3 path and optional minimax|elevenlabs; this mock never calls providers.')
+if (!process.argv[2]) throw new Error('Pass a synthetic MP3 path, optional minimax|elevenlabs and normal|blocked-core; this mock never calls providers.')
 const provider = process.argv[3] ?? 'minimax'
 if (!['minimax', 'elevenlabs'].includes(provider)) throw new Error('Unknown mock provider.')
+const avatarMode = process.argv[4] ?? 'normal'
+if (!['normal', 'blocked-core'].includes(avatarMode)) throw new Error('Unknown mock avatar mode.')
 const audio = await readFile(process.argv[2])
 if (!audio.length || audio.length > 2 * 1024 * 1024) throw new Error('Mock MP3 must be 1 byte–2 MiB.')
 const dataRoot = await mkdtemp(join(tmpdir(), 'airi-voice-mock-'))
@@ -77,9 +79,17 @@ const server = createServer(async (request, response) => {
     return response.end()
   }
   if (pathname.startsWith('/airi/api/')) { response.writeHead(404); return response.end() }
+  // Dev-only outage simulation: allow the local app, block the external Core
+  // script. This never changes production CSP or the fixed runtime source URL.
+  if (avatarMode === 'blocked-core')
+    response.setHeader('Content-Security-Policy', "script-src 'self' 'unsafe-inline' 'unsafe-eval'")
+  // A 304 can retain the previous document's CSP when switching mock modes.
+  // Always serve fresh dev responses, so normal mode really removes that CSP.
+  delete request.headers['if-none-match']
+  delete request.headers['if-modified-since']
   vite.middlewares(request, response)
 })
-server.listen(4175, '127.0.0.1', () => console.log('MOCK ONLY: http://127.0.0.1:4175/airi/ — synthetic MP3, no provider charges'))
+server.listen(4175, '127.0.0.1', () => console.log(`MOCK ONLY: http://127.0.0.1:4175/airi/ — synthetic MP3, no provider charges, avatar=${avatarMode}`))
 async function stop() {
   server.closeAllConnections()
   server.close()
