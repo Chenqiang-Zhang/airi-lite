@@ -1,0 +1,42 @@
+{
+  "comparison": {
+    "calibration_ids": [
+      "baseline:pudding-not-analysis",
+      "baseline:repair-alarm-joke",
+      "candidate:alarm-no-advice"
+    ],
+    "audit_ids": [
+      "baseline:missed-train-no-comfort",
+      "candidate:pudding-not-analysis",
+      "candidate:repair-alarm-joke"
+    ],
+    "agreement": {
+      "register": 8,
+      "attunement": 7,
+      "grounding": 6
+    },
+    "items": 8,
+    "item_assignments": 16,
+    "items_sha256": "1496aa1cc086243bada65637afcc2d6b2c026dd808f04c66d6e8b25394171178",
+    "config_sha256": "7c7e6bc4943d8a2ae171ccf6fb83431f0ca1d8d669789654da9fb12c8f140d6a"
+  },
+  "final": {
+    "calibration_ids": [
+      "alarm-no-advice",
+      "plain-one-line",
+      "water-already-cleaned"
+    ],
+    "audit_ids": [
+      "movie-not-new-goal"
+    ],
+    "agreement": {
+      "register": 4,
+      "attunement": 4,
+      "grounding": 4
+    },
+    "items": 4,
+    "item_assignments": 8,
+    "items_sha256": "6d0a62111bbb8cfb21098787c86dbd69adc6e8c24fc9ca73e9b12f40ef00b696",
+    "config_sha256": "7c7e6bc4943d8a2ae171ccf6fb83431f0ca1d8d669789654da9fb12c8f140d6a"
+  }
+}

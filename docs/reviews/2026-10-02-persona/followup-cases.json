@@ -1,0 +1,6 @@
+[
+  {"id":"alarm-no-advice","stratum":"known-failure","messages":[{"role":"user","content":"早上闹钟响了，我按掉后就又睡过去了。别劝我改作息，我知道。"}]},
+  {"id":"movie-not-new-goal","stratum":"ordinary-sharing","messages":[{"role":"user","content":"我今天把周末留着看的电影看完了，就是想看。不要给我安排新目标。"}]},
+  {"id":"water-already-cleaned","stratum":"ordinary-sharing","messages":[{"role":"user","content":"杯子打翻了，里面只有水，已经擦好了。我是在跟你讲，不用告诉我怎么办。"}]},
+  {"id":"plain-one-line","stratum":"explicit-plain","messages":[{"role":"user","content":"不想说什么特别的。你回一句普通话就好，别问问题。"}]}
+]

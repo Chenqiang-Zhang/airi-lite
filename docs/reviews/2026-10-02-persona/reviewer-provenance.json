@@ -1,0 +1,44 @@
+{
+  "sourceCommitBefore": "b7d88c9",
+  "generator": {
+    "observedModel": "deepseek-flash",
+    "nativeModelRevision": null,
+    "nativeTokenUsage": null,
+    "billing": null,
+    "realRequests": 12,
+    "setupFailuresBeforeRequests": 1,
+    "generationResampling": 0,
+    "rawKind": "application NDJSON events, not native provider responses",
+    "serverPersonaSha256": "209be2472e6b38a0db4be48461e35e1c7f8e8fa692f5e968e22b0c5ba647b188",
+    "sharedRequestSha256": "595d7d76449e6e1513f6ba31f67c4a6598ea9b8aacb1609fcd65f5af21c7f6aa",
+    "runnerSha256": "389a418ea57c6c4e2fb09be39319cb8d5b2e962cfa7cbadeec67a08e5de29c84"
+  },
+  "cards": {
+    "baseline": {"path": "../2026-10-01-persona/shipped-card.json", "sha256": "8e78c39a37969624b03e2315e7c08a313b3bebbdd8a5fec73744cf116cbb9a66"},
+    "candidate": {"path": "candidate-card.json", "sha256": "9220a71c8738145f49ac8a450fb98296152ffaa7fb394ec088ec2826f7792edb"},
+    "final": {"path": "final-card.json", "sha256": "df282c8bd9937c0f9f51b3091935e234994054f43b24f49f61207249f7271e29"}
+  },
+  "reviewers": [
+    {"agent": "/root/persona_review_a_1002", "batch": "comparison", "packet": "run/packets/reviewer_a.jsonl", "raw": "raw/reviewer_a-final.jsonl", "assignments": 8},
+    {"agent": "/root/persona_review_b_1002", "batch": "comparison", "packet": "run/packets/reviewer_b.jsonl", "raw": "raw/reviewer_b-final.jsonl", "assignments": 8},
+    {"agent": "/root/persona_final_a_1002", "batch": "final", "packet": "final-run/packets/reviewer_a.jsonl", "raw": "raw/final-reviewer_a.jsonl", "assignments": 4},
+    {"agent": "/root/persona_final_b_1002", "batch": "final", "packet": "final-run/packets/reviewer_b.jsonl", "raw": "raw/final-reviewer_b.jsonl", "assignments": 4}
+  ],
+  "reviewerSetup": {
+    "forkTurns": "none",
+    "modelOverride": null,
+    "nativeModelRevision": null,
+    "tokenUsage": null,
+    "rawKind": "agent final output, not provider-native response",
+    "weights": "equal, no human calibration",
+    "orchestratorVotes": 0,
+    "malformedRetries": 0,
+    "fieldAdjudicationAssignments": 0,
+    "humanLabels": 0
+  },
+  "humanReviewQueue": {
+    "comparison": ["baseline:alarm-no-advice", "baseline:missed-train-no-comfort", "baseline:pudding-not-analysis", "baseline:repair-alarm-joke", "candidate:alarm-no-advice", "candidate:pudding-not-analysis", "candidate:repair-alarm-joke"],
+    "final": ["movie-not-new-goal"],
+    "reason": "all issue items plus deterministic audit items; pending, not executed human review"
+  }
+}

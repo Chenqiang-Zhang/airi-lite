@@ -1,0 +1,22 @@
+{
+  "reviewer_a": {
+    "43b64c4edc4a82a6": "baseline:pudding-not-analysis",
+    "bceb80c339aa5da6": "baseline:missed-train-no-comfort",
+    "70c36b4ee4073a2b": "candidate:missed-train-no-comfort",
+    "75e9e1c6145aeeeb": "candidate:repair-alarm-joke",
+    "9a17d705cb0cec95": "baseline:repair-alarm-joke",
+    "244ee36c79cd89e8": "candidate:pudding-not-analysis",
+    "4a7c8263de566a98": "candidate:alarm-no-advice",
+    "9302d029962bad71": "baseline:alarm-no-advice"
+  },
+  "reviewer_b": {
+    "0dca02ae7bac50fe": "baseline:missed-train-no-comfort",
+    "7da6f3561b9929e5": "baseline:alarm-no-advice",
+    "4e4f04c72e82fa2e": "candidate:alarm-no-advice",
+    "0ad91b3d4f28ce8e": "candidate:pudding-not-analysis",
+    "3a6fcefc7a06218a": "candidate:repair-alarm-joke",
+    "e0e5605c4e23af62": "baseline:repair-alarm-joke",
+    "96ce23d2d568a92c": "candidate:missed-train-no-comfort",
+    "36cf14a08e1b2dc5": "baseline:pudding-not-analysis"
+  }
+}

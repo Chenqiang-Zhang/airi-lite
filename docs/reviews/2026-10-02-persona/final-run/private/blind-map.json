@@ -1,0 +1,14 @@
+{
+  "reviewer_a": {
+    "356f4de1c844619a": "alarm-no-advice",
+    "13f39d99e632c1ec": "water-already-cleaned",
+    "84a6e14bccd2b0d7": "movie-not-new-goal",
+    "60ca6a03ee88cc63": "plain-one-line"
+  },
+  "reviewer_b": {
+    "88f57a436f83e2c9": "plain-one-line",
+    "66433a7f05854e2f": "water-already-cleaned",
+    "97a652281b04ad20": "movie-not-new-goal",
+    "713a2fbd75cfac0b": "alarm-no-advice"
+  }
+}

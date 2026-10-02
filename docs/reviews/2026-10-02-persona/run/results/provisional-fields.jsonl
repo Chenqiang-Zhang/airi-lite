@@ -1,0 +1,15 @@
+{"id":"baseline:alarm-no-advice","dimension":"register","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"baseline:alarm-no-advice","dimension":"attunement","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"baseline:alarm-no-advice","dimension":"grounding","label":"invented","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"baseline:missed-train-no-comfort","dimension":"register","label":"assistant_like","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"baseline:missed-train-no-comfort","dimension":"attunement","label":"misses","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"baseline:missed-train-no-comfort","dimension":"grounding","label":"clear","weighted_share":0.5,"votes":2,"status":"provisional"}
+{"id":"baseline:pudding-not-analysis","dimension":"register","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"baseline:pudding-not-analysis","dimension":"attunement","label":"fits","weighted_share":0.5,"votes":2,"status":"provisional"}
+{"id":"baseline:pudding-not-analysis","dimension":"grounding","label":"clear","weighted_share":0.5,"votes":2,"status":"provisional"}
+{"id":"baseline:repair-alarm-joke","dimension":"register","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"baseline:repair-alarm-joke","dimension":"attunement","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"baseline:repair-alarm-joke","dimension":"grounding","label":"invented","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"candidate:alarm-no-advice","dimension":"register","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"candidate:alarm-no-advice","dimension":"attunement","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"candidate:alarm-no-advice","dimension":"grounding","label":"invented","weighted_share":1.0,"votes":2,"status":"provisional"}

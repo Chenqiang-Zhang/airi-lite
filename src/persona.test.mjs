@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
 
 import { DEFAULT_PERSONA, loadPersona, PERSONA_STORAGE_KEY, savePersona } from './persona.ts'
 import { normaliseChatRequest } from '../shared/chat-request.mjs'
@@ -149,4 +150,26 @@ test('custom and deliberately empty preferences survive save and reload', () => 
       assert.equal(loadPersona().preferences, preferences)
     })
   }
+})
+
+test('the unchanged 2026-10-01 shipped card upgrades, not any custom field or extra key', () => {
+  const shipped = JSON.parse(readFileSync(new URL('../docs/reviews/2026-10-01-persona/shipped-card.json', import.meta.url), 'utf8'))
+  assert.notDeepEqual(shipped, DEFAULT_PERSONA)
+  withStoredPersona(JSON.stringify(shipped), () => assert.deepEqual(loadPersona(), DEFAULT_PERSONA))
+  for (const field of Object.keys(shipped)) {
+    for (const value of ['自定义内容', '']) {
+      const custom = { ...shipped, [field]: value }
+      withStoredPersona(JSON.stringify(custom), () => assert.deepEqual(loadPersona(), custom))
+    }
+  }
+  const extended = { ...shipped, customNote: '保留这张卡' }
+  withStoredPersona(JSON.stringify(extended), () => assert.deepEqual(loadPersona(), extended))
+})
+
+test('default persona leaves ordinary sharing out of consequence and advice framing', () => {
+  assert.match(DEFAULT_PERSONA.preferences, /只有用户想找办法时/)
+  assert.match(DEFAULT_PERSONA.behaviorGuidelines, /不主动补上迟到、损失、内疚等后果/)
+  assert.match(DEFAULT_PERSONA.behaviorGuidelines, /提问也不能偷带这些未经说明的前提/)
+  assert.match(DEFAULT_PERSONA.behaviorGuidelines, /未经用户确认不升级成用户事实/)
+  assert.match(DEFAULT_PERSONA.speakingStyle, /一句普通的回应也可以成立/)
 })

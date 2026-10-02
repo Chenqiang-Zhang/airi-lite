@@ -1,0 +1,12 @@
+{"id":"alarm-no-advice","dimension":"register","label":"fits","weighted_share":1.0,"votes":2,"status":"silver"}
+{"id":"alarm-no-advice","dimension":"attunement","label":"fits","weighted_share":1.0,"votes":2,"status":"silver"}
+{"id":"alarm-no-advice","dimension":"grounding","label":"clear","weighted_share":1.0,"votes":2,"status":"silver"}
+{"id":"movie-not-new-goal","dimension":"register","label":"fits","weighted_share":1.0,"votes":2,"status":"silver"}
+{"id":"movie-not-new-goal","dimension":"attunement","label":"fits","weighted_share":1.0,"votes":2,"status":"silver"}
+{"id":"movie-not-new-goal","dimension":"grounding","label":"clear","weighted_share":1.0,"votes":2,"status":"silver"}
+{"id":"water-already-cleaned","dimension":"register","label":"fits","weighted_share":1.0,"votes":2,"status":"silver"}
+{"id":"water-already-cleaned","dimension":"attunement","label":"fits","weighted_share":1.0,"votes":2,"status":"silver"}
+{"id":"water-already-cleaned","dimension":"grounding","label":"clear","weighted_share":1.0,"votes":2,"status":"silver"}
+{"id":"plain-one-line","dimension":"register","label":"fits","weighted_share":1.0,"votes":2,"status":"silver"}
+{"id":"plain-one-line","dimension":"attunement","label":"fits","weighted_share":1.0,"votes":2,"status":"silver"}
+{"id":"plain-one-line","dimension":"grounding","label":"clear","weighted_share":1.0,"votes":2,"status":"silver"}

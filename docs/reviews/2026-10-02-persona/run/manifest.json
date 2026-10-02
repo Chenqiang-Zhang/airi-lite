@@ -1,0 +1,14 @@
+{
+  "protocol_id": "hiyori-dialogue-spotcheck-2026-10-02-v1",
+  "items": 8,
+  "items_sha256": "1496aa1cc086243bada65637afcc2d6b2c026dd808f04c66d6e8b25394171178",
+  "config_sha256": "7c7e6bc4943d8a2ae171ccf6fb83431f0ca1d8d669789654da9fb12c8f140d6a",
+  "calibration_items": 3,
+  "audit_items": 3,
+  "packet_rows": {
+    "reviewer_a": 8,
+    "reviewer_b": 8
+  },
+  "review_assignments": 16,
+  "warning": "Packets are AI review inputs; agreement is not human gold."
+}

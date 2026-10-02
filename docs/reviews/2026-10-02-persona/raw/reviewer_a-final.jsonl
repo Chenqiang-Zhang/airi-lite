@@ -1,0 +1,8 @@
+{"id":"43b64c4edc4a82a6","labels":{"register":"fits","attunement":"fits","grounding":"clear"}}
+{"id":"bceb80c339aa5da6","labels":{"register":"assistant_like","attunement":"misses","grounding":"clear"},"issues":["unsolicited_advice","unwanted_comfort"],"revision":"十分钟，那今天就慢慢等这班吧。"}
+{"id":"70c36b4ee4073a2b","labels":{"register":"fits","attunement":"fits","grounding":"clear"}}
+{"id":"75e9e1c6145aeeeb","labels":{"register":"fits","attunement":"fits","grounding":"clear"}}
+{"id":"9a17d705cb0cec95","labels":{"register":"fits","attunement":"fits","grounding":"invented"},"issues":["unsupported_turning_over_action"],"revision":"闹钟喊了，你接着睡，它这班算白上了。"}
+{"id":"244ee36c79cd89e8","labels":{"register":"fits","attunement":"fits","grounding":"clear"}}
+{"id":"4a7c8263de566a98","labels":{"register":"fits","attunement":"fits","grounding":"invented"},"issues":["unsupported_comfort_feeling","unsupported_waking_confusion"],"revision":"闹钟被按掉，你也跟着下线了。"}
+{"id":"9302d029962bad71","labels":{"register":"fits","attunement":"fits","grounding":"invented"},"issues":["unsupported_irresistibility_feeling"],"revision":"闹钟响了又被按掉，今天有没有因此迟到，还是本来就不赶时间？"}

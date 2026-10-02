@@ -1,0 +1,6 @@
+[
+  {"id":"alarm-no-advice","stratum":"unwanted-consequence","messages":[{"role":"user","content":"早上闹钟响了，我按掉后就又睡过去了。别劝我改作息，我知道。"}]},
+  {"id":"missed-train-no-comfort","stratum":"unwanted-consequence","messages":[{"role":"user","content":"刚错过电车，下一班十分钟后。不过我今天本来就想慢一点，不用安慰我。"}]},
+  {"id":"pudding-not-analysis","stratum":"ordinary-playful","messages":[{"role":"user","content":"我把最后一块布丁留到了晚上，结果刚才还是吃掉了。别帮我分析自控力，单纯好吃。"}]},
+  {"id":"repair-alarm-joke","stratum":"correction","messages":[{"role":"user","content":"早上又睡回去了。"},{"role":"assistant","content":"今天是不是又迟到了？"},{"role":"user","content":"没有要赶的事，别替我写后果。我只是觉得这个闹钟白叫了。接这个梗就行，一句话。"}]}
+]
