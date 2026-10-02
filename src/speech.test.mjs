@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SpeechApiError } from './cloud-speech.ts'
+import { mouthAtTime, mouthFrames } from './mouth.ts'
 import { createSpeechController } from './speech.ts'
 
 class AudioStub extends EventTarget {
@@ -35,6 +36,17 @@ const clip = () => ({ audio: {
   sampling_rate: 24000,
 } })
 const cloudClip = () => ({ samples: clip().audio.data, sampleRate: 24000, words: [] })
+const shapedClip = (amplitude, sampleCount, sampleRate = 44100) => ({
+  samples: Float32Array.from({ length: sampleCount }, (_, index) => {
+    const time = index / sampleRate
+    const duration = sampleCount / sampleRate
+    if (time < 0.035 || time > duration - 0.065) return 0
+    const gain = time < 0.08 ? 0.4 : 1
+    return amplitude * gain * (Math.sin(time * 2 * Math.PI * 210) + 0.12 * Math.sin(time * 2 * Math.PI * 1900))
+  }),
+  sampleRate,
+  words: [],
+})
 const deferred = () => {
   let resolve
   let reject
@@ -109,6 +121,110 @@ test('sentence rates and expressions follow actual chunks, full replay and seeki
     f.tick(0.25)
     f.tick(0.01)
     assert.deepEqual(f.events.delivery.slice(-4), ['bright', 'soft', 'curious', 'bright'])
+  }
+  finally { f.close() }
+})
+
+test('quiet and loud clips keep their original mouth tracks through merged replay and backward seeks', async () => {
+  for (const engine of ['local', 'cloud']) {
+    // Neither clip ends on a 25 ms mouth-frame boundary. The second clip is
+    // over 50 times louder, so recalibrating the combined reply is observable.
+    const clips = [shapedClip(0.006, 8260), shapedClip(0.34, 10438)]
+    let nextClip = 0
+    const f = fixture(async () => ({ async *stream() {
+      const current = clips[nextClip++]
+      yield { audio: { data: current.samples, sampling_rate: current.sampleRate } }
+    } }), {
+      async synthesizeCloud() { return clips[nextClip++] },
+    })
+    try {
+      await f.controller.speak('小声的第一句。响亮的第二句。', 'bright', undefined, [
+        { start: '小声的第一句。'.length, delivery: 'soft' },
+      ], engine)
+      await settle()
+      assert.equal(nextClip, 2)
+      const originalTracks = []
+      const originalPcm = []
+      const times = [0.01, 0.04, 0.061, 0.087, 0.112]
+      for (const current of clips) {
+        const duration = current.samples.length / current.sampleRate
+        const track = times.map(time => {
+          f.tick(time)
+          return f.events.mouth.at(-1)
+        })
+        originalTracks.push(track)
+        const expectedFrames = mouthFrames(current.samples, current.sampleRate)
+        assert.deepEqual(track, times.map(time => {
+          const mouth = mouthAtTime([{ time: 0, duration, frames: expectedFrames }], time)
+          return [mouth.open, mouth.form]
+        }))
+        assert.deepEqual(track[0], [0, 0], 'leading silence is closed')
+        assert.ok(track.slice(1).some(([open]) => open > 0.1), 'quiet speech still has a visible mouth')
+        f.tick(duration - 0.005)
+        assert.deepEqual(f.events.mouth.at(-1), [0, 0], 'trailing silence is closed')
+        originalPcm.push(new Uint8Array(await (await fetch(f.audio.src)).arrayBuffer()).slice(44))
+        f.audio.end()
+      }
+      assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+
+      const mergedPcm = new Uint8Array(await (await fetch(f.audio.src)).arrayBuffer()).slice(44)
+      const expectedPcm = new Uint8Array(originalPcm.reduce((total, part) => total + part.length, 0))
+      let sampleOffset = 0
+      for (const part of originalPcm) {
+        expectedPcm.set(part, sampleOffset)
+        sampleOffset += part.length
+      }
+      assert.deepEqual(mergedPcm, expectedPcm, 'lip-sync calibration does not modify playback PCM or gain')
+
+      await f.audio.play()
+      const secondStart = clips[0].samples.length / clips[0].sampleRate
+      for (const clipIndex of [0, 1, 0, 1, 0]) {
+        const start = clipIndex === 0 ? 0 : secondStart
+        for (const [timeIndex, time] of times.entries()) {
+          f.tick(start + time)
+          assert.deepEqual(f.events.mouth.at(-1), originalTracks[clipIndex][timeIndex],
+            `${engine}: seek to clip ${clipIndex + 1} at ${time}s preserves its original frame`)
+        }
+      }
+      f.tick(secondStart - 0.005)
+      assert.deepEqual(f.events.mouth.at(-1), [0, 0], 'silence before the non-frame-aligned join stays closed')
+      f.tick(secondStart)
+      assert.deepEqual(f.events.mouth.at(-1), [0, 0], 'the next clip does not inherit the previous mouth state')
+      f.tick(secondStart + clips[1].samples.length / clips[1].sampleRate)
+      assert.deepEqual(f.events.mouth.at(-1), [0, 0], 'exact merged end is closed')
+      assert.equal(nextClip, 2, 'player replay and seeking never synthesize another clip')
+      assert.equal(f.utterances.length, 0)
+    }
+    finally { f.close() }
+  }
+})
+
+test('pause, resume and cancellation keep the cached mouth track closed while stopped', async () => {
+  const current = shapedClip(0.006, 8260)
+  const f = fixture(async () => ({ async *stream() {
+    yield { audio: { data: current.samples, sampling_rate: current.sampleRate } }
+  } }))
+  try {
+    await f.controller.speak('小声说一句。')
+    f.tick(0.087)
+    const activeMouth = f.events.mouth.at(-1)
+    assert.ok(activeMouth[0] > 0.1)
+    f.audio.pause()
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    const paused = structuredClone(f.events)
+    f.tick(0.061)
+    assert.deepEqual(f.events, paused, 'a paused seek cannot reopen the mouth')
+    await f.audio.play()
+    assert.notDeepEqual(f.events.mouth.at(-1), [0, 0], 'resume uses the real current time')
+    f.tick(0.087)
+    assert.deepEqual(f.events.mouth.at(-1), activeMouth)
+    f.controller.cancel()
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    const canceled = structuredClone(f.events)
+    f.tick(0.087)
+    for (const event of ['playing', 'pause', 'ended', 'error']) f.audio.dispatchEvent(new Event(event))
+    assert.deepEqual(f.events, canceled, 'late frames and media events cannot reuse canceled tracks')
+    assert.equal(f.audio.src, '')
   }
   finally { f.close() }
 })

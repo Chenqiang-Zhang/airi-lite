@@ -52,6 +52,8 @@ The DeepSeek key stays on the server. Kokoro inference runs on the visitor's dev
 
 The optional cloud path uses the same sentence/playback controller. Enabling the server alone never silently switches visitors to a new provider: each visitor must explicitly select cloud mode. The lightweight browser mode uses system voices and a simpler speaking animation, not measured audio-driven mouth movement.
 
+Audio-driven mouth tracks are calibrated once per accepted clip, so quiet and loud TTS outputs can both open the jaw without changing playback volume or flattening quieter syllables. Exact 40 Hz time boundaries avoid accumulated 44.1 kHz drift. Full-reply replay and seeking reuse the original per-clip tracks; short pauses close the mouth, and pause/cancel close it immediately. This remains an amplitude/spectrum approximation, not speech detection or phoneme alignment. See the [real local Chinese audio and replay checks](docs/verification/2026-10-02-mouth-calibration.md).
+
 ## Run locally
 
 Requirements: Node.js 24+ and pnpm 10+.

@@ -6,8 +6,8 @@ import type { CloudSpeechClip } from './cloud-speech'
 
 import { SpeechApiError } from './cloud-speech.ts'
 import { deliverySpeed } from './delivery.ts'
-import { mouthFrames } from './mouth.ts'
-import type { MouthFrame } from './mouth'
+import { mouthAtTime, mouthFrames } from './mouth.ts'
+import type { MouthSegment } from './mouth'
 import { deliveryAtTime, replySentenceStream, SpeechSentenceStream } from './speech-sentences.ts'
 import type { DeliveryCue, PlaybackCue, SpokenSentence } from './speech-sentences'
 import { DEFAULT_VOICE } from './voice.ts'
@@ -20,9 +20,13 @@ interface AudioClip {
   delivery: Delivery
 }
 
+interface PreparedAudioClip extends AudioClip {
+  mouth: MouthSegment
+}
+
 interface PlaybackRun {
   token: number
-  queue: AudioClip[]
+  queue: PreparedAudioClip[]
   chunks: Float32Array[]
   sampleRate: number | null
   total: number
@@ -31,6 +35,7 @@ interface PlaybackRun {
   chunkStarted: boolean
   resumeCloudGeneration: (() => void) | null
   timeline: PlaybackCue[]
+  mouthTimeline: MouthSegment[]
 }
 
 const MODEL_ID = 'onnx-community/Kokoro-82M-v1.1-zh-ONNX'
@@ -104,7 +109,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   let modelPromise: Promise<SpeechModel> | null = null
   let unavailable = false
   let objectUrl: string | null = null
-  let envelope: MouthFrame[] = []
+  let playbackMouth: readonly MouthSegment[] = []
   let frame = 0
   let run = 0
   let activeRun: PlaybackRun | null = null
@@ -125,8 +130,8 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       reportedDelivery = delivery
       callbacks.onDelivery(delivery)
     }
-    const mouth = envelope[Math.floor(audio.currentTime * 40)]
-    callbacks.onMouth(mouth?.open ?? 0, mouth?.form ?? 0)
+    const mouth = mouthAtTime(playbackMouth, audio.currentTime)
+    callbacks.onMouth(mouth.open, mouth.form)
     frame = requestAnimationFrame(animateMouth)
   }
   const onPlaying = () => {
@@ -170,11 +175,13 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   audio.addEventListener('ended', onEnded)
   audio.addEventListener('error', onError)
 
-  function replaceAudioSource(samples: Float32Array, sampleRate: number, timeline: PlaybackCue[]) {
+  function replaceAudioSource(samples: Float32Array, sampleRate: number, timeline: PlaybackCue[], mouthTimeline: readonly MouthSegment[]) {
     if (objectUrl)
       URL.revokeObjectURL(objectUrl)
     objectUrl = URL.createObjectURL(new Blob([encodeWav(samples, sampleRate)], { type: 'audio/wav' }))
-    envelope = mouthFrames(samples, sampleRate)
+    // Keep each clip's own calibrated track. Re-analyzing the concatenated
+    // reply would let a loud later sentence change a quiet earlier mouth.
+    playbackMouth = mouthTimeline
     playbackTimeline = timeline
     reportedDelivery = null
     audio.src = objectUrl
@@ -193,7 +200,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     if (next) {
       session.playingChunk = true
       session.chunkStarted = false
-      replaceAudioSource(next.samples, next.sampleRate, [{ time: 0, delivery: next.delivery }])
+      replaceAudioSource(next.samples, next.sampleRate, [{ time: 0, delivery: next.delivery }], [next.mouth])
       callbacks.onPreparing(false)
       void audio.play().catch((error) => {
         if (session !== activeRun)
@@ -217,7 +224,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     }
     activeRun = null
     callbacks.onPreparing(false)
-    replaceAudioSource(samples, session.sampleRate, session.timeline)
+    replaceAudioSource(samples, session.sampleRate, session.timeline, session.mouthTimeline)
   }
 
   function wakeCloudGeneration(session: PlaybackRun) {
@@ -299,7 +306,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     if (objectUrl)
       URL.revokeObjectURL(objectUrl)
     objectUrl = null
-    envelope = []
+    playbackMouth = []
     playbackTimeline = []
     reportedDelivery = null
     callbacks.onAudioReady(false)
@@ -472,6 +479,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       chunkStarted: false,
       resumeCloudGeneration: null,
       timeline: [],
+      mouthTimeline: [],
     }
     activeRun = session
     try {
@@ -499,11 +507,15 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
             throw new Error('Cloud speech returned silent audio')
           continue
         }
+        const duration = data.length / sampleRate
+        const frames = mouthFrames(data, sampleRate)
+        const start = session.total / sampleRate
         session.sampleRate = sampleRate
-        session.timeline.push({ time: session.total / sampleRate, delivery: segment.delivery })
+        session.timeline.push({ time: start, delivery: segment.delivery })
+        session.mouthTimeline.push({ time: start, duration, frames })
         session.chunks.push(data)
         session.total += data.length
-        session.queue.push(segment)
+        session.queue.push({ ...segment, mouth: { time: 0, duration, frames } })
         advance(session)
       }
       if (token !== run)
