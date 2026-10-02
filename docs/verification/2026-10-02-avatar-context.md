@@ -54,3 +54,11 @@ The already-generated clip was subsequently replayed, paused through its visible
 ## Boundaries
 
 The actual Vue App watcher/late-mount wiring was code-reviewed but not mounted in a dedicated automated integration harness. Physical-phone keyboard/touch, real OS background changes, listener-rated emotional quality, free multi-turn persona behaviour and phoneme-level mouth timing remain unproved. Cloud speech remains disabled while the user chooses an account/voice/budget; the newer ElevenLabs candidate has not been implemented or auditioned in this app. These changes do not complete the overall humanization goal.
+
+## Production deployment check
+
+Frontend code commit: `52ab5d6`. Only static assets and the HTML entry were updated; no environment, backend code, access code or quota ledger changed, and no service restart was required. The previous entry was retained as `index.before-52ab5d6.html`, with old hashed assets preserved.
+
+The public entry at `https://mmturingtest.online/airi/` now references `index-ecLJ0-B7.js`; its downloaded SHA-256 exactly matches the build hash above. The new entry, main JS, Kokoro chunk, stylesheet and WASM also matched the local SHA-256 checks on the server before switching the entry. GitHub main was verified at the code commit before the documentation-only follow-up.
+
+The actual public browser rendered one Hiyori canvas (1344×1364 buffer, 672×682 CSS stage), loaded the new main script and recorded no warning/error console logs in this checked view. Public health still reported configured DeepSeek `deepseek-flash`, experience-code protection, and `speech.configured:false`. The chat was not unlocked and no provider reply or cloud speech was requested; this verifies publication/initial rendering, not the full live dialogue loop. A local public-view screenshot was saved as `/tmp/airi-public-context-release-20261002.png`.
