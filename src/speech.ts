@@ -34,6 +34,7 @@ interface PlaybackRun {
   playingChunk: boolean
   chunkStarted: boolean
   resumeCloudGeneration: (() => void) | null
+  resumeLocalGeneration: (() => void) | null
   timeline: PlaybackCue[]
   mouthTimeline: MouthSegment[]
 }
@@ -41,6 +42,7 @@ interface PlaybackRun {
 const MODEL_ID = 'onnx-community/Kokoro-82M-v1.1-zh-ONNX'
 const MAX_READY_PLAYBACK_CLIPS = 3
 const MAX_READY_PLAYBACK_SECONDS = 12
+const MAX_LOCAL_LOOKAHEAD_CLIPS = 3
 const LETTERS: Record<string, string> = {
   A: '诶', B: '比', C: '西', D: '迪', E: '伊', F: '艾弗', G: '吉',
   H: '艾尺', I: '艾', J: '杰', K: '凯', L: '艾勒', M: '艾姆',
@@ -141,7 +143,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       return
     if (activeRun?.playingChunk) {
       activeRun.chunkStarted = true
-      wakeCloudGeneration(activeRun)
+      wakeGeneration(activeRun)
     }
     callbacks.onProblem('')
     callbacks.onPreparing(false)
@@ -178,6 +180,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   audio.addEventListener('error', onError)
 
   function replaceAudioSource(samples: Float32Array, sampleRate: number, timeline: PlaybackCue[], mouthTimeline: readonly MouthSegment[]) {
+    // Loading the full reply is preparation, not a request to replay it.
+    // Explicitly leave the previous source paused before any replacement;
+    // advance() alone requests playback for a new current clip.
+    audio.pause()
     if (objectUrl)
       URL.revokeObjectURL(objectUrl)
     objectUrl = URL.createObjectURL(new Blob([encodeWav(samples, sampleRate)], { type: 'audio/wav' }))
@@ -198,7 +204,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     const next = session.queue.shift()
     // The queued lookahead is now the current clip, so a cloud producer may
     // consider fetching its next sentence after this clip actually starts.
-    wakeCloudGeneration(session)
+    wakeGeneration(session)
     if (next) {
       // Reuse only already-ready, same-tone PCM. Never wait to fill a batch,
       // trim a real pause, or generate more cloud audio to join it. A tone
@@ -251,10 +257,33 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     replaceAudioSource(samples, session.sampleRate, session.timeline, session.mouthTimeline)
   }
 
-  function wakeCloudGeneration(session: PlaybackRun) {
+  function wakeGeneration(session: PlaybackRun) {
     const resume = session.resumeCloudGeneration
     session.resumeCloudGeneration = null
     resume?.()
+    const local = session.resumeLocalGeneration
+    session.resumeLocalGeneration = null
+    local?.()
+  }
+
+  function hasLocalCapacity(session: PlaybackRun): boolean {
+    if (!session.playingChunk)
+      return !session.queue.length
+    // Bound unplayed lookahead, including within one model.stream() input.
+    // A paused/blocked player must not compute the rest of a long reply.
+    // One already in-flight result may finish; played audio remains cached
+    // for full replay, so this is a clip-count limit, not a total byte cap.
+    return session.queue.length < MAX_LOCAL_LOOKAHEAD_CLIPS
+      && session.chunkStarted && currentSource() && !audio.paused && !audio.ended
+  }
+
+  async function waitForLocalCapacity(session: PlaybackRun): Promise<boolean> {
+    while (session === activeRun && session.token === run) {
+      if (hasLocalCapacity(session))
+        return true
+      await new Promise<void>((resolve) => { session.resumeLocalGeneration = resolve })
+    }
+    return false
   }
 
   function hasCloudCapacity(session: PlaybackRun): boolean {
@@ -318,7 +347,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     activeVoiceAbort?.abort()
     activeVoiceAbort = null
     if (activeRun)
-      wakeCloudGeneration(activeRun)
+      wakeGeneration(activeRun)
     activeInput?.cancel()
     activeInput = null
     releaseUtterance?.()
@@ -435,18 +464,33 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   }
 
   async function *synthesizeSentences(model: SpeechModel, input: AsyncIterable<SpokenSentence>, voice: VoiceId, token: number): AsyncGenerator<AudioClip> {
+    const session = activeRun
+    if (!session || session.token !== token || token !== run)
+      return
     for await (const sentence of input) {
       if (token !== run) return
-      for await (const segment of model.stream(forChineseVoice(sentence.text), {
-        voice, speed: deliverySpeed(sentence.delivery), maxChunkLength: 130,
-      })) {
-        if (token !== run) return
-        yield {
-          samples: new Float32Array(segment.audio.data as Float32Array),
-          sampleRate: segment.audio.sampling_rate,
-          delivery: sentence.delivery,
+      let segments: ReturnType<SpeechModel['stream']> | null = null
+      try {
+        while (true) {
+          if (!await waitForLocalCapacity(session)) return
+          if (token !== run || session !== activeRun) return
+          // Await yields even for an immediate permit. A pause in that gap
+          // revokes it; retain this exact input instead of computing/skipping it.
+          if (!hasLocalCapacity(session)) continue
+          segments ??= model.stream(forChineseVoice(sentence.text), {
+            voice, speed: deliverySpeed(sentence.delivery), maxChunkLength: 130,
+          })
+          const next = await segments.next()
+          if (token !== run || session !== activeRun) return
+          if (next.done) break
+          yield {
+            samples: new Float32Array(next.value.audio.data as Float32Array),
+            sampleRate: next.value.audio.sampling_rate,
+            delivery: sentence.delivery,
+          }
         }
       }
+      finally { await segments?.return(undefined) }
     }
   }
 
@@ -502,6 +546,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       playingChunk: false,
       chunkStarted: false,
       resumeCloudGeneration: null,
+      resumeLocalGeneration: null,
       timeline: [],
       mouthTimeline: [],
     }

@@ -31,6 +31,8 @@ Local evidence screenshot: `/private/tmp/airi-speech-flow-clock-20261003.png`. I
 
 ## Release
 
+**Later continuation:** a fresh no-auto-pause run subsequently completed all three clips and its complete WAV. The initial short observations therefore do not establish a persistent media-clock fault. That run also reported a full-source `playing` event without an agent replay click; its cause remains unknown. Explicit source-pause protection, local compute backpressure, a fixture without automatic pause, and successful later real playback are recorded in [the follow-up verification](2026-10-03-local-backpressure.md). The partial check above is retained as historical evidence, not the latest playback result.
+
 Built entry: `index-CaRODWE7.js`, SHA-256 `690cbcde7e3b60f426691e2c5deb958aa2d2106ad384c37cb2211ae41a3f1819`.
 
 Published to the existing personal VPS with a recoverable static backup at `/opt/airi-lite/backups/20261003-speech-flow-before.tar.gz`. New hashed assets were uploaded first; HTML was switched last through an atomic rename. Old assets and models were retained. No backend restart was needed; credential-file size, modification time and mode were unchanged, and no budget ledger was modified by the release.

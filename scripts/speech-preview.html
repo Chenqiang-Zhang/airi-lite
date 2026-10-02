@@ -18,7 +18,7 @@
     <h1>逐句语气校验</h1>
     <p>使用真实 Kokoro 声线与 Live2D。第一句轻快，第二句温柔，第三句好奇；表情只随实际播放切换。</p>
     <button id="start">合成并播放三句话</button>
-    <button id="same">同语气衔接校验（首段暂停等生成）</button>
+    <button id="same">同语气衔接校验</button>
     <button id="resume">播放 / 继续</button>
     <button id="pause">暂停</button>
     <button id="code">验证纯代码（不生成语音）</button>
@@ -30,7 +30,7 @@
     <pre id="status">正在加载角色……</pre>
     <pre id="trace"></pre>
     <pre id="media"></pre>
-    <p>衔接校验会主动暂停第一段，让免费本地合成继续；它用于验证已就绪片段合并，不代表自然流式延迟或听感。</p>
+    <p>只合并已经生成的同语气片段，不等待凑齐。暂停会阻止启动后续本地推理；已在途的一段可以完成。事件次数不代表播放进度或听感。</p>
     <p>This content uses sample data owned and copyrighted by Live2D Inc.<br>Hiyori Momose · Illustration: Kani Biimu</p>
   </aside>
 </main>
@@ -45,11 +45,18 @@
     const actor = await mountHiyori(document.querySelector('#stage'))
     const audio = document.querySelector('audio')
     let playing = false, preparing = false, delivery = 'neutral', state = 'idle', problem = '', audioReady = false, loads = 0
-    let pauseFirst = false, sourceLoads = 0, playStarts = 0, mouth = 0, maxMouth = 0
+    let sourceLoads = 0, playStarts = 0, playRequests = 0, mouth = 0, maxMouth = 0
     const history = []
     const note = text => { history.push(text); trace.textContent = history.join('\n') }
     const media = () => {
-      document.querySelector('#media').textContent = `已加载音源: ${sourceLoads}\nplaying 事件次数: ${playStarts}\n音频: ${audio.currentTime.toFixed(2)} / ${Number.isFinite(audio.duration) ? audio.duration.toFixed(3) : '—'} 秒\n暂停: ${audio.paused}\n嘴形开口: ${mouth.toFixed(3)}\n最大开口: ${maxMouth.toFixed(3)}\n媒体错误: ${audio.error?.code ?? '无'}`
+      document.querySelector('#media').textContent = `已加载音源: ${sourceLoads}\n代码 play() 调用次数: ${playRequests}\nplaying 事件次数: ${playStarts}\n音频: ${audio.currentTime.toFixed(2)} / ${Number.isFinite(audio.duration) ? audio.duration.toFixed(3) : '—'} 秒\n暂停: ${audio.paused}\n嘴形开口: ${mouth.toFixed(3)}\n最大开口: ${maxMouth.toFixed(3)}\n媒体错误: ${audio.error?.code ?? '无'}`
+    }
+    const originalPlay = audio.play.bind(audio)
+    audio.play = () => {
+      playRequests++
+      note(`代码 play() 请求 ${playRequests}`)
+      media()
+      return originalPlay()
     }
     const sync = () => {
       actor.setActivity(playing ? 'speaking' : preparing ? 'thinking' : 'idle')
@@ -86,11 +93,6 @@
     audio.addEventListener('playing', () => {
       playStarts++
       note(`playing 事件 ${playStarts} @ ${audio.currentTime.toFixed(2)}s`)
-      if (pauseFirst) {
-        pauseFirst = false
-        audio.pause()
-        note('校验夹具主动暂停首段；点击“播放 / 继续”恢复')
-      }
       media()
     })
     for (const event of ['pause', 'ended', 'timeupdate', 'emptied'])
@@ -108,11 +110,10 @@
     const showText = text => { document.querySelector('#visible').textContent = text }
     const clearTrace = () => {
       history.length = 0; trace.textContent = ''
-      pauseFirst = false; sourceLoads = 0; playStarts = 0; maxMouth = 0
+      sourceLoads = 0; playStarts = 0; playRequests = 0; maxMouth = 0
     }
     document.querySelector('#same').addEventListener('click', () => {
       clearTrace()
-      pauseFirst = true
       showText('嗯，我刚才还在想，要不要换个话题。你先说，我听着呢。等我一下，马上回来。')
       const input = controller.beginStream('', 'neutral', loadVoice())
       input.push('嗯，我刚才还')

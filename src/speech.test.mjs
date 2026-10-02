@@ -216,9 +216,13 @@ test('ready playback joining is bounded by clip count, duration and tone changes
       yield { audio: { data: c.samples, sampling_rate: c.sampleRate } }
     } }))
     try {
-      await f.controller.speak(sample.text, 'bright', undefined, sample.cues)
-      assert.equal(generated, sample.counts.length)
+      const speaking = f.controller.speak(sample.text, 'bright', undefined, sample.cues)
+      await settle()
+      assert.equal(generated, Math.min(sample.counts.length, 4))
       f.audio.end()
+      await settle()
+      await speaking
+      assert.equal(generated, sample.counts.length)
       const wav = await (await fetch(f.audio.src)).arrayBuffer()
       assert.equal(wav.byteLength, 44 + sample.expected * 2)
       assert.equal(f.events.delivery.at(-1), 'bright', 'a queued new tone cannot leak into the joined source')
@@ -228,6 +232,195 @@ test('ready playback joining is bounded by clip count, duration and tone changes
     }
     finally { f.close() }
   }
+})
+
+test('local autoplay blocking starts only the first computation and cancel closes its iterator', { timeout: 1000 }, async () => {
+  let computed = 0, closed = false
+  const f = fixture(async () => ({ async *stream() {
+    try { for (let index = 0; index < 40; index++) { computed++; yield clip() } }
+    finally { closed = true }
+  } }))
+  try {
+    f.audio.play = async () => { throw new DOMException('test: blocked', 'NotAllowedError') }
+    const speaking = f.controller.speak('一次输入也可能产出很多片段。')
+    await settle()
+    assert.equal(computed, 1)
+    assert.equal(f.audio.paused, true)
+    assert.equal(closed, false)
+    f.audio.dispatchEvent(new Event('playing'))
+    await settle()
+    assert.equal(computed, 1, 'a spurious playing event cannot grant local capacity')
+    f.controller.cancel()
+    await speaking
+    assert.equal(computed, 1)
+    assert.equal(closed, true)
+    assert.equal(f.audio.src, '')
+  }
+  finally { f.close() }
+})
+
+test('local lookahead is bounded within one multi-clip input, resumes without skipping, and yields to a real task', { timeout: 1000 }, async () => {
+  let computed = 0, inputs = 0
+  const f = fixture(async () => ({ async *stream() {
+    inputs++
+    for (let index = 0; index < 9; index++) { computed++; yield clip() }
+  } }))
+  try {
+    const speaking = f.controller.speak('这是一个输入。')
+    const observedFromTask = await new Promise(resolve => setTimeout(() => resolve(computed), 0))
+    assert.equal(observedFromTask, 4, 'one current clip plus at most three ready successors')
+    f.audio.pause()
+    for (let index = 0; index < 3; index++) await settle()
+    assert.equal(computed, 4)
+    await f.audio.play()
+    await settle()
+    assert.equal(computed, 4, 'resume cannot overfill an already-full queue')
+    f.audio.end()
+    await settle()
+    assert.equal(computed, 7)
+    f.audio.end()
+    await settle()
+    await speaking
+    assert.equal(computed, 9)
+    assert.equal(inputs, 1)
+    f.audio.end()
+    f.audio.end()
+    const wav = await (await fetch(f.audio.src)).arrayBuffer()
+    assert.equal(wav.byteLength, 44 + 9 * 2400 * 2)
+    await f.audio.play()
+    assert.equal(computed, 9, 'full replay never starts more local inference')
+  }
+  finally { f.close() }
+})
+
+test('pausing an in-flight local result accepts it but cannot start the next computation', { timeout: 1000 }, async () => {
+  const second = deferred()
+  let computed = 0
+  const f = fixture(async () => ({ async *stream() {
+    for (let index = 0; index < 3; index++) {
+      computed++
+      yield index === 1 ? await second.promise : clip()
+    }
+  } }))
+  try {
+    const speaking = f.controller.speak('一次输入三段。')
+    await settle()
+    assert.equal(computed, 2)
+    f.audio.pause()
+    second.resolve(clip())
+    await settle()
+    assert.equal(computed, 2)
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    await f.audio.play()
+    await settle()
+    await speaking
+    assert.equal(computed, 3)
+    f.audio.end()
+    f.audio.end()
+  }
+  finally { f.close() }
+})
+
+test('cancel, dispose and media errors release a local capacity wait without later computation', { timeout: 1000 }, async () => {
+  for (const action of ['cancel', 'dispose', 'error']) {
+    let computed = 0, closed = false
+    const f = fixture(async () => ({ async *stream() {
+      try { for (let index = 0; index < 40; index++) { computed++; yield clip() } }
+      finally { closed = true }
+    } }))
+    try {
+      const speaking = f.controller.speak('很多段，但不应提前全部生成。')
+      await settle()
+      assert.equal(computed, 4)
+      if (action === 'error') {
+        f.audio.error = { code: 3 }
+        f.audio.dispatchEvent(new Event('error'))
+      }
+      else f.controller[action]()
+      const stopped = structuredClone(f.events)
+      await speaking
+      await settle()
+      assert.equal(computed, 4)
+      assert.equal(closed, true)
+      assert.deepEqual(f.events, stopped)
+      assert.equal(f.audio.src, '')
+    }
+    finally { f.close() }
+  }
+})
+
+test('a newer turn cannot inherit an old local waiter or iterator', { timeout: 1000 }, async () => {
+  const calls = [], closed = []
+  const f = fixture(async () => ({ async *stream(text) {
+    try { for (let index = 0; index < 10; index++) { calls.push(text); yield clip() } }
+    finally { closed.push(text) }
+  } }))
+  try {
+    const old = f.controller.speak('旧回复。', 'bright')
+    await settle()
+    assert.equal(calls.length, 4)
+    const fresh = f.controller.speak('新回复。', 'soft')
+    await old
+    await settle()
+    assert.deepEqual(calls, [...Array(4).fill('旧回复。'), ...Array(4).fill('新回复。')])
+    assert.deepEqual(closed, ['旧回复。'])
+    assert.equal(f.events.delivery.at(-1), 'soft')
+    f.controller.cancel()
+    await fresh
+    assert.deepEqual(closed, ['旧回复。', '新回复。'])
+  }
+  finally { f.close() }
+})
+
+test('local generation can fill an underrun when later streamed text finally arrives', { timeout: 1000 }, async () => {
+  const calls = []
+  const f = fixture(async () => ({ async *stream(text) { calls.push(text); yield clip() } }))
+  try {
+    const input = f.controller.beginStream('', 'neutral')
+    input.push('先说一句。')
+    await settle()
+    f.audio.end()
+    await settle()
+    assert.equal(f.events.preparing.at(-1), true)
+    input.push('后来这句也要出声。')
+    input.finish()
+    await settle()
+    assert.deepEqual(calls, ['先说一句。', '后来这句也要出声。'])
+    assert.equal(f.audio.paused, false)
+    assert.equal(f.events.preparing.at(-1), false)
+    f.audio.end()
+  }
+  finally { f.close() }
+})
+
+test('preparing full replay explicitly pauses an ended source that retained playing intent', async () => {
+  const f = fixture(async () => ({ async *stream() { yield clip() } }))
+  let inheritedPlaying = 0
+  const load = f.audio.load.bind(f.audio)
+  f.audio.load = () => {
+    load()
+    if (!f.audio.paused) { inheritedPlaying++; f.audio.dispatchEvent(new Event('playing')) }
+  }
+  const endWithoutPausing = () => { f.audio.ended = true; f.audio.dispatchEvent(new Event('ended')) }
+  try {
+    await f.controller.speak('第一句。第二句。', 'bright', undefined, [{start:4,delivery:'soft'}])
+    endWithoutPausing()
+    assert.equal(f.audio.paused, false, 'advance explicitly plays a real next clip')
+    assert.equal(f.audio.plays, 2)
+    const eventsBefore = f.events.playing.filter(Boolean).length
+    endWithoutPausing()
+    assert.equal(inheritedPlaying, 0)
+    assert.equal(f.audio.plays, 2, 'preparing the complete WAV cannot request playback')
+    assert.equal(f.events.playing.filter(Boolean).length, eventsBefore)
+    assert.equal(f.audio.paused, true)
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    const wav = await (await fetch(f.audio.src)).arrayBuffer()
+    assert.equal(wav.byteLength, 44 + 2 * 2400 * 2)
+    await f.audio.play()
+    f.tick(0.15)
+    assert.equal(f.events.delivery.at(-1), 'soft')
+  }
+  finally { f.close() }
 })
 
 test('quiet and loud clips keep their original mouth tracks through merged replay and backward seeks', async () => {
