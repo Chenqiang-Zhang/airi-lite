@@ -1,0 +1,14 @@
+{
+  "protocol_id": "hiyori-free-running-2026-10-02-v1",
+  "items": 12,
+  "items_sha256": "172542d541620f34977adb1913aa82259b9362d9ff49926d41b8a653e81f3fac",
+  "config_sha256": "3bec0ba645236ad8d2cec5f949ec13e3048301fe8ac375211c287d4b126aa0b3",
+  "calibration_items": 4,
+  "audit_items": 4,
+  "packet_rows": {
+    "reviewer_a": 12,
+    "reviewer_b": 12
+  },
+  "review_assignments": 24,
+  "warning": "Packets are AI review inputs; agreement is not human gold."
+}

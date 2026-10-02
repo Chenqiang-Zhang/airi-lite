@@ -1,0 +1,11 @@
+{
+  "items": 12,
+  "review_rows": 24,
+  "resolved_fields": 24,
+  "provisional_fields": 12,
+  "unresolved_fields": 0,
+  "adjudication_items": 4,
+  "items_with_issues": 4,
+  "items_with_revisions": 3,
+  "warning": "Resolved fields are silver unless a separate human-gold process confirms them."
+}

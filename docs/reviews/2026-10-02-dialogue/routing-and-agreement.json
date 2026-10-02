@@ -1,0 +1,310 @@
+{
+  "baseline": {
+    "items": 12,
+    "completed": 12,
+    "failures": 0,
+    "noRedaction": true,
+    "verifiedActualAssistantHandoffs": 8,
+    "observedAt": {
+      "first": "2026-10-02T14:34:31.143Z",
+      "last": "2026-10-02T14:34:40.095Z"
+    },
+    "questionMarkReplies": {
+      "count": 4,
+      "ids": [
+        "ordinary-sharing:turn-1",
+        "ordinary-sharing:turn-2",
+        "ordinary-sharing:turn-3",
+        "plain-company:turn-1"
+      ]
+    },
+    "utf16ReplyLength": {
+      "min": 17,
+      "max": 55
+    },
+    "fields": {
+      "register": {
+        "agreement": 12,
+        "total": 12,
+        "disagreementIds": []
+      },
+      "attunement": {
+        "agreement": 12,
+        "total": 12,
+        "disagreementIds": []
+      },
+      "grounding": {
+        "agreement": 10,
+        "total": 12,
+        "disagreementIds": [
+          "different-tastes:turn-2",
+          "plain-company:turn-3"
+        ]
+      }
+    },
+    "issueIds": [
+      "different-tastes:turn-2",
+      "plain-company:turn-3",
+      "task-switch:turn-1",
+      "task-switch:turn-3"
+    ],
+    "helperSummary": {
+      "items": 12,
+      "review_rows": 24,
+      "resolved_fields": 24,
+      "provisional_fields": 12,
+      "unresolved_fields": 0,
+      "adjudication_items": 4,
+      "items_with_issues": 4,
+      "items_with_revisions": 3,
+      "warning": "Resolved fields are silver unless a separate human-gold process confirms them."
+    },
+    "routing": {
+      "calibrationIds": [
+        "different-tastes:turn-2",
+        "ordinary-sharing:turn-2",
+        "plain-company:turn-1",
+        "task-switch:turn-2"
+      ],
+      "auditIds": [
+        "different-tastes:turn-1",
+        "ordinary-sharing:turn-3",
+        "plain-company:turn-2",
+        "task-switch:turn-1"
+      ],
+      "selectionOnly": true
+    },
+    "humanReviewQueue": [
+      {
+        "id": "different-tastes:turn-1",
+        "reasons": [
+          "fixed-random-audit"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      },
+      {
+        "id": "different-tastes:turn-2",
+        "reasons": [
+          "reviewer-issue-or-disagreement"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      },
+      {
+        "id": "ordinary-sharing:turn-3",
+        "reasons": [
+          "fixed-random-audit"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      },
+      {
+        "id": "plain-company:turn-2",
+        "reasons": [
+          "fixed-random-audit"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      },
+      {
+        "id": "plain-company:turn-3",
+        "reasons": [
+          "reviewer-issue-or-disagreement"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      },
+      {
+        "id": "task-switch:turn-1",
+        "reasons": [
+          "reviewer-issue-or-disagreement",
+          "fixed-random-audit"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      },
+      {
+        "id": "task-switch:turn-3",
+        "reasons": [
+          "reviewer-issue-or-disagreement"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      }
+    ]
+  },
+  "candidate": {
+    "items": 12,
+    "completed": 12,
+    "failures": 0,
+    "noRedaction": true,
+    "verifiedActualAssistantHandoffs": 8,
+    "observedAt": {
+      "first": "2026-10-02T14:43:04.423Z",
+      "last": "2026-10-02T14:43:13.968Z"
+    },
+    "questionMarkReplies": {
+      "count": 7,
+      "ids": [
+        "ordinary-sharing:turn-1",
+        "ordinary-sharing:turn-2",
+        "ordinary-sharing:turn-3",
+        "plain-company:turn-1",
+        "plain-company:turn-2",
+        "task-switch:turn-1",
+        "task-switch:turn-3"
+      ]
+    },
+    "utf16ReplyLength": {
+      "min": 16,
+      "max": 59
+    },
+    "fields": {
+      "register": {
+        "agreement": 12,
+        "total": 12,
+        "disagreementIds": []
+      },
+      "attunement": {
+        "agreement": 12,
+        "total": 12,
+        "disagreementIds": []
+      },
+      "grounding": {
+        "agreement": 12,
+        "total": 12,
+        "disagreementIds": []
+      }
+    },
+    "issueIds": [
+      "different-tastes:turn-2",
+      "ordinary-sharing:turn-2",
+      "plain-company:turn-1",
+      "task-switch:turn-3"
+    ],
+    "helperSummary": {
+      "items": 12,
+      "review_rows": 24,
+      "resolved_fields": 24,
+      "provisional_fields": 12,
+      "unresolved_fields": 0,
+      "adjudication_items": 4,
+      "items_with_issues": 4,
+      "items_with_revisions": 4,
+      "warning": "Resolved fields are silver unless a separate human-gold process confirms them."
+    },
+    "routing": {
+      "calibrationIds": [
+        "different-tastes:turn-2",
+        "ordinary-sharing:turn-2",
+        "plain-company:turn-1",
+        "task-switch:turn-2"
+      ],
+      "auditIds": [
+        "different-tastes:turn-1",
+        "ordinary-sharing:turn-3",
+        "plain-company:turn-2",
+        "task-switch:turn-1"
+      ],
+      "selectionOnly": true
+    },
+    "humanReviewQueue": [
+      {
+        "id": "different-tastes:turn-1",
+        "reasons": [
+          "fixed-random-audit"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      },
+      {
+        "id": "different-tastes:turn-2",
+        "reasons": [
+          "reviewer-issue-or-disagreement"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      },
+      {
+        "id": "ordinary-sharing:turn-2",
+        "reasons": [
+          "reviewer-issue-or-disagreement"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      },
+      {
+        "id": "ordinary-sharing:turn-3",
+        "reasons": [
+          "fixed-random-audit"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      },
+      {
+        "id": "plain-company:turn-1",
+        "reasons": [
+          "reviewer-issue-or-disagreement"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      },
+      {
+        "id": "plain-company:turn-2",
+        "reasons": [
+          "fixed-random-audit"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      },
+      {
+        "id": "task-switch:turn-1",
+        "reasons": [
+          "fixed-random-audit"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      },
+      {
+        "id": "task-switch:turn-3",
+        "reasons": [
+          "reviewer-issue-or-disagreement"
+        ],
+        "status": "pending",
+        "humanLabels": null
+      }
+    ]
+  },
+  "hashes": {
+    "cases.json": "576b7b264fa1a59efd1084a7447800999d92c8856a728e8a1d0dae4204405f97",
+    "rubric.md": "2ac7e61c7545406a57ee02f88779b519e69ce8ed80250271579ccbc532edc523",
+    "review-config.json": "3bec0ba645236ad8d2cec5f949ec13e3048301fe8ac375211c287d4b126aa0b3",
+    "baseline-card.json": "df282c8bd9937c0f9f51b3091935e234994054f43b24f49f61207249f7271e29",
+    "candidate-card.json": "77028506fc6815d824c628ebc0d74f4876a44aa5aaeee5e55c411d80833ccf60",
+    "baseline-replies.jsonl": "043c62773242a31519d27685a8caac5297125d716cf337bfa4017dbff4341efd",
+    "candidate-replies.jsonl": "d1f3b8c7af954a15cf31d897cefee33f417d6faa77b24e26ead29f03150bbddc",
+    "baseline-items.jsonl": "1be91f7286c757381f1c16f8ceec53353c42fd1e3c2f976366e2b2d0e878edf1",
+    "candidate-items.jsonl": "172542d541620f34977adb1913aa82259b9362d9ff49926d41b8a653e81f3fac",
+    "raw/baseline-reviewer-a.jsonl": "58e7ad63c296987001d07ee18910fa1c89e68885d807438e3b3d8f2e1ad95742",
+    "raw/baseline-reviewer-b.jsonl": "bc573bc0d8ea858e930370b4f262f28699b71d0294958d287a1c2339abf20758",
+    "raw/candidate-reviewer-a.jsonl": "0d6b501bde123766ac08c6e14ab0c0327e63385d990c49b2791b2378fc544c7a",
+    "raw/candidate-reviewer-b.jsonl": "34a9e06370f1cbbeb284651f6373a90fb128e7bfb5e57fba08cdc93e1e207973"
+  },
+  "sourceHashes": {
+    "scripts/persona-dialogue-check.mjs": "3cf20f14b308a3fd4aa4e9c53fa12b97fbde5adffcb149dfaaa3870cac5e1bb5",
+    "scripts/persona-dialogue-check.test.mjs": "1a112e423ce0084f6f004c7b2623a6092f44bc5a5393899b71dcc2113a759c59",
+    "server/persona.mjs": "209be2472e6b38a0db4be48461e35e1c7f8e8fa692f5e968e22b0c5ba647b188",
+    "dist/assets/index-Do0Zz9P4.js": "132dedebe59580038692ca06fb7f55406bed5163e67488ad37940311388b8b4f"
+  },
+  "interpretation": {
+    "status": "exploratory",
+    "humanCalibration": 0,
+    "humanReviewed": 0,
+    "humanPending": 15,
+    "fieldOnlyAdjudications": 0,
+    "questionMarkCountsArePressureLabels": false,
+    "causalOrStatisticalImprovementClaim": false,
+    "candidateDecision": "withdrawn-not-deployed"
+  }
+}

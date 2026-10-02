@@ -1,0 +1,30 @@
+{
+  "reviewer_a": {
+    "44b5bb6cd5f407b4": "ordinary-sharing:turn-2",
+    "6549fd4bb8a11aa9": "ordinary-sharing:turn-1",
+    "6cea33b7b2a1a6c1": "different-tastes:turn-1",
+    "71406f90edeb4b40": "task-switch:turn-1",
+    "8de087ee5b3c2cbc": "task-switch:turn-2",
+    "98725cdd70dd41a0": "task-switch:turn-3",
+    "d856beb6694729aa": "different-tastes:turn-2",
+    "0ad2d0727575dc50": "plain-company:turn-1",
+    "39f5f09362d38a4f": "plain-company:turn-2",
+    "9434a102b53882d6": "ordinary-sharing:turn-3",
+    "cbf4798e7182d64a": "different-tastes:turn-3",
+    "a4ee75dff7a3cd21": "plain-company:turn-3"
+  },
+  "reviewer_b": {
+    "7f5ff3947a9bb3c6": "plain-company:turn-1",
+    "e3c779f623e1a431": "ordinary-sharing:turn-3",
+    "f2d1d8740284e39f": "task-switch:turn-3",
+    "f09aee36e4879f48": "different-tastes:turn-2",
+    "7c5ba4d3de5278b7": "plain-company:turn-2",
+    "20b4763689fcc93a": "ordinary-sharing:turn-1",
+    "3b9b9af087faf390": "task-switch:turn-1",
+    "1774df6a10b5e1d1": "different-tastes:turn-1",
+    "6a69e5868b82aebc": "plain-company:turn-3",
+    "9815eb12bf9063d6": "ordinary-sharing:turn-2",
+    "0d92b53e14a86c4e": "task-switch:turn-2",
+    "2902efa8437c6c3c": "different-tastes:turn-3"
+  }
+}

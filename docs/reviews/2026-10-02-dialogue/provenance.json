@@ -1,0 +1,123 @@
+{
+  "protocolId": "hiyori-free-running-2026-10-02-v1",
+  "artifactDocumentationDate": "2026-10-03",
+  "baseCommit": "f88ef183d477d0678cabdb8bf8439ea65c3282f3",
+  "generation": {
+    "provider": "deepseek",
+    "requestedHealthModel": "deepseek-flash",
+    "providerNativeRevision": null,
+    "providerTokens": null,
+    "providerBilling": null,
+    "generationParameterOverrides": "not-inspected",
+    "applicationTextRequests": 24,
+    "completed": 24,
+    "failures": 0,
+    "retries": 0,
+    "resampling": 0,
+    "knownCredentialRedactions": 0,
+    "trajectoriesPerCard": 4,
+    "userTurnsPerTrajectory": 3,
+    "previousAssistantResponses": "actual completed responses from this trajectory and card",
+    "verifiedHandoffsBetweenRounds": 16,
+    "userInputs": "frozen synthetic, not private or interactive human conversation",
+    "ttsRequests": 0,
+    "credentials": "remained in VPS .env; not included in public artifacts"
+  },
+  "review": {
+    "skill": "multi-agent-text-review",
+    "helper": "review_pipeline.py",
+    "humanCalibration": 0,
+    "humanReviewed": 0,
+    "equalWeights": true,
+    "assignments": 48,
+    "fieldOnlyAdjudications": 0,
+    "malformedRetries": 0,
+    "orchestratorVoted": false,
+    "rewritesAutomaticallyAdopted": false,
+    "exactModelRevisions": null,
+    "modelTokens": null,
+    "sharedModelBiasPossible": true,
+    "reviewers": [
+      {
+        "batch": "baseline",
+        "reviewer": "reviewer_a",
+        "agent": "/root/dialogue_baseline_a_1002",
+        "history": "none"
+      },
+      {
+        "batch": "baseline",
+        "reviewer": "reviewer_b",
+        "agent": "/root/dialogue_baseline_b_1002",
+        "history": "none"
+      },
+      {
+        "batch": "candidate",
+        "reviewer": "reviewer_a",
+        "agent": "/root/dialogue_candidate_a_1002",
+        "history": "none"
+      },
+      {
+        "batch": "candidate",
+        "reviewer": "reviewer_b",
+        "agent": "/root/dialogue_candidate_b_1002",
+        "history": "none"
+      }
+    ],
+    "blindPackets": "different IDs/order within each batch; same routing seed across batches but new no-history agents",
+    "rawNormalization": "baseline A blind_id/issue_codes/rewrite mechanically renamed id/issues/revision; labels and raw output preserved",
+    "status": "unconfirmed AI labels; agreement at most silver consistency"
+  },
+  "decision": {
+    "candidate": "withdrawn",
+    "productionPersonaChanged": false,
+    "defaultEqualsArchivedBaseline": true,
+    "frontendRebuiltFromRestoredSource": true,
+    "frontendDeployedThisRun": false,
+    "serviceRestarted": false,
+    "cloudSpeechActivated": false
+  },
+  "verification": {
+    "tests": {
+      "command": "pnpm test",
+      "passed": 368,
+      "failed": 0
+    },
+    "build": {
+      "command": "pnpm build",
+      "exitCode": 0,
+      "warning": "large optional Live2D/Kokoro chunks"
+    },
+    "health": {
+      "configured": true,
+      "model": "deepseek-flash",
+      "provider": "deepseek",
+      "accessProtected": true,
+      "speech": {
+        "configured": false,
+        "provider": "minimax",
+        "model": "speech-2.8-turbo"
+      }
+    }
+  },
+  "hashes": {
+    "cases.json": "576b7b264fa1a59efd1084a7447800999d92c8856a728e8a1d0dae4204405f97",
+    "rubric.md": "2ac7e61c7545406a57ee02f88779b519e69ce8ed80250271579ccbc532edc523",
+    "review-config.json": "3bec0ba645236ad8d2cec5f949ec13e3048301fe8ac375211c287d4b126aa0b3",
+    "baseline-card.json": "df282c8bd9937c0f9f51b3091935e234994054f43b24f49f61207249f7271e29",
+    "candidate-card.json": "77028506fc6815d824c628ebc0d74f4876a44aa5aaeee5e55c411d80833ccf60",
+    "baseline-replies.jsonl": "043c62773242a31519d27685a8caac5297125d716cf337bfa4017dbff4341efd",
+    "candidate-replies.jsonl": "d1f3b8c7af954a15cf31d897cefee33f417d6faa77b24e26ead29f03150bbddc",
+    "baseline-items.jsonl": "1be91f7286c757381f1c16f8ceec53353c42fd1e3c2f976366e2b2d0e878edf1",
+    "candidate-items.jsonl": "172542d541620f34977adb1913aa82259b9362d9ff49926d41b8a653e81f3fac",
+    "raw/baseline-reviewer-a.jsonl": "58e7ad63c296987001d07ee18910fa1c89e68885d807438e3b3d8f2e1ad95742",
+    "raw/baseline-reviewer-b.jsonl": "bc573bc0d8ea858e930370b4f262f28699b71d0294958d287a1c2339abf20758",
+    "raw/candidate-reviewer-a.jsonl": "0d6b501bde123766ac08c6e14ab0c0327e63385d990c49b2791b2378fc544c7a",
+    "raw/candidate-reviewer-b.jsonl": "34a9e06370f1cbbeb284651f6373a90fb128e7bfb5e57fba08cdc93e1e207973"
+  },
+  "sourceHashes": {
+    "scripts/persona-dialogue-check.mjs": "3cf20f14b308a3fd4aa4e9c53fa12b97fbde5adffcb149dfaaa3870cac5e1bb5",
+    "scripts/persona-dialogue-check.test.mjs": "1a112e423ce0084f6f004c7b2623a6092f44bc5a5393899b71dcc2113a759c59",
+    "server/persona.mjs": "209be2472e6b38a0db4be48461e35e1c7f8e8fa692f5e968e22b0c5ba647b188",
+    "dist/assets/index-Do0Zz9P4.js": "132dedebe59580038692ca06fb7f55406bed5163e67488ad37940311388b8b4f"
+  }
+}

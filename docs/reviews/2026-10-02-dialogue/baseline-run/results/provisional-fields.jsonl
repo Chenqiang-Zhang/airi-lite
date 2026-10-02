@@ -1,0 +1,12 @@
+{"id":"plain-company:turn-3","dimension":"register","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"plain-company:turn-3","dimension":"attunement","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"plain-company:turn-3","dimension":"grounding","label":"invented","weighted_share":0.5,"votes":2,"status":"provisional"}
+{"id":"different-tastes:turn-2","dimension":"register","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"different-tastes:turn-2","dimension":"attunement","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"different-tastes:turn-2","dimension":"grounding","label":"clear","weighted_share":0.5,"votes":2,"status":"provisional"}
+{"id":"task-switch:turn-1","dimension":"register","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"task-switch:turn-1","dimension":"attunement","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"task-switch:turn-1","dimension":"grounding","label":"invented","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"task-switch:turn-3","dimension":"register","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"task-switch:turn-3","dimension":"attunement","label":"fits","weighted_share":1.0,"votes":2,"status":"provisional"}
+{"id":"task-switch:turn-3","dimension":"grounding","label":"invented","weighted_share":1.0,"votes":2,"status":"provisional"}
