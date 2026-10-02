@@ -12,6 +12,7 @@ import type { ConversationMessage } from './conversation'
 import { createChatScrollController } from './chat-scroll'
 import { createAssistantMessage, interruptAssistantMessage } from './chat-turn'
 import type { AvatarActivity } from './avatar-performance'
+import { createAvatarContext } from './avatar-context'
 import { chooseDelivery } from './delivery'
 import type { Delivery } from './delivery'
 import { mountHiyori } from './live2d'
@@ -84,6 +85,7 @@ if (savedAccessCode && !accessCode.value) {
 const activeController = ref<AbortController | null>(null)
 const activeAssistantId = ref<number | null>(null)
 let live2d: Awaited<ReturnType<typeof mountHiyori>> | null = null
+const avatarContext = createAvatarContext({ onChange: delivery => live2d?.setDelivery(delivery) })
 const avatarMountController = new AbortController()
 let viewDisposed = false
 let latestMouth: { opening: number | null, form: number } = { opening: 0, form: 0 }
@@ -167,14 +169,21 @@ onUnmounted(() => {
   chatScroll?.destroy()
   activeController.value?.abort()
   speech?.dispose()
+  avatarContext.destroy()
   live2d?.destroy()
   live2d = null
 })
 function syncAvatarActivity() {
   live2d?.setActivity(avatarActivity.value)
-  live2d?.setDelivery(isSpeaking.value ? activeDelivery.value : 'neutral')
+  avatarContext.sync({
+    speaking: isSpeaking.value,
+    waiting: isGenerating.value || isPreparingSpeech.value,
+    spokenDelivery: activeDelivery.value,
+  })
+  // Also sync a late-mounted model when the cue itself has not changed.
+  live2d?.setDelivery(avatarContext.current)
 }
-watch([avatarActivity, activeDelivery], syncAvatarActivity)
+watch([avatarActivity, activeDelivery, isGenerating, isPreparingSpeech], syncAvatarActivity)
 watch(() => [messages.value.length, messages.value.at(-1)?.id, messages.value.at(-1)?.text], () => chatScroll?.notifyContentChanged(), { flush: 'post' })
 
 function closeChatSettings() {
@@ -253,6 +262,7 @@ async function sendMessage() {
   }
 
   speech?.cancel()
+  avatarContext.beginTurn(text)
 
   lastError.value = ''
   interactionNotice.value = ''
@@ -474,6 +484,7 @@ function stopCurrentTurn() {
     saveConversation(messages.value)
   }
   speech?.cancel()
+  avatarContext.clear()
   voiceProblem.value = ''
   lastError.value = ''
   interactionNotice.value = '好，我先停下。你接着说。'
@@ -487,6 +498,7 @@ function resetConversation() {
   activeController.value = null
   activeAssistantId.value = null
   speech?.cancel()
+  avatarContext.clear()
   voiceProblem.value = ''
   isGenerating.value = false
   isSpeaking.value = false

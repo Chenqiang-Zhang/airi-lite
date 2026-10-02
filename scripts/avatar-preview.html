@@ -6,8 +6,8 @@
 <style>
   body { margin: 0; background: #f5eee9; color: #41342c; font: 16px system-ui; }
   main { display: flex; min-height: 100vh; }
-  #stage { width: 60vw; height: 95vh; }
-  aside { flex: 1; padding: 30px 20px; }
+  #stage { width: 60vw; height: 95vh; flex: 0 0 60vw; position: sticky; top: 0; }
+  aside { flex: 1; min-width: 0; padding: 30px 20px; overflow-wrap: anywhere; }
   button { margin: 5px; padding: 10px; cursor: pointer; }
   #controls { border: 0; margin: 0; padding: 0; min-width: 0; }
   pre { white-space: pre-wrap; }
@@ -32,6 +32,13 @@
       <button data-motion="2">重播大幅抬头待机动作</button>
       <button data-reaction="acknowledge">发送回应（轻点头）</button>
       <button data-reaction="clear">取消回应</button>
+      <button data-context="sad">上下文：低落等待（无语音）</button>
+      <button data-context="ahead">上下文：提前到达的轻快 cue（未播放）</button>
+      <button data-context="play">上下文：模拟轻快播放状态</button>
+      <button data-context="gap">上下文：句间等待（无语音）</button>
+      <button data-context="end">上下文：结束并退场</button>
+      <button data-context="topic">上下文：新话题</button>
+      <button data-context="clear">上下文：停止并清理</button>
       <button data-speech="start">真实语音与动作</button>
       <button data-speech="stop">停止真实语音</button>
       <button data-render="30">30fps 模式</button>
@@ -42,6 +49,8 @@
     <audio aria-label="动作同步语音播放器"></audio>
     <p><a id="download-audio" hidden download="hiyori-local-voice-check.wav">保存当前校验音频</a>（全部播放结束后保存的是合并 WAV，仅含上述测试台词。）</p>
     <pre id="state">正在加载模型……</pre>
+    <p>上下文按钮使用真实角色，但播放信号是明确的测试夹具，不生成或播放音频。真实语音按钮仍使用实际本地 Kokoro。</p>
+    <pre id="context-state">上下文表情验证准备中……</pre>
     <p>渲染测量使用真实 Cubism 与 WebGL。模拟隐藏只验证同一暂停接口，不等于真实切换标签页或实体手机测试；真正 document.hidden 的变化会单独记录。30/60 按钮切换帧率与像素预算，不重建抗锯齿上下文。</p>
     <pre id="render-state">渲染验证准备中……</pre>
     <p>This content uses sample data owned and copyrighted by Live2D Inc.<br>Hiyori Momose · Illustration: Kani Biimu</p>
@@ -52,6 +61,7 @@
   import * as PIXI from 'pixi.js'
   import { Live2DFactory, Live2DModel } from 'pixi-live2d-display/cubism4'
   import { attachAvatarPerformance } from '../src/avatar-performance.ts'
+  import { createAvatarContext } from '../src/avatar-context.ts'
   import { attachAvatarRenderLoop, resolveAvatarRenderBudget } from '../src/avatar-rendering.ts'
   import { createAvatarMountScope, loadAvatarResource, releaseAvatarModel, releaseAvatarRendererTextures } from '../src/avatar-mount.ts'
   import { readDeviceHints } from '../src/speech-mode.ts'
@@ -60,6 +70,7 @@
 
   const output = document.querySelector('#state')
   const renderOutput = document.querySelector('#render-state')
+  const contextOutput = document.querySelector('#context-state')
   const controls = document.querySelector('#controls')
   const scope = createAvatarMountScope()
   addEventListener('pagehide', scope.dispose, { once: true })
@@ -252,9 +263,12 @@
       internal.coreModel.getParameterMaximumValue(pitchIndex),
     )
     let beforeHeadY = 0, frameTime = performance.now(), shadowApply = null
+    const faceIds = ['ParamCheek', 'ParamEyeLSmile', 'ParamEyeRSmile', 'ParamBrowLForm', 'ParamBrowRForm']
+    let beforeFace = {}
     internal.on('beforeModelUpdate', () => {
       frameTime = performance.now()
       beforeHeadY = internal.coreModel.getParameterValueById('ParamAngleY')
+      beforeFace = Object.fromEntries(faceIds.map(id => [id, internal.coreModel.getParameterValueById(id)]))
       pitchShadow.setBaseline(beforeHeadY)
       shadowApply?.()
     })
@@ -278,13 +292,23 @@
     let activity = 'idle', delivery = 'neutral', form = 0, motionMouth = 0, frames = 0, failures = 0, overridden = 0
     let reactions = 0, reactionTime = -Infinity, reactionMaxOffset = 0
     let expectedMouth = 0.7, speechMode = false, speaking = false, preparing = false, voiceState = 'idle', voiceProblem = ''
+    let contextMode = false, contextSpeaking = false, contextWaiting = false, contextSpoken = 'neutral'
+    const context = createAvatarContext({ onChange(value) { actor.setDelivery(value) } })
+    scope.own(context.destroy)
     let audioFrames = 0, lowOpenFrames = 0, emphasisedFrames = 0, maxEmphasis = 0, lowOpenEmphasisFailures = 0
     const audio = document.querySelector('audio')
     const download = document.querySelector('#download-audio')
     const syncSpeech = () => {
       if (!speechMode) return
       actor.setActivity(activity = speaking ? 'speaking' : preparing ? 'thinking' : 'idle')
-      actor.setDelivery(speaking ? delivery : 'neutral')
+      context.sync({ speaking, waiting: preparing, spokenDelivery: delivery })
+      actor.setDelivery(context.current)
+    }
+    const syncContext = () => {
+      actor.setActivity(activity = contextSpeaking ? 'speaking' : contextWaiting ? 'thinking' : 'idle')
+      actor.setMouth(expectedMouth = contextSpeaking ? 0.35 : 0, 0)
+      context.sync({ speaking: contextSpeaking, waiting: contextWaiting, spokenDelivery: contextSpoken })
+      actor.setDelivery(context.current)
     }
     const speech = createSpeechController(audio, {
       onState(value) { voiceState = value },
@@ -300,7 +324,23 @@
     controls.addEventListener('click', ({ target }) => {
       if (controls.disabled) return
       if (!(target instanceof HTMLButtonElement)) return
+      if (target.dataset.context) {
+        if (speechMode) { speech.cancel(); speechMode = false }
+        contextMode = true
+        const action = target.dataset.context
+        if (action === 'sad') { context.beginTurn('今天有点难过。'); contextSpeaking = false; contextWaiting = true; contextSpoken = 'neutral' }
+        if (action === 'ahead') { contextSpeaking = false; contextWaiting = true; contextSpoken = 'bright' }
+        if (action === 'play') { contextSpeaking = true; contextWaiting = false; contextSpoken = 'bright' }
+        if (action === 'gap') { contextSpeaking = false; contextWaiting = true }
+        if (action === 'end') { contextSpeaking = false; contextWaiting = false }
+        if (action === 'topic') { context.beginTurn('今天买了本书。'); contextSpeaking = false; contextWaiting = true; contextSpoken = 'neutral' }
+        if (action === 'clear') { context.clear(); contextSpeaking = contextWaiting = false }
+        syncContext()
+        return
+      }
       if (target.dataset.speech === 'start') {
+        contextMode = false
+        context.beginTurn('')
         speechMode = true
         actor.clearReaction()
         audioFrames = lowOpenFrames = emphasisedFrames = maxEmphasis = lowOpenEmphasisFailures = 0
@@ -311,7 +351,7 @@
         input.finish()
         return
       }
-      if (target.dataset.speech === 'stop') { speech.cancel(); return }
+      if (target.dataset.speech === 'stop') { speech.cancel(); context.clear(); return }
       if (target.dataset.render) {
         if (target.dataset.render === '30' || target.dataset.render === '60') changeBudget(Number(target.dataset.render))
         if (target.dataset.render === 'measure') startMeasurement()
@@ -321,6 +361,12 @@
       if (speechMode) {
         speech.cancel()
         speechMode = false
+        context.clear()
+        actor.setMouth(expectedMouth = 0.7, form)
+      }
+      if (contextMode) {
+        context.clear()
+        contextMode = false
         actor.setMouth(expectedMouth = 0.7, form)
       }
       if (target.dataset.activity) actor.setActivity(activity = target.dataset.activity)
@@ -345,6 +391,14 @@
       const mouth = internal.coreModel.getParameterValueById('ParamMouthOpenY')
       const renderedForm = internal.coreModel.getParameterValueById('ParamMouthForm')
       const headY = internal.coreModel.getParameterValueById('ParamAngleY')
+      const afterFace = Object.fromEntries(faceIds.map(id => [id, internal.coreModel.getParameterValueById(id)]))
+      contextOutput.dataset.mode = contextMode ? 'synthetic-playback-signals' : speechMode ? 'actual-local-audio' : 'manual-pose'
+      contextOutput.dataset.activity = activity
+      contextOutput.dataset.delivery = context.current
+      contextOutput.dataset.mouth = mouth.toFixed(3)
+      contextOutput.dataset.before = JSON.stringify(beforeFace)
+      contextOutput.dataset.after = JSON.stringify(afterFace)
+      if (frames % 15 === 0) contextOutput.textContent = `模式: ${contextOutput.dataset.mode}\n活动: ${activity}\n上下文 cue: ${context.current}\n实际绘制前开口: ${mouth.toFixed(3)}\n原始 Idle 表情: ${JSON.stringify(beforeFace)}\n叠加后的表情: ${JSON.stringify(afterFace)}`
       if (performance.now() - reactionTime < 650)
         reactionMaxOffset = Math.max(reactionMaxOffset, Math.abs(headY - beforeHeadY))
       output.dataset.headYBefore = beforeHeadY.toFixed(3)
@@ -369,7 +423,7 @@
       output.dataset.lowOpenEmphasisFailures = String(lowOpenEmphasisFailures)
       output.dataset.voiceState = voiceState
       if (Math.abs(motionMouth - mouth) > 0.1) overridden++
-      if (++frames % 15 === 0) output.textContent = `状态: ${activity} / ${delivery}\n动作写入的开口: ${motionMouth.toFixed(3)}\n实际绘制前开口: ${mouth.toFixed(3)}\n实际绘制前嘴形: ${renderedForm.toFixed(3)}\n回应前/后 Y: ${beforeHeadY.toFixed(3)} / ${headY.toFixed(3)}\n回应次数: ${reactions}\n本次最大 Y 偏移: ${reactionMaxOffset.toFixed(3)}\n检查帧数: ${frames}\n已纠正动作覆盖: ${overridden}\n口型覆盖错误: ${failures}\n声线状态: ${voiceState}\n真实音频帧: ${audioFrames}\n低开口帧（<0.06）: ${lowOpenFrames}\n伴随开口的轻点头帧: ${emphasisedFrames}\n最大语音动作偏移: ${maxEmphasis.toFixed(3)}\n低开口时的动作误差: ${lowOpenEmphasisFailures}\n${voiceProblem}`
+      if (++frames % 15 === 0) output.textContent = `状态: ${activity} / ${speechMode || contextMode ? context.current : delivery}\n动作写入的开口: ${motionMouth.toFixed(3)}\n实际绘制前开口: ${mouth.toFixed(3)}\n实际绘制前嘴形: ${renderedForm.toFixed(3)}\n回应前/后 Y: ${beforeHeadY.toFixed(3)} / ${headY.toFixed(3)}\n回应次数: ${reactions}\n本次最大 Y 偏移: ${reactionMaxOffset.toFixed(3)}\n检查帧数: ${frames}\n已纠正动作覆盖: ${overridden}\n口型覆盖错误: ${failures}\n声线状态: ${voiceState}\n真实音频帧: ${audioFrames}\n低开口帧（<0.06）: ${lowOpenFrames}\n伴随开口的轻点头帧: ${emphasisedFrames}\n最大语音动作偏移: ${maxEmphasis.toFixed(3)}\n低开口时的动作误差: ${lowOpenEmphasisFailures}\n${voiceProblem}`
     })
     if (interaction && interactionWasEnabled !== undefined) interaction.useSystemTicker = interactionWasEnabled
     renderLoop = attachAvatarRenderLoop(app, model, { visibility, budget, updatePriority: PIXI.UPDATE_PRIORITY.NORMAL })

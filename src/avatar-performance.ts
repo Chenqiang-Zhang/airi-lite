@@ -83,9 +83,12 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
     // should calm that baseline too, not merely omit our bright offset.
     for (const id of ['ParamCheek', 'ParamEyeLSmile', 'ParamEyeRSmile'])
       core.setParameterValueById(id, 0, weights.soft * 0.9)
-    const brow = weights.curious * 0.16 - weights.soft * 0.16
-    core.addParameterValueById('ParamBrowLForm', brow)
-    core.addParameterValueById('ParamBrowRForm', brow)
+    for (const id of ['ParamBrowLForm', 'ParamBrowRForm']) {
+      core.addParameterValueById(id, weights.curious * 0.16)
+      // The real m02 Idle can raise these above 0.6. A small negative
+      // offset still leaves a cheerful brow; blend its baseline instead.
+      core.setParameterValueById(id, -0.16, weights.soft * 0.9)
+    }
 
     if (reactionStartedAt !== null && (reducedMotion || time - reactionStartedAt >= reactionDuration))
       reactionStartedAt = null

@@ -14,7 +14,7 @@ function fixture(reducedMotion = false) {
     addParameterValueById: (id, value) => values.set(id, (values.get(id) ?? 0) + value),
   }
   const actor = attachAvatarPerformance(model, { now: () => time, reducedMotion: () => reducedMotion })
-  const frame = (milliseconds = 16, idleMouth = 1, idleSmile = 0, idleHeadY) => {
+  const frame = (milliseconds = 16, idleMouth = 1, idleSmile = 0, idleHeadY, idleBrow = 0) => {
     time += milliseconds
     // Cubism restores the motion baseline before each pre-render event.
     values.clear()
@@ -24,6 +24,8 @@ function fixture(reducedMotion = false) {
       values.set('ParamAngleY', idleHeadY)
     for (const id of ['ParamCheek', 'ParamEyeLSmile', 'ParamEyeRSmile'])
       values.set(id, idleSmile)
+    for (const id of ['ParamBrowLForm', 'ParamBrowRForm'])
+      values.set(id, idleBrow)
     model.emit('beforeModelUpdate')
     return Object.fromEntries(values)
   }
@@ -97,6 +99,22 @@ test('browser voice fallback animates over elapsed time and closes immediately',
   assert.notEqual(first, second)
   actor.setActivity('idle')
   assert.equal(frame().ParamMouthOpenY, 0)
+})
+
+test('soft brows calm a raised Idle baseline and neutral restores that exact baseline', () => {
+  for (const baseline of [-1, 0, 0.667, 1]) {
+    const { actor, frame } = fixture()
+    actor.setDelivery('soft')
+    for (let i = 0; i < 35; i++) frame(50, 0, 0, undefined, baseline)
+    const pose = frame(16, 0, 0, undefined, baseline)
+    const expected = baseline * 0.1 - 0.16 * 0.9
+    assert.ok(Math.abs(pose.ParamBrowLForm - expected) < 0.003)
+    assert.ok(Math.abs(pose.ParamBrowRForm - expected) < 0.003)
+    assert.equal(pose.ParamMouthOpenY, 0, 'contextual expression must not open a silent mouth')
+    actor.setDelivery('neutral')
+    for (let i = 0; i < 35; i++) frame(50, 0, 0, undefined, baseline)
+    assert.ok(Math.abs(frame(16, 0, 0, undefined, baseline).ParamBrowLForm - baseline) < 0.003)
+  }
 })
 
 test('a real audio onset adds one bounded pitch emphasis, not a repeating clock-driven sway', () => {

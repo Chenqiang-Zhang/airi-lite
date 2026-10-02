@@ -125,3 +125,17 @@ test('the preview uses real model bounds, labels low opening honestly and starts
   assert.doesNotMatch(html, /静音帧|静音点头错误/)
   assert.equal(LOW_MOUTH_OPEN_THRESHOLD, 0.06)
 })
+
+test('manual preview poses clear speech-owned context before changing the mouth or expression', () => {
+  const html = readFileSync(new URL('./avatar-preview.html', import.meta.url), 'utf8')
+  const manual = html.slice(html.indexOf('if (speechMode) {\n        speech.cancel()'), html.indexOf("if (target.dataset.activity)"))
+  assert.ok(manual.length > 0, 'manual takeover must remain a distinct path')
+  const cancelSpeech = manual.indexOf('speech.cancel()')
+  const clearContext = manual.indexOf('context.clear()')
+  const setMouth = manual.indexOf('actor.setMouth(')
+  assert.ok(cancelSpeech >= 0 && clearContext > cancelSpeech && setMouth > clearContext,
+    'cancel may schedule a release; clear must invalidate it before manual state takes over')
+  const contextTakeover = manual.slice(manual.indexOf('if (contextMode)'))
+  assert.match(contextTakeover, /context\.clear\(\)[\s\S]*contextMode = false[\s\S]*actor\.setMouth\(expectedMouth = 0\.7, form\)/,
+    'context controls must also restore the fixed manual mouth before a speaking pose')
+})
