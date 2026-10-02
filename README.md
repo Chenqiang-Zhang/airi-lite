@@ -28,7 +28,7 @@ The demo renders **Hiyori Momose** with Live2D, streams replies from DeepSeek, l
 | Personality | Editable persona and opt-in user memory; up to 160 recent messages survive refresh in the current tab, subject to byte limits |
 | Turn-taking | Interruptible replies, a brief visual acknowledgement when sending, and streaming chat that follows the latest text without pulling visitors away from older messages |
 | Brain | Server-side DeepSeek streaming, with an explicitly labelled local fallback when unconfigured |
-| Voice | Auto/local/lightweight modes; three Kokoro Chinese presets; optional server-side MiniMax Speech 2.8 adapter, disabled until explicitly configured |
+| Voice | Auto/local/lightweight modes; three Kokoro Chinese presets; optional server-side MiniMax Speech 2.8 / Eleven v4 adapters, disabled until explicitly configured |
 | Not yet built or validated | Microphone input, phoneme-level lip sync, automatic memory extraction, cross-device sync, user accounts, and real-provider emotional-voice quality/latency evaluation |
 
 ## How it fits together
@@ -41,7 +41,7 @@ flowchart LR
   API -->|visible reply + delivery event| U
   U -->|completed sentences| TTS[Kokoro in the browser]
   U -->|explicit cloud choice only| SAPI[Protected /api/speech]
-  SAPI --> MTTS[Optional MiniMax, disabled by default]
+  SAPI --> MTTS[Optional MiniMax or Eleven v4, disabled by default]
   MTTS -->|MP3| SAPI
   SAPI -->|decoded audio| Player
   TTS -->|audio| Player[Audio player]
@@ -164,7 +164,7 @@ curl -fL https://huggingface.co/onnx-community/Kokoro-82M-v1.1-zh-ONNX/resolve/m
 
 These are existing presets, not a custom-trained or cloned voice. Choosing one does not add learned emotional prosody.
 
-The **语音方式** selector also has **自动**, **固定本地**, **轻量**, and optional **云端** choices. Auto is a conservative device-hint policy, not a speed benchmark: data-saving mode, reported memory ≤4 GB, ≤2 cores, or absent WebGPU selects browser speech; unknown hints default to local Kokoro. Explicit local mode still permits WASM on devices without WebGPU. Auto never selects MiniMax, even when the server has credentials. Device hints stay in the browser. Lightweight mode does not download Kokoro and cannot guarantee a consistent voice or emotional delivery across systems. Some system speech voices themselves use network services; browser speech is not a promise of fully offline synthesis.
+The **语音方式** selector also has **自动**, **固定本地**, **轻量**, and optional **云端** choices. Auto is a conservative device-hint policy, not a speed benchmark: data-saving mode, reported memory ≤4 GB, ≤2 cores, or absent WebGPU selects browser speech; unknown hints default to local Kokoro. Explicit local mode still permits WASM on devices without WebGPU. Auto never selects a cloud provider, even when the server has credentials. Device hints stay in the browser. Lightweight mode does not download Kokoro and cannot guarantee a consistent voice or emotional delivery across systems. Some system speech voices themselves use network services; browser speech is not a promise of fully offline synthesis.
 
 Speech uses a separate, incremental spoken-text path: fenced code blocks and Markdown image syntax are omitted; links speak their labels instead of destinations; heading/list/quote/emphasis markers are removed and inline code keeps its text. Bare HTTP(S) URLs become a single “网址”. This is a conservative speech filter, not a full Markdown renderer, and the displayed reply/history are unchanged. Both Kokoro and browser fallback use it, including replay. Replies containing only code, images, emoji or punctuation have no spoken body: the app explains that visually and does not load the large voice model for that reply. Ordinary replies start preparing the voice after the first readable sentence; explicit voice auditions still load it. Skipping code does not create a silent waveform or invent a spoken summary. Original visible-text offsets remain the source of delivery cues even when some content is omitted.
 
@@ -191,6 +191,7 @@ This adapter is preparation for real-provider auditions, **not proof that MiniMa
 Set these fields only in the server environment after choosing a voice and accepting the cost; never use a `VITE_` prefix or paste keys into a public issue:
 
 ```dotenv
+TTS_PROVIDER=minimax
 MINIMAX_TTS_ENABLED=1
 MINIMAX_API_KEY=your-server-only-api-key
 MINIMAX_VOICE_ID=your-selected-system-voice-id
@@ -201,13 +202,40 @@ MINIMAX_TTS_DAILY_CHAR_LIMIT=2000
 
 All four activation fields (switch, key, voice ID, positive integer daily limit) are required. The only supported models are `speech-2.8-hd`/`speech-2.8-turbo`; absent model defaults to Turbo. Only the fixed mainland-China endpoint is supported for now, not international keys. A configured health response indicates local settings, **not** validated credentials, provider availability, a successful audition, or account balance. After configuration/restart, visitors choose **设置 → 选择声线 → 云端 · MiniMax** explicitly. That choice or a cloud audition sends the filtered reply text to MiniMax; A/B/C apply only to Kokoro.
 
-`POST /airi/api/speech` accepts only `{text, delivery}`; clients cannot pick another provider URL, model or voice. It shares the experience-code check, has separate IP rate limits and four concurrent requests, and reserves a conservative `2 * text.length` allowance before fetch. The UTC-day ledger is **`.data/tts-budget.json`**: preserve it across deployments/restarts and use a single service process. Failed/canceled requests are not refunded because the provider may already charge. Corrupt/unwritable ledgers or an unreleased crash lock fail closed; do not delete them to reset spending. This is an application reservation cap, not the actual provider balance or protection for other callers using the same key. Replaying via **朗读** regenerates audio and may incur another call; the completed player's play/seek reuses its existing WAV.
+`POST /airi/api/speech` accepts only `{text, delivery, expectedProvider}`; the last field compares the visitor's selected vendor and cannot select a server provider, URL, model or voice. Legacy requests without this field mean MiniMax, not whichever vendor is currently configured. A mismatch returns 409 before reservation/fetch. It shares the experience-code check, has separate IP rate limits and four concurrent requests, and MiniMax reserves a conservative `2 * text.length` allowance before fetch. The UTC-day ledger is **`.data/tts-budget.json`**: preserve it across deployments/restarts and use a single service process. Failed/canceled requests are not refunded because the provider may already charge. Corrupt/unwritable ledgers or an unreleased crash lock fail closed; do not delete them to reset spending. This is an application reservation cap, not the actual provider balance or protection for other callers using the same key. Replaying via **朗读** regenerates audio and may incur another call; the completed player's play/seek reuses its existing WAV.
 
 The server collects one short sentence's MP3/subtitles before returning it (≤360 UTF-16 characters, ≤30 seconds, ≤2 MiB audio, 30-second timeout). It excludes the provider's final aggregate audio to prevent duplicates and replaces cumulative subtitles for the same segment. The browser decodes MP3, checks for a finite non-silent waveform, then uses actual playback time for mouth/expression cues. `bright` requests `happy`, `soft` requests `calm`; other delivery cues leave emotion unspecified. No automatic laugh/breath tags are added. Validated word timestamps are transported, but they are **not phonemes and are not yet used as visemes**. MP3 encoder delay and real-provider subtitle alignment/latency still require an actual audition. See the [official HTTP API](https://platform.minimax.cn/docs/api-reference/speech-t2a-http).
 
 Cloud synthesis keeps one current clip and at most one future clip (queued or being requested). A blocked first autoplay generates only the first clip until actual playback begins. Pausing prevents additional requests; a request already in flight can still finish. This is bounded lookahead, not sentence-by-sentence pay-on-listen billing. A silent cloud result stops further paid sentence generation. Cloud failure before any valid clip is generated attempts lightweight browser speech, never a large local-model download or automatic paid retry. Failure after a valid clip preserves the partial audio rather than speaking the whole reply twice. Stop aborts the cloud request, releases waiting generation and discards queued audio; this cannot undo provider billing already incurred.
 
 For free local codec/UI checks, supply your own synthetic 32 kHz mono MP3 of about one second to `node scripts/mock-voice-app.mjs /absolute/path/synthetic.mp3`, then open `http://127.0.0.1:4175/airi/`. This **loopback-only mock** ignores environment credentials, injects a fake MiniMax fetch, uses a temporary quota ledger, and returns clearly labelled canned chat. Never interpret its sound as MiniMax voice quality. Protocol/unit tests inject fake compressed frames/decoders; separate browser checks have decoded and played a real locally encoded sine-wave MP3. Weak-device policy tests do not establish physical-phone keyboard, touch or performance behavior.
+
+### Optional Eleven v4 (prepared, disabled by default)
+
+This is an alternative adapter, not a real-provider audition or a guarantee of a more human voice. Start with an [ElevenLabs account](https://elevenlabs.io/app/sign-up), choose an authorized Mandarin voice in the playground, and audition short conversational sentences before activating this demo. Free-plan audio is non-commercial and requires attribution when shared; check the [official usage rules](https://help.elevenlabs.io/hc/en-us/articles/13313564601361-Can-I-publish-the-content-I-generate-on-the-platform) before public/production use. Do not clone an actor's voice without permission.
+
+```dotenv
+TTS_PROVIDER=elevenlabs
+ELEVENLABS_TTS_ENABLED=0
+ELEVENLABS_API_KEY=
+ELEVENLABS_VOICE_ID=
+ELEVENLABS_TTS_MODEL=eleven_v4
+ELEVENLABS_TTS_DAILY_CHAR_LIMIT=
+```
+
+Keep the switch at `0` until credentials, a voice, a positive integer cap and spending/license approval are ready; then enable and restart the service. Missing `TTS_PROVIDER` preserves MiniMax compatibility; an unknown selection fails closed rather than silently using another configured provider. Health and settings expose only a fixed provider label/model, never the key or voice ID. `configured` means local settings are complete, not that credentials, credits, latency or sound quality have been validated. Visitors must explicitly select **云端 · ElevenLabs**. Auto never selects it.
+
+Saving cloud settings also stores a provider-scoped confirmation on that browser. A legacy `cloud` preference, missing confirmation, or server vendor change falls back to lightweight speech until reconfirmed; detection never writes confirmation. An audition is a separate explicit action that sends only its test sentence. Each speech run pins its expected vendor, and the backend checks it before spending, so an already-open page cannot silently use a replacement provider. Re-selecting non-cloud settings clears the provider confirmation.
+
+The fixed [Text to Dialogue HTTP endpoint with timestamps](https://elevenlabs.io/docs/api-reference/text-to-dialogue/convert-with-timestamps) uses one server-selected voice, `eleven_v4`, Chinese and `mp3_44100_128`. One short sentence is collected before playback; this is **not full-duplex or v4 Turbo WebSocket streaming**. `bright` adds a trusted `[happy]` prefix, `curious` adds `[curious]`; neutral/soft currently rely on text-conditioned delivery. ASCII square brackets in reply text are converted to full-width brackets to neutralize executable tag syntax; this is not a guarantee against text-conditioned delivery or provider normalization. No automatic laughter, breathing or sound effects are added. Tag response and the actual voice still require real auditions.
+
+The independent UTC ledger **`.data/tts-budget-elevenlabs.json`** reserves the outgoing script's UTF-16 length, including trusted tags, before fetch. This is a local conservative allowance, **not** ElevenLabs's actual character/credit billing or account balance. Both provider ledgers must survive deployments and switching; failed/canceled requests are not refunded, and there are no automatic paid retries. Existing authentication, rate/concurrency limits, bounded lookahead and lightweight fallback apply to both providers.
+
+The server bounds JSON/audio size and validates complete 44.1 kHz MP3 frames; the browser decodes mono/stereo, checks each sample and downmixes stereo to a bounded mono waveform. Silent/phase-canceling audio is rejected. Finite ordered character timestamps are transported separately from MiniMax's words and checked against decoded duration; these are **not phoneme/viseme alignment**. Real provider normalization, timestamp edge cases, encoder delay, Chinese youthful delivery, first-audio latency and long-turn voice consistency remain unverified.
+
+For a no-charge codec/UI check, pass a locally encoded 44.1 kHz mono/stereo MP3 of about 1.1 seconds to `node scripts/mock-voice-app.mjs /absolute/path/synthetic.mp3 elevenlabs`. It uses fake credentials, a synthetic fixed alignment, a temporary ledger and a fake upstream fetch; it never loads environment secrets or calls either real provider. The sound is your synthetic fixture, **not ElevenLabs speech**.
+
+The dev-only `/airi/scripts/cloud-codec-preview.html` additionally reports the actual browser-decoded rate/duration/RMS and character count. Its button refuses to call speech unless the loopback mock's health model is `MOCK-NOT-DEEPSEEK` and provider is `elevenlabs`; it is not a real-provider audition tool. See the [local preparation verification](docs/verification/2026-10-02-eleven-preparation.md) for codec, consent and regression evidence and their limits.
 
 The chat now has a bounded scrolling area rather than stretching the whole page with every exchange. The character and composer stay in view in desktop and tested narrow-window layouts. While at the bottom, streamed text follows automatically; scrolling up suspends following and a **回到最新** button appears when more text arrives. Sending your own message or clearing the chat returns to the latest exchange. Streaming callbacks use a reactive message reference so text updates immediately, independently of audio/player state changes. Settings and connection details are grouped into collapsible controls; voice errors and first-download progress remain visible.
 

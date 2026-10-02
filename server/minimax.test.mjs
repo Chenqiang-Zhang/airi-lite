@@ -115,6 +115,12 @@ test('accepts bounded optional ID3 tags and odd-byte MP3; rejects changed frame 
   assert.equal(tagged.length % 2, 1)
   const result = await collectMinimaxStream(stream(frames), { textLength: 3 })
   assert.equal(result.audio, tagged.toString('base64'))
+  const fakeHeader = Buffer.from(tagged)
+  fakeHeader[0] |= 0x80
+  const fakeTrailer = Buffer.concat([mp3, Buffer.from([0xd4, 0x41, 0x47]), Buffer.alloc(125)])
+  for (const invalid of [fakeHeader, fakeTrailer])
+    await assert.rejects(collectMinimaxStream(stream([{ ...chunk(invalid.toString('hex'), 2),
+      extra_info: { ...finalInfo, audio_size: invalid.length } }]), { textLength: 3 }))
   for (const change of [audio => { audio[1] = 0xf3 }, audio => { audio[1] = 0xfd },
     audio => { audio[2] = 0x90 }, audio => { audio[3] = 0 }]) {
     const audio = Buffer.from(mp3)

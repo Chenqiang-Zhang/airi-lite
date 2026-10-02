@@ -61,12 +61,13 @@ test('same-origin request preserves original Chinese/English text, delivery, acc
   assert.equal(init.redirect, 'error')
   assert.equal(init.cache, 'no-store')
   assert.deepEqual(init.headers, { 'Content-Type': 'application/json', 'X-Demo-Access-Code': 'Demo-2026_ABC!' })
-  assert.equal(init.body, JSON.stringify({ text: input.text, delivery: 'bright' }))
+  assert.equal(init.body, JSON.stringify({ text: input.text, delivery: 'bright', expectedProvider: 'minimax' }))
   assert.equal(init.signal, signal)
   assert.ok(result.samples instanceof Float32Array)
   assert.equal(result.samples.length, 3200)
   assert.equal(result.sampleRate, 32000)
   assert.deepEqual(result.words, payload().words)
+  assert.deepEqual(result.characters, [])
 })
 
 test('default route works without Vite env in Node, and optional access header is omitted', async () => {
@@ -78,7 +79,33 @@ test('default route works without Vite env in Node, and optional access header i
     } })
     assert.equal(call[0], '/api/speech')
     assert.deepEqual(call[1].headers, { 'Content-Type': 'application/json' })
-    assert.deepEqual(JSON.parse(call[1].body), { text: 'Hello world.', delivery: 'neutral' })
+    assert.deepEqual(JSON.parse(call[1].body), { text: 'Hello world.', delivery: 'neutral', expectedProvider: 'minimax' })
+  }
+})
+
+test('the expected provider guard defaults to MiniMax and preserves only an explicit known selection', async () => {
+  for (const expectedProvider of [undefined, 'minimax', 'elevenlabs']) {
+    let body
+    let calls = 0
+    await fetchCloudSpeech(options({ expectedProvider }), { fetch: async (_url, init) => {
+      calls++
+      body = JSON.parse(init.body)
+      return response()
+    } })
+    assert.equal(calls, 1)
+    assert.deepEqual(body, { text: options().text, delivery: 'bright', expectedProvider: expectedProvider ?? 'minimax' })
+    assert.ok(!('provider' in body), 'the guard must not become a provider-selection override')
+  }
+})
+
+test('unknown, coerced or empty expected provider values fail before any request', async () => {
+  for (const expectedProvider of ['ElevenLabs', 'unknown', '', ' elevenlabs ', null, 123, {}, ['elevenlabs']]) {
+    let calls = 0
+    await assert.rejects(fetchCloudSpeech(options({ expectedProvider }), { fetch: async () => {
+      calls++
+      return response()
+    } }), apiFailure('invalid_request'))
+    assert.equal(calls, 0)
   }
 })
 
@@ -97,6 +124,35 @@ test('base64 MP3 bytes are passed intact to the codec, without guessing PCM enco
   assert.equal(result.samples, audio.samples)
   assert.equal(result.sampleRate, 48000)
   assert.deepEqual(result.words, [])
+})
+
+test('44.1 kHz MP3 accepts bounded character alignment without turning it into words or visemes', async () => {
+  const characters = [
+    { text: '你', start: 0, end: 0.02 },
+    { text: ' ', start: 0.02, end: 0.02 },
+    { text: '𠮷', start: 0.02, end: 0.06 },
+    { text: '！', start: 0.06, end: 0.1 },
+  ]
+  const audio = decoded({ sampleRate: 44100 })
+  let calls = 0
+  const result = await fetchCloudSpeech(options({ expectedProvider: 'elevenlabs' }), {
+    fetch: async () => { calls++; return response(payload({ sampleRate: 44100, words: [], characters })) },
+    decodeAudio: async () => audio,
+  })
+  assert.equal(calls, 1)
+  assert.equal(result.samples, audio.samples)
+  assert.equal(result.sampleRate, 44100)
+  assert.deepEqual(result.words, [])
+  assert.deepEqual(result.characters, characters)
+  assert.ok(result.characters.every(character => !('viseme' in character)))
+})
+
+test('MiniMax clips remain compatible with missing or explicitly empty character metadata', async () => {
+  for (const characters of [undefined, []]) {
+    const result = await fetchCloudSpeech(options(), { fetch: async () => response(payload({ characters })) })
+    assert.deepEqual(result.words, payload().words)
+    assert.deepEqual(result.characters, [])
+  }
 })
 
 test('non-ASCII, whitespace, invisible or too-long access codes fail before fetch', async () => {
@@ -134,8 +190,13 @@ test('endpoint overrides cannot send the access code to another host or a traver
 })
 
 test('wrong format/rate, missing fields, malformed or empty JSON all reject safely', async () => {
-  for (const body of [payload({ format: 'pcm_s16le' }), payload({ sampleRate: 24000 }), payload({ sampleRate: '32000' }), payload({ words: undefined }), [], null, {}, payload({ audio: 123 })]) {
-    await assert.rejects(fetchCloudSpeech(options(), { fetch: async () => response(body) }), apiFailure('invalid_response'))
+  for (const body of [payload({ format: 'pcm_s16le' }), ...[24000, 48000, 96000, 44100.5, '32000', '44100', null, undefined].map(sampleRate => payload({ sampleRate })), payload({ words: undefined }), [], null, {}, payload({ audio: 123 })]) {
+    let decodes = 0
+    await assert.rejects(fetchCloudSpeech(options(), {
+      fetch: async () => response(body),
+      decodeAudio: async () => { decodes++; return decoded() },
+    }), apiFailure('invalid_response'))
+    assert.equal(decodes, 0)
   }
   for (const body of ['', 'not json provider-token=private', '{"audio":"secret"', Uint8Array.of(0xff)]) {
     await assert.rejects(fetchCloudSpeech(options(), { fetch: async () => new Response(body) }), apiFailure('invalid_response'))
@@ -156,12 +217,14 @@ test('encoded MP3 must be nonempty and strictly base64 before the codec is invok
 test('compressed audio beyond 2 MiB rejects before decoding, even if JSON fits its response limit', async () => {
   const audio = Buffer.alloc(AUDIO_LIMIT + 2, 127).toString('base64')
   assert.ok(JSON.stringify(payload({ audio })).length < RESPONSE_LIMIT)
-  let decodes = 0
-  await assert.rejects(fetchCloudSpeech(options(), {
-    fetch: async () => response(payload({ audio, words: [] })),
-    decodeAudio: async () => { decodes++; return decoded() },
-  }), apiFailure('invalid_response'))
-  assert.equal(decodes, 0)
+  for (const sampleRate of [32000, 44100]) {
+    let decodes = 0
+    await assert.rejects(fetchCloudSpeech(options(), {
+      fetch: async () => response(payload({ audio, sampleRate, words: [], characters: [] })),
+      decodeAudio: async () => { decodes++; return decoded() },
+    }), apiFailure('invalid_response'))
+    assert.equal(decodes, 0)
+  }
 })
 
 test('decoded samples/rate/duration must be finite, nonempty, audible and bounded to 30 seconds', async () => {
@@ -269,9 +332,66 @@ test('invalid subtitle timestamps/text/order reject instead of being moved or fa
   }
 })
 
+test('character metadata rejects malformed, non-scalar, unordered, overlapping or oversized alignment before decoding', async () => {
+  for (const characters of [
+    null, {}, '你好',
+    [{ text: '', start: 0, end: 0.01 }],
+    [{ text: '你好', start: 0, end: 0.01 }],
+    [{ text: '𠮷你', start: 0, end: 0.01 }],
+    [{ text: '\uD800', start: 0, end: 0.01 }],
+    [{ text: '\uDC00', start: 0, end: 0.01 }],
+    [{ text: '你', start: -0.01, end: 0.01 }],
+    [{ text: '你', start: 0.02, end: 0.01 }],
+    [{ text: '你', start: '0', end: 0.01 }],
+    [{ text: '你', start: NaN, end: 0.01 }],
+    [{ text: '你', start: 0, end: Infinity }],
+    [{ text: '你', start: 30.01, end: 30.02 }],
+    [{ text: '你', start: 0, end: 30.051 }],
+    [{ text: '后', start: 0.04, end: 0.08 }, { text: '前', start: 0, end: 0.04 }],
+    [{ text: '你', start: 0, end: 0.06 }, { text: '好', start: 0.05, end: 0.08 }],
+    Array.from({ length: 1025 }, () => ({ text: '你', start: 0, end: 0 })),
+  ]) {
+    let decodes = 0
+    await assert.rejects(fetchCloudSpeech(options(), {
+      fetch: async () => response(payload({ sampleRate: 44100, words: [], characters })),
+      decodeAudio: async () => { decodes++; return decoded() },
+    }), apiFailure('invalid_response'))
+    assert.equal(decodes, 0)
+  }
+  const finitePayload = JSON.stringify(payload({ sampleRate: 44100, words: [], characters: [{ text: '你', start: 0, end: 0.01 }] }))
+  for (const body of [finitePayload.replace('"start":0', '"start":1e999'), finitePayload.replace('"end":0.01', '"end":1e999')]) {
+    let decodes = 0
+    await assert.rejects(fetchCloudSpeech(options(), {
+      fetch: async () => new Response(body),
+      decodeAudio: async () => { decodes++; return decoded() },
+    }), apiFailure('invalid_response'))
+    assert.equal(decodes, 0)
+  }
+})
+
+test('character bounds use actual decoded duration with only 50 ms of end rounding tolerance', async () => {
+  const audio = decoded({ sampleRate: 48000, length: 4800 })
+  for (const character of [{ text: '你', start: 0.101, end: 0.12 }, { text: '你', start: 0, end: 0.151 }]) {
+    await assert.rejects(fetchCloudSpeech(options(), {
+      fetch: async () => response(payload({ sampleRate: 44100, words: [], characters: [character] })),
+      decodeAudio: async () => audio,
+    }), apiFailure('invalid_response'))
+  }
+  const characters = [{ text: '你', start: 0, end: 0.149 }]
+  const result = await fetchCloudSpeech(options(), {
+    fetch: async () => response(payload({ sampleRate: 44100, words: [], characters })),
+    decodeAudio: async () => audio,
+  })
+  assert.equal(result.sampleRate, 48000)
+  assert.deepEqual(result.characters, characters)
+  const limit = Array.from({ length: 1024 }, () => ({ text: ' ', start: 0, end: 0 }))
+  const bounded = await fetchCloudSpeech(options(), { fetch: async () => response(payload({ sampleRate: 44100, words: [], characters: limit })) })
+  assert.equal(bounded.characters.length, 1024)
+})
+
 test('HTTP failures expose safe Chinese categories/status and never read or retry provider bodies', async () => {
   const secret = 'private_provider_key_debug_stack'
-  for (const [status, code] of [[401, 'unauthorized'], [403, 'unauthorized'], [429, 'rate_limited'], [503, 'unavailable'], [502, 'upstream'], [500, 'upstream'], [400, 'invalid_request']]) {
+  for (const [status, code] of [[401, 'unauthorized'], [403, 'unauthorized'], [409, 'provider_changed'], [429, 'rate_limited'], [503, 'unavailable'], [502, 'upstream'], [500, 'upstream'], [400, 'invalid_request']]) {
     let calls = 0
     let canceled = 0
     const stream = new ReadableStream({ cancel() { canceled++ } })
@@ -292,6 +412,29 @@ test('HTTP failures expose safe Chinese categories/status and never read or retr
     assert.ok(!String(error).includes(secret))
     return true
   })
+})
+
+test('HTTP 409 requires re-confirmation, cancels without reading the body, and never decodes or retries', async () => {
+  let calls = 0
+  let canceled = 0
+  let decodes = 0
+  await assert.rejects(fetchCloudSpeech(options({ expectedProvider: 'elevenlabs' }), {
+    fetch: async () => {
+      calls++
+      return { ok: false, status: 409, body: {
+        getReader() { assert.fail('provider-change error body must not be read') },
+        cancel() { canceled++; return new Promise(() => {}) },
+      } }
+    },
+    decodeAudio: async () => { decodes++; return decoded() },
+  }), error => {
+    apiFailure('provider_changed', 409)(error)
+    assert.match(error.message, /供应商已变化.*重新选择.*确认云端/)
+    return true
+  })
+  assert.equal(calls, 1)
+  assert.equal(canceled, 1)
+  assert.equal(decodes, 0)
 })
 
 test('fetch and streaming failures are redacted and do not retry', async () => {
@@ -387,8 +530,8 @@ async function withAudioContext(Context, run) {
   }
 }
 
-function audioBuffer(audio = decoded(), channels = 1) {
-  return { numberOfChannels: channels, sampleRate: audio.sampleRate, length: audio.samples.length, getChannelData: () => audio.samples }
+function audioBuffer(audio = decoded(), channels = 1, channelData) {
+  return { numberOfChannels: channels, sampleRate: audio.sampleRate, length: audio.samples.length, getChannelData: index => channelData ? channelData[index] : audio.samples }
 }
 
 test('missing native codec fails before fetching; abort takes priority and an injected codec still works', async () => {
@@ -459,8 +602,8 @@ test('native codec falls back to a device rate if a requested 32 kHz context is 
   })
 })
 
-test('native decode failure, nonmono data or out-of-bounds duration closes context and redacts errors', async () => {
-  for (const data of [new Error('private native codec error'), audioBuffer(decoded(), 2), audioBuffer(decoded({ length: 32000 * 30 + 1 }))]) {
+test('native decode failure, unsupported channel count or out-of-bounds duration closes context and redacts errors', async () => {
+  for (const data of [new Error('private native codec error'), audioBuffer(decoded(), 0), audioBuffer(decoded(), 3), audioBuffer(decoded({ length: 32000 * 30 + 1 }))]) {
     let closes = 0
     class Context {
       async decodeAudioData() { if (data instanceof Error) throw data; return data }
@@ -475,6 +618,75 @@ test('native decode failure, nonmono data or out-of-bounds duration closes conte
       assert.equal(closes, 1)
     })
   }
+})
+
+test('44.1 kHz native stereo decode uses actual rate and bounded mean downmix without playback', async () => {
+  const created = []
+  let closes = 0
+  const left = Float32Array.of(0.4, -0.6, 2, -2)
+  const right = Float32Array.of(0.2, -0.2, 2, -2)
+  const audio = decoded({ sampleRate: 48000, samples: left })
+  class Context {
+    constructor(config) { created.push(config) }
+    async decodeAudioData() { return audioBuffer(audio, 2, [left, right]) }
+    createBufferSource() { assert.fail('decoder must not start playback') }
+    async close() { closes++ }
+  }
+  await withAudioContext(Context, async () => {
+    const characters = [{ text: '你', start: 0, end: left.length / audio.sampleRate }]
+    const result = await requestCloudSpeech(options(), { fetch: async () => response(payload({ sampleRate: 44100, words: [], characters })) })
+    assert.equal(result.sampleRate, 48000)
+    assert.deepEqual([...result.samples], [...Float32Array.of(0.3, -0.4, 1, -1)])
+    assert.notEqual(result.samples, left)
+    assert.notEqual(result.samples, right)
+    assert.deepEqual(result.characters, characters)
+    assert.deepEqual(created, [{ sampleRate: 44100 }])
+    assert.equal(closes, 1)
+  })
+})
+
+test('stereo phase cancellation, nonfinite channels and malformed buffers reject without selecting an audible side', async () => {
+  const audio = decoded({ sampleRate: 44100, samples: Float32Array.of(0.4, -0.4) })
+  const buffers = [
+    audioBuffer(audio, 2, [audio.samples, Float32Array.of(-0.4, 0.4)]),
+    audioBuffer(audio, 2, [Float32Array.of(NaN, 0.4), audio.samples]),
+    audioBuffer(audio, 2, [audio.samples, Float32Array.of(Infinity, 0.4)]),
+    audioBuffer(audio, 2, [audio.samples, Float32Array.of(0.4)]),
+    audioBuffer(audio, 2, [audio.samples, [0.4, -0.4]]),
+    audioBuffer(audio, 1, [[0.4, -0.4]]),
+    { ...audioBuffer(audio), length: 1.5 },
+    { ...audioBuffer(audio), length: NaN },
+  ]
+  for (const buffer of buffers) {
+    let closes = 0
+    let calls = 0
+    class Context {
+      async decodeAudioData() { return buffer }
+      createBufferSource() { assert.fail('invalid audio must not play') }
+      async close() { closes++ }
+    }
+    await withAudioContext(Context, async () => {
+      await assert.rejects(requestCloudSpeech(options(), { fetch: async () => { calls++; return response(payload({ sampleRate: 44100, words: [], characters: [] })) } }), apiFailure('invalid_response'))
+      assert.equal(calls, 1)
+      assert.equal(closes, 1)
+    })
+  }
+})
+
+test('44.1 kHz stereo duration is bounded before copying or downmixing channel buffers', async () => {
+  let reads = 0
+  let closes = 0
+  class Context {
+    async decodeAudioData() {
+      return { numberOfChannels: 2, sampleRate: 44100, length: 44100 * 30 + 1, getChannelData() { reads++; assert.fail('oversized channels must not be copied') } }
+    }
+    async close() { closes++ }
+  }
+  await withAudioContext(Context, async () => {
+    await assert.rejects(requestCloudSpeech(options(), { fetch: async () => response(payload({ sampleRate: 44100, words: [], characters: [] })) }), apiFailure('invalid_response'))
+    assert.equal(reads, 0)
+    assert.equal(closes, 1)
+  })
 })
 
 test('canceling a stalled native decode closes context promptly and never starts late audio', async () => {
@@ -495,5 +707,38 @@ test('canceling a stalled native decode closes context promptly and never starts
     resolveDecode(audioBuffer())
     await settle()
     assert.equal(closes, 1)
+  })
+})
+
+test('canceling 44.1 kHz aligned stereo decoding ignores late buffers and alignment without retrying', async () => {
+  const controller = new AbortController()
+  let resolveDecode
+  let reads = 0
+  let closes = 0
+  let calls = 0
+  class Context {
+    async decodeAudioData() { return new Promise(resolve => { resolveDecode = resolve }) }
+    createBufferSource() { assert.fail('canceled decoder must not start playback') }
+    async close() { closes++ }
+  }
+  await withAudioContext(Context, async () => {
+    const characters = [{ text: '你', start: 0, end: 0.1 }]
+    const request = requestCloudSpeech(options({ signal: controller.signal }), { fetch: async () => {
+      calls++
+      return response(payload({ sampleRate: 44100, words: [], characters }))
+    } })
+    await settle()
+    controller.abort(new Error('private aligned speech cancellation'))
+    await assert.rejects(request, error => {
+      assert.equal(error.name, 'AbortError')
+      assert.ok(!error.stack.includes('private aligned speech cancellation'))
+      return true
+    })
+    const audio = decoded({ sampleRate: 44100 })
+    resolveDecode({ ...audioBuffer(audio, 2), getChannelData() { reads++; return audio.samples } })
+    await settle()
+    assert.equal(reads, 0)
+    assert.equal(closes, 1)
+    assert.equal(calls, 1)
   })
 })

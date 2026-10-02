@@ -9,15 +9,26 @@ export interface SpeechWord {
   end: number
 }
 
+// Character alignment is clip-relative caption metadata, not a viseme track.
+export interface SpeechCharacter {
+  text: string
+  start: number
+  end: number
+}
+
 export interface CloudSpeechClip {
   samples: Float32Array
   sampleRate: number
   words: SpeechWord[]
+  characters?: SpeechCharacter[]
 }
 
 export interface CloudSpeechOptions {
   text: string
   delivery: Delivery
+  // Match the explicitly confirmed service; this cannot select the server's
+  // provider. Existing callers default to MiniMax rather than a new paid one.
+  expectedProvider?: 'minimax' | 'elevenlabs'
   accessCode?: string
   signal?: AbortSignal
   // A root-relative proxy route, never a provider URL. This also lets Node
@@ -37,7 +48,7 @@ export interface CloudSpeechDependencies {
 
 export type SpeechApiErrorCode = 'invalid_request' | 'invalid_access_code'
   | 'unauthorized' | 'rate_limited' | 'unavailable' | 'upstream'
-  | 'invalid_response' | 'network'
+  | 'provider_changed' | 'invalid_response' | 'network'
 
 const MESSAGES: Record<SpeechApiErrorCode, string> = {
   invalid_request: '这段文字无法生成语音，请使用不超过 360 字符的可朗读正文。',
@@ -45,6 +56,7 @@ const MESSAGES: Record<SpeechApiErrorCode, string> = {
   unauthorized: '语音服务需要有效体验码，请检查体验码后再试。',
   rate_limited: '语音额度已用完或请求过于频繁，请稍后再试。',
   unavailable: '云端语音暂时不可用或尚未启用，请稍后再试。',
+  provider_changed: '云端语音供应商已变化，请重新选择并确认云端模式。',
   upstream: '语音服务暂时无法生成音频，请稍后再试。',
   invalid_response: '语音服务返回了无法使用的音频或字幕，请稍后再试。',
   network: '无法连接语音服务，请检查网络后再试。',
@@ -64,12 +76,13 @@ export class SpeechApiError extends Error {
   }
 }
 
-const SAMPLE_RATE = 32000
+const DEFAULT_SAMPLE_RATE = 32000
 const MAX_TEXT_LENGTH = 360
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 const MAX_AUDIO_BYTES = 2 * 1024 * 1024
 const MAX_BASE64_LENGTH = Math.ceil(MAX_AUDIO_BYTES / 3) * 4
 const MAX_WORDS = 1024
+const MAX_CHARACTERS = 1024
 const MAX_DURATION_SECONDS = 30
 const MIN_RMS = 0.0001
 const TIME_TOLERANCE = 0.05
@@ -193,27 +206,47 @@ async function withAbort<T>(operation: Promise<T>, signal?: AbortSignal): Promis
   })
 }
 
-async function decodeWithAudioContext(encoded: ArrayBuffer, signal?: AbortSignal): Promise<DecodedSpeechAudio> {
+async function decodeWithAudioContext(encoded: ArrayBuffer, signal?: AbortSignal, requestedSampleRate = DEFAULT_SAMPLE_RATE): Promise<DecodedSpeechAudio> {
   throwIfAborted(signal)
   if (typeof AudioContext === 'undefined')
     throw new SpeechApiError('invalid_response')
   let context: AudioContext | null = null
   try {
     try {
-      context = new AudioContext({ sampleRate: SAMPLE_RATE })
+      context = new AudioContext({ sampleRate: requestedSampleRate })
     }
     catch {
       // Some devices only accept their native sample rate. AudioBuffer reports
-      // the real decoded rate; never relabel those samples as 32 kHz.
+      // the real decoded rate; never relabel those samples with a wire hint.
       context = new AudioContext()
     }
     const decoded = await withAbort(context.decodeAudioData(encoded), signal)
     throwIfAborted(signal)
-    if (decoded.numberOfChannels !== 1 || !Number.isInteger(decoded.sampleRate)
+    if ((decoded.numberOfChannels !== 1 && decoded.numberOfChannels !== 2) || !Number.isInteger(decoded.sampleRate)
       || decoded.sampleRate < 8000 || decoded.sampleRate > 96000
-      || !decoded.length || decoded.length / decoded.sampleRate > MAX_DURATION_SECONDS)
+      || !Number.isInteger(decoded.length) || decoded.length <= 0
+      || decoded.length / decoded.sampleRate > MAX_DURATION_SECONDS)
       throw new SpeechApiError('invalid_response')
-    return { samples: decoded.getChannelData(0).slice(), sampleRate: decoded.sampleRate }
+    const left = decoded.getChannelData(0)
+    if (!(left instanceof Float32Array) || left.length !== decoded.length)
+      throw new SpeechApiError('invalid_response')
+    if (decoded.numberOfChannels === 1)
+      return { samples: left.slice(), sampleRate: decoded.sampleRate }
+
+    const right = decoded.getChannelData(1)
+    if (!(right instanceof Float32Array) || right.length !== decoded.length)
+      throw new SpeechApiError('invalid_response')
+    const samples = new Float32Array(decoded.length)
+    for (let index = 0; index < samples.length; index++) {
+      const leftSample = left[index]!
+      const rightSample = right[index]!
+      if (!Number.isFinite(leftSample) || !Number.isFinite(rightSample))
+        throw new SpeechApiError('invalid_response')
+      // Bounded mean, not a louder-channel selector. Opposite phases may
+      // cancel and honestly fail the same audible-RMS gate as mono silence.
+      samples[index] = Math.max(-1, Math.min(1, (leftSample + rightSample) / 2))
+    }
+    return { samples, sampleRate: decoded.sampleRate }
   }
   finally {
     // Decoding never creates a source or starts playback. Closing here also
@@ -263,11 +296,40 @@ function decodeWords(value: unknown, duration: number): SpeechWord[] {
   return words
 }
 
+function decodeCharacters(value: unknown, duration: number): SpeechCharacter[] {
+  if (value === undefined)
+    return []
+  if (!Array.isArray(value) || value.length > MAX_CHARACTERS)
+    throw new SpeechApiError('invalid_response')
+
+  const characters: SpeechCharacter[] = []
+  let previousEnd = 0
+  for (const character of value) {
+    if (!record(character) || typeof character.text !== 'string'
+      || character.text.length < 1 || character.text.length > 2)
+      throw new SpeechApiError('invalid_response')
+    const scalar = character.text.codePointAt(0)!
+    // Spaces/punctuation and zero-duration characters are valid alignment.
+    // A surrogate half or several characters is not one Unicode scalar.
+    if ((scalar >= 0xD800 && scalar <= 0xDFFF) || String.fromCodePoint(scalar) !== character.text
+      || typeof character.start !== 'number' || !Number.isFinite(character.start)
+      || typeof character.end !== 'number' || !Number.isFinite(character.end)
+      || character.start < previousEnd || character.end < character.start
+      || character.start > duration || character.end > duration + TIME_TOLERANCE)
+      throw new SpeechApiError('invalid_response')
+    previousEnd = character.end
+    characters.push({ text: character.text, start: character.start, end: character.end })
+  }
+  return characters
+}
+
 function httpError(status: number): SpeechApiError {
   if (status === 401 || status === 403)
     return new SpeechApiError('unauthorized', status)
   if (status === 429)
     return new SpeechApiError('rate_limited', status)
+  if (status === 409)
+    return new SpeechApiError('provider_changed', status)
   if (status === 503)
     return new SpeechApiError('unavailable', status)
   if (status === 400)
@@ -280,6 +342,9 @@ export async function fetchCloudSpeech(
   dependencies: CloudSpeechDependencies = {},
 ): Promise<CloudSpeechClip> {
   throwIfAborted(options.signal)
+  const expectedProvider = options.expectedProvider === undefined ? 'minimax' : options.expectedProvider
+  if (expectedProvider !== 'minimax' && expectedProvider !== 'elevenlabs')
+    throw new SpeechApiError('invalid_request')
   if (typeof options.text !== 'string' || options.text.length > MAX_TEXT_LENGTH
     || !hasSpokenContent(options.text) || !DELIVERIES.includes(options.delivery))
     throw new SpeechApiError('invalid_request')
@@ -304,7 +369,7 @@ export async function fetchCloudSpeech(
         'Content-Type': 'application/json',
         ...(options.accessCode ? { 'X-Demo-Access-Code': options.accessCode } : {}),
       },
-      body: JSON.stringify({ text: options.text, delivery: options.delivery }),
+      body: JSON.stringify({ text: options.text, delivery: options.delivery, expectedProvider }),
       signal: options.signal,
     })
   }
@@ -325,19 +390,25 @@ export async function fetchCloudSpeech(
   try {
     const payload = await readBoundedJson(response, options.signal)
     throwIfAborted(options.signal)
-    if (!record(payload) || payload.format !== 'mp3' || payload.sampleRate !== SAMPLE_RATE)
+    if (!record(payload) || payload.format !== 'mp3'
+      || (payload.sampleRate !== 32000 && payload.sampleRate !== 44100))
       throw new SpeechApiError('invalid_response')
+    const requestedSampleRate = payload.sampleRate
     const encoded = decodeBase64(payload.audio)
     // Validate structure and global time bounds before asking a browser codec
     // to allocate audio buffers, then check against the actual decoded clip.
     const words = decodeWords(payload.words, MAX_DURATION_SECONDS)
+    const characters = decodeCharacters(payload.characters, MAX_DURATION_SECONDS)
     throwIfAborted(options.signal)
-    const decoded = await withAbort((dependencies.decodeAudio ?? decodeWithAudioContext)(encoded, options.signal), options.signal)
+    const decodeAudio = dependencies.decodeAudio
+      ?? ((audio: ArrayBuffer, signal?: AbortSignal) => decodeWithAudioContext(audio, signal, requestedSampleRate))
+    const decoded = await withAbort(decodeAudio(encoded, options.signal), options.signal)
     throwIfAborted(options.signal)
     const { samples, sampleRate } = validateDecodedAudio(decoded)
     decodeWords(words, samples.length / sampleRate)
+    decodeCharacters(characters, samples.length / sampleRate)
     throwIfAborted(options.signal)
-    return { samples, sampleRate, words }
+    return { samples, sampleRate, words, characters }
   }
   catch (error) {
     if (options.signal?.aborted || isAbortError(error))

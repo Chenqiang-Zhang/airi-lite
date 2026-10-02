@@ -1,3 +1,5 @@
+import { SpeechProviderError } from './speech-error.mjs'
+
 const MODELS = new Set(['speech-2.8-hd', 'speech-2.8-turbo'])
 const ENDPOINTS = { cn: 'https://api.minimax.cn/v1/t2a_v2' }
 export const SPEECH_SAMPLE_RATE = 32_000
@@ -8,12 +10,7 @@ const MAX_FRAME_BYTES = 4_500_000
 const MAX_STREAM_EVENTS = 2_048
 const MAX_WORDS = 720
 
-export class MinimaxSpeechError extends Error {
-  constructor(code = 'TTS_UPSTREAM_INVALID') {
-    super(code)
-    this.code = code
-  }
-}
+export class MinimaxSpeechError extends SpeechProviderError {}
 
 export function readMinimaxConfig(env = process.env) {
   const selectedModel = env.MINIMAX_TTS_MODEL?.trim() || 'speech-2.8-turbo'
@@ -277,7 +274,7 @@ function validTime(value) {
 function validateMp3(audio) {
   let offset = 0
   // Optional ID3v2 header. The size is sync-safe; never treat the tag as audio.
-  if (audio.subarray(0, 3).toString('ascii') === 'ID3') {
+  if (audio.subarray(0, 3).equals(Buffer.from('ID3'))) {
     if (audio.length < 10 || [6, 7, 8, 9].some(index => audio[index] > 0x7f))
       throw new MinimaxSpeechError()
     offset = 10 + (audio[6] << 21 | audio[7] << 14 | audio[8] << 7 | audio[9])
@@ -287,7 +284,7 @@ function validateMp3(audio) {
   let frames = 0
   while (offset < audio.length) {
     // Optional fixed-length ID3v1 tag after the final frame.
-    if (audio.length - offset === 128 && audio.subarray(offset, offset + 3).toString('ascii') === 'TAG')
+    if (audio.length - offset === 128 && audio.subarray(offset, offset + 3).equals(Buffer.from('TAG')))
       break
     if (offset + 4 > audio.length || audio[offset] !== 0xff || (audio[offset + 1] & 0xe0) !== 0xe0)
       throw new MinimaxSpeechError()

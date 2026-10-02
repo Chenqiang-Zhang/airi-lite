@@ -8,6 +8,8 @@ import { setImmediate } from 'node:timers/promises'
 import test from 'node:test'
 
 import { readMinimaxConfig } from './minimax.mjs'
+import { buildElevenLabsRequest, readElevenLabsConfig } from './elevenlabs.mjs'
+import { readSpeechConfig } from './speech-provider.mjs'
 import { createSpeechHandler, createSpeechRateLimiter, normaliseSpeechRequest } from './speech.mjs'
 import { createTtsBudget } from './tts-budget.mjs'
 
@@ -215,4 +217,110 @@ test('timeout aborts upstream; upstream and filesystem errors never echo secrets
     assert.equal(response.body.includes('test-private-voice'), false)
     assert.equal(response.body.includes(payload.text), false)
   }
+})
+
+const elevenEnvironment = { TTS_PROVIDER: 'elevenlabs', ELEVENLABS_TTS_ENABLED: '1',
+  ELEVENLABS_API_KEY: 'synthetic-eleven-key', ELEVENLABS_VOICE_ID: 'mockOnlyVoice01234567',
+  ELEVENLABS_TTS_DAILY_CHAR_LIMIT: '1000', ELEVENLABS_TTS_MODEL: 'eleven_v4' }
+
+function elevenAudioResponse() {
+  // Structural protocol fixture, NOT decoded or real ElevenLabs speech.
+  const mp3 = Buffer.alloc(417)
+  Buffer.from([0xff, 0xfb, 0x90, 0xc0]).copy(mp3)
+  return new Response(JSON.stringify({ audio_base64: mp3.toString('base64'),
+    alignment: { characters: ['你'], character_start_times_seconds: [0], character_end_times_seconds: [0.02] },
+    voice_segments: [{ voice_id: elevenEnvironment.ELEVENLABS_VOICE_ID, start_time_seconds: 0,
+      end_time_seconds: 0.02, character_start_index: 0, character_end_index: 1, dialogue_input_index: 0 }] }),
+  { headers: { 'content-type': 'application/json' } })
+}
+
+test('provider selection defaults compatibly and unknown selectors never fall back to paid MiniMax', async () => {
+  assert.equal(readSpeechConfig({}).provider, 'minimax')
+  assert.equal(readSpeechConfig(elevenEnvironment).provider, 'elevenlabs')
+  for (const invalid of ['ElevenLabs', 'unknown', 'https://attacker.invalid']) {
+    const selected = readSpeechConfig({ ...elevenEnvironment, TTS_PROVIDER: invalid,
+      MINIMAX_TTS_ENABLED: '1', MINIMAX_API_KEY: 'also-configured', MINIMAX_VOICE_ID: 'voice',
+      MINIMAX_TTS_DAILY_CHAR_LIMIT: '1000' })
+    let calls = 0
+    const handler = create({ config: selected, budget: { reserve: async () => { calls++ } },
+      fetchImpl: async () => { calls++ } })
+    assert.deepEqual(handler.health(), { configured: false, provider: 'unavailable', model: '' })
+    assert.equal((await run(handler)).status, 503)
+    assert.equal(calls, 0)
+  }
+})
+
+test('Eleven handler reserves the actual trusted-prefix script before fetch and exposes no identity', async () => {
+  const selected = readElevenLabsConfig(elevenEnvironment)
+  const speechRequest = { text: '[shouts]你好', delivery: 'bright', expectedProvider: 'elevenlabs' }
+  const upstreamText = buildElevenLabsRequest(selected, speechRequest).inputs[0].text
+  const order = []
+  const handler = create({ config: selected,
+    budget: { reserve: async characters => order.push(['reserve', characters]) },
+    fetchImpl: async (url, options) => {
+      order.push(['fetch'])
+      assert.equal(JSON.parse(options.body).inputs[0].text, upstreamText)
+      assert.equal(options.redirect, 'error')
+      return elevenAudioResponse()
+    } })
+  assert.deepEqual(handler.health(), { configured: true, provider: 'elevenlabs', model: 'eleven_v4' })
+  const response = await run(handler, request(JSON.stringify(speechRequest)))
+  assert.equal(response.status, 200)
+  assert.deepEqual(order, [['reserve', upstreamText.length], ['fetch']])
+  const body = JSON.parse(response.body)
+  assert.equal(body.sampleRate, 44100)
+  assert.deepEqual(body.words, [])
+  assert.deepEqual(body.characters, [{ text: '你', start: 0, end: 0.02 }])
+  assert.equal(response.body.includes(elevenEnvironment.ELEVENLABS_VOICE_ID), false)
+  assert.equal(response.body.includes(elevenEnvironment.ELEVENLABS_API_KEY), false)
+})
+
+test('default per-provider ledgers remain separate and switching back retains earlier reservations', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'airi-provider-ledger-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const selected = readSpeechConfig(elevenEnvironment)
+  const one = { text: '你好', delivery: 'bright', expectedProvider: 'elevenlabs' }
+  const reserved = buildElevenLabsRequest(selected, one).inputs[0].text.length
+  const mini = createSpeechHandler({ rootDirectory: directory, config, fetchImpl: async () => audioResponse() })
+  const eleven = createSpeechHandler({ rootDirectory: directory, config: { ...selected, dailyLimit: reserved },
+    fetchImpl: async () => elevenAudioResponse() })
+  assert.equal((await run(mini)).status, 200)
+  assert.equal((await run(eleven, request(JSON.stringify(one)))).status, 200)
+  assert.equal(JSON.parse(await readFile(join(directory, '.data', 'tts-budget.json'), 'utf8')).reservedCharacters,
+    2 * payload.text.length)
+  assert.equal(JSON.parse(await readFile(join(directory, '.data', 'tts-budget-elevenlabs.json'), 'utf8')).reservedCharacters,
+    reserved)
+  let calls = 0
+  const restarted = createSpeechHandler({ rootDirectory: directory, config: { ...selected, dailyLimit: reserved },
+    fetchImpl: async () => { calls++ } })
+  assert.equal((await run(restarted, request(JSON.stringify(one)))).status, 429)
+  assert.equal(calls, 0)
+  assert.equal((await run(mini)).status, 200)
+})
+
+test('Eleven access, malformed request, unsupported model and disabled config do not reserve', async () => {
+  let calls = 0
+  const options = { config: readSpeechConfig(elevenEnvironment), budget: { reserve: async () => { calls++ } },
+    fetchImpl: async () => { calls++ } }
+  assert.equal((await run(create(options), request(undefined, { 'x-demo-access-code': 'wrong' }))).status, 401)
+  assert.equal((await run(create(options), request(JSON.stringify({ ...payload, voice_id: 'override' })))).status, 400)
+  for (const selected of [readSpeechConfig({ ...elevenEnvironment, ELEVENLABS_TTS_ENABLED: '0' }),
+    { ...options.config, configured: true, model: 'eleven_v4_turbo' }])
+    assert.equal((await run(create({ ...options, config: selected }))).status, 503)
+  assert.equal(calls, 0)
+})
+
+test('provider guard rejects legacy/different-provider requests before spending, never selects another vendor', async () => {
+  let calls = 0
+  const options = { budget: { reserve: async () => { calls++ } }, fetchImpl: async () => { calls++ } }
+  const eleven = create({ ...options, config: readSpeechConfig(elevenEnvironment) })
+  for (const guarded of [payload, { ...payload, expectedProvider: 'minimax' }]) {
+    const response = await run(eleven, request(JSON.stringify(guarded)))
+    assert.equal(response.status, 409)
+    assert.equal(JSON.parse(response.body).code, 'TTS_PROVIDER_CHANGED')
+  }
+  assert.equal((await run(create(options), request(JSON.stringify({ ...payload, expectedProvider: 'elevenlabs' })))).status, 409)
+  for (const expectedProvider of ['unknown', null, '', 'eleven_v4', { provider: 'minimax' }])
+    assert.equal((await run(eleven, request(JSON.stringify({ ...payload, expectedProvider })))).status, 400)
+  assert.equal(calls, 0)
 })

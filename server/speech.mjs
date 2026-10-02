@@ -1,6 +1,7 @@
 import { join } from 'node:path'
 
-import { MinimaxSpeechError, readMinimaxConfig, speechHealth, synthesiseMinimax } from './minimax.mjs'
+import { SpeechProviderError } from './speech-error.mjs'
+import { readSpeechConfig, resolveSpeechProvider } from './speech-provider.mjs'
 import { createTtsBudget, TtsBudgetError } from './tts-budget.mjs'
 
 const DELIVERIES = new Set(['neutral', 'soft', 'bright', 'curious'])
@@ -14,18 +15,21 @@ const MESSAGES = {
   TTS_DAILY_LIMIT: '今日云端语音预留额度已用尽。',
   TTS_BUDGET_UNAVAILABLE: '语音额度记录不可用，云端合成已停止。',
   TTS_TIMEOUT: '云端语音合成超时，请稍后再试。',
+  TTS_PROVIDER_CHANGED: '云端供应商已变更，请刷新并重新确认语音设置。',
   TTS_UPSTREAM_FAILED: '云端语音服务请求失败。',
   TTS_UPSTREAM_INVALID: '云端语音响应不完整或格式无效。',
 }
 
 export function normaliseSpeechRequest(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-    || Object.keys(value).some(key => key !== 'text' && key !== 'delivery')
+    || Object.keys(value).some(key => !['text', 'delivery', 'expectedProvider'].includes(key))
     || typeof value.text !== 'string' || !value.text.trim() || value.text.length > 360
     || !value.text.isWellFormed() || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.text)
-    || !DELIVERIES.has(value.delivery))
-    throw new MinimaxSpeechError('TTS_INVALID_REQUEST')
-  return { text: value.text, delivery: value.delivery }
+    || !DELIVERIES.has(value.delivery)
+    || (Object.hasOwn(value, 'expectedProvider') && !['minimax', 'elevenlabs'].includes(value.expectedProvider)))
+    throw new SpeechProviderError('TTS_INVALID_REQUEST')
+  return { text: value.text, delivery: value.delivery,
+    ...(Object.hasOwn(value, 'expectedProvider') ? { expectedProvider: value.expectedProvider } : {}) }
 }
 
 export function createSpeechRateLimiter({ now = Date.now } = {}) {
@@ -51,26 +55,30 @@ export function createSpeechRateLimiter({ now = Date.now } = {}) {
 
 export function createSpeechHandler({
   rootDirectory,
-  config = readMinimaxConfig(),
+  config = readSpeechConfig(),
   isValidCode = () => true,
   getClientIp = request => request.socket.remoteAddress ?? 'unknown',
-  budget = createTtsBudget({ path: join(rootDirectory, '.data', 'tts-budget.json'), dailyLimit: config.dailyLimit }),
+  budget,
   fetchImpl = fetch,
   now = Date.now,
   timeoutMs = 30_000,
 } = {}) {
+  const provider = resolveSpeechProvider(config)
+  const selectedBudget = budget ?? createTtsBudget({
+    path: join(rootDirectory, '.data', provider.ledgerFilename), dailyLimit: config.dailyLimit,
+  })
   const acceptRate = createSpeechRateLimiter({ now })
   let active = 0
   return {
-    health: () => speechHealth(config),
+    health: () => ({ configured: provider.configured, provider: provider.provider, model: provider.model }),
     async handle(request, response) {
       if (!acceptRate(getClientIp(request)))
         return sendError(response, 429, 'TTS_RATE_LIMIT')
       // Reuses the server's timingSafeEqual check; never accept a client token
-      // for MiniMax. Only this backend sets the provider Authorization header.
+      // for any speech provider. Only this backend sets provider credentials.
       if (!isValidCode(request.headers['x-demo-access-code']))
         return sendError(response, 401, 'TTS_UNAUTHORIZED')
-      if (!config.configured)
+      if (!provider.configured)
         return sendError(response, 503, 'TTS_NOT_CONFIGURED')
       if (active >= 4)
         return sendError(response, 503, 'TTS_BUSY')
@@ -86,11 +94,16 @@ export function createSpeechHandler({
       request.once('aborted', close)
       try {
         const speechRequest = normaliseSpeechRequest(await readBoundedJson(request, signal))
-        // Count every synthesized character, including any explicitly supplied
-        // text tags. No automatic tags are added. Reserve before starting fetch.
-        await budget.reserve(2 * speechRequest.text.length, signal)
+        // Legacy clients mean MiniMax, not "whichever paid provider is current".
+        // This only compares identity; it cannot select or override the server.
+        if ((speechRequest.expectedProvider ?? 'minimax') !== provider.provider)
+          throw new SpeechProviderError('TTS_PROVIDER_CHANGED')
+        // Provider-specific local estimates are NOT the actual account balance.
+        // Eleven's estimate includes the trusted delivery prefix it will send.
+        // Keep separate durable ledgers; switching providers never resets one.
+        await selectedBudget.reserve(provider.estimateReservation(config, speechRequest), signal)
         signal.throwIfAborted()
-        const result = await synthesiseMinimax(config, speechRequest, { fetchImpl, signal })
+        const result = await provider.synthesise(config, speechRequest, { fetchImpl, signal })
         signal.throwIfAborted()
         sendJson(response, 200, result)
       }
@@ -99,10 +112,11 @@ export function createSpeechHandler({
           return
         // Provider/OS errors may contain credentials or submitted text. Never
         // relay error.message, upstream error JSON, trace IDs, or console logs.
-        const known = error instanceof MinimaxSpeechError || error instanceof TtsBudgetError
+        const known = error instanceof SpeechProviderError || error instanceof TtsBudgetError
         const code = timeout.signal.aborted ? 'TTS_TIMEOUT' : known && Object.hasOwn(MESSAGES, error.code)
           ? error.code : 'TTS_UPSTREAM_FAILED'
         const status = code === 'TTS_INVALID_REQUEST' ? 400
+          : code === 'TTS_PROVIDER_CHANGED' ? 409
           : code === 'TTS_DAILY_LIMIT' ? 429
             : code === 'TTS_BUDGET_UNAVAILABLE' ? 503
               : code === 'TTS_TIMEOUT' ? 504 : 502
@@ -120,7 +134,7 @@ export function createSpeechHandler({
 
 function readBoundedJson(request, signal) {
   if (!request.headers['content-type']?.toLowerCase().startsWith('application/json'))
-    return Promise.reject(new MinimaxSpeechError('TTS_INVALID_REQUEST'))
+    return Promise.reject(new SpeechProviderError('TTS_INVALID_REQUEST'))
   return new Promise((resolve, reject) => {
     const chunks = []
     let size = 0
@@ -136,7 +150,7 @@ function readBoundedJson(request, signal) {
       request.resume() // Drain without retaining any remaining oversized input.
       reject(error)
     }
-    const invalid = () => fail(new MinimaxSpeechError('TTS_INVALID_REQUEST'))
+    const invalid = () => fail(new SpeechProviderError('TTS_INVALID_REQUEST'))
     const abort = () => fail(signal.reason)
     const data = (chunk) => {
       size += Buffer.byteLength(chunk)
@@ -150,7 +164,7 @@ function readBoundedJson(request, signal) {
         resolve(JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(Buffer.concat(chunks))))
       }
       catch {
-        reject(new MinimaxSpeechError('TTS_INVALID_REQUEST'))
+        reject(new SpeechProviderError('TTS_INVALID_REQUEST'))
       }
     }
     request.on('data', data)
