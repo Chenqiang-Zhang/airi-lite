@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SpeechApiError } from './cloud-speech.ts'
 import { mouthAtTime, mouthFrames } from './mouth.ts'
-import { createSpeechController } from './speech.ts'
+import { BROWSER_SPEECH_START_DEADLINE_MS, createSpeechController } from './speech.ts'
 
 class AudioStub extends EventTarget {
   paused = true
@@ -10,10 +10,12 @@ class AudioStub extends EventTarget {
   src = ''
   ended = false
   error = null
+  readyState = 4
+  seeking = false
   loads = 0
   plays = 0
   get currentSrc() { return this.src }
-  load() { this.loads++; this.currentTime = 0; this.ended = false; this.error = null }
+  load() { this.loads++; this.currentTime = 0; this.ended = false; this.error = null; this.readyState = 4; this.seeking = false }
   removeAttribute(name) { if (name === 'src') this.src = '' }
   pause() {
     if (this.paused) return
@@ -57,7 +59,26 @@ const deferred = () => {
   return { promise, resolve, reject }
 }
 
-function fixture(loadModel, dependencies = {}) {
+function startDeadlineClock() {
+  const entries = []
+  return {
+    entries,
+    schedule(expired, milliseconds) {
+      const entry = { expired, milliseconds, active: true, cleared: 0 }
+      entries.push(entry)
+      return () => { entry.active = false; entry.cleared++ }
+    },
+    fire(index = 0, force = false) {
+      const entry = entries[index]
+      if (!entry || (!force && !entry.active)) return
+      entry.active = false
+      entry.expired()
+    },
+    active() { return entries.filter(entry => entry.active).length },
+  }
+}
+
+function fixture(loadModel, dependencies = {}, callbackOverrides = {}) {
   const previous = Object.fromEntries(['window', 'SpeechSynthesisUtterance', 'requestAnimationFrame', 'cancelAnimationFrame'].map(key => [key, globalThis[key]]))
   const utterances = []
   globalThis.window = { speechSynthesis: { speak: utterance => utterances.push(utterance), cancel() {} } }
@@ -76,15 +97,18 @@ function fixture(loadModel, dependencies = {}) {
     onPlaying: value => events.playing.push(value),
     onPreparing: value => events.preparing.push(value),
     onMouth: (open, form) => events.mouth.push([open, form]),
+    ...callbackOverrides,
   }, { loadModel, ...dependencies })
   return {
     audio, events, controller, utterances,
-    tick(time) {
+    tick(time, timestamp = performance.now()) {
       audio.currentTime = time
       const callbacks = [...frames.values()]
       frames.clear()
-      for (const callback of callbacks) callback()
+      for (const callback of callbacks) callback(timestamp)
     },
+    queuedFrames() { return frames.size },
+    frameCallbacks() { return [...frames.values()] },
     close() {
       controller.dispose()
       for (const [key, value] of Object.entries(previous)) {
@@ -93,6 +117,11 @@ function fixture(loadModel, dependencies = {}) {
       }
     },
   }
+}
+
+function stallAt(f, time = 0.12, baseline = 100_000) {
+  for (const elapsed of [0, 500, 1000, 1500]) f.tick(time, baseline + elapsed)
+  return baseline + 1500
 }
 
 test('sentence rates and expressions follow actual chunks, full replay and seeking', async () => {
@@ -159,6 +188,372 @@ test('a redundant streamed cue cannot add a local, cloud or browser utterance', 
   }
 })
 
+test('a native start deadline ends no-event speech in every engine and entry path without retrying or advancing', async () => {
+  for (const engine of ['browser', 'local', 'cloud']) {
+    for (const entry of ['stream', 'replay']) {
+      const clock = startDeadlineClock()
+      let loads = 0, cloudCalls = 0, nativeCancels = 0
+      const f = fixture(async () => { loads++; throw new Error('test: unavailable local voice') }, {
+        scheduleBrowserStartDeadline: clock.schedule,
+        async synthesizeCloud() { cloudCalls++; throw new Error('test: unavailable cloud voice') },
+      })
+      window.speechSynthesis.cancel = () => { nativeCancels++ }
+      try {
+        let speaking
+        if (entry === 'stream') {
+          const input = f.controller.beginStream('', 'bright', undefined, engine)
+          input.push('第一句。不能自动继续。')
+          input.finish()
+        }
+        else speaking = f.controller.speak('第一句。不能自动继续。', 'bright', undefined, [], engine)
+        await settle()
+        assert.equal(f.utterances.length, 1)
+        assert.equal(clock.active(), 1)
+        assert.equal(clock.entries[0].milliseconds, BROWSER_SPEECH_START_DEADLINE_MS)
+        assert.equal(f.events.preparing.at(-1), true)
+        const beforeCancel = nativeCancels
+        clock.fire()
+        await settle()
+        if (speaking) await speaking
+        assert.equal(clock.active(), 0)
+        assert.equal(nativeCancels, beforeCancel + 1)
+        assert.equal(f.utterances.length, 1)
+        assert.equal(loads, engine === 'local' ? 1 : 0)
+        assert.equal(cloudCalls, engine === 'cloud' ? 1 : 0)
+        assert.equal(f.events.preparing.at(-1), false)
+        assert.equal(f.events.playing.at(-1), false)
+        assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+        assert.deepEqual(f.events.delivery, [])
+        assert.match(f.events.problem.at(-1), /迟迟未确认开始/)
+        const stopped = structuredClone(f.events)
+        clock.fire(0, true)
+        for (const type of ['onstart', 'onpause', 'onresume', 'onend', 'onerror']) f.utterances[0][type]()
+        await settle()
+        assert.deepEqual(f.events, stopped, 'late events cannot overwrite the timeout or reopen the mouth')
+        assert.equal(nativeCancels, beforeCancel + 1)
+        assert.equal(f.utterances.length, 1)
+      }
+      finally { f.close() }
+    }
+  }
+})
+
+test('a real native start retires its deadline for long playback, pause and resume', async () => {
+  const clock = startDeadlineClock()
+  const f = fixture(undefined, { scheduleBrowserStartDeadline: clock.schedule })
+  let nativeCancels = 0
+  window.speechSynthesis.cancel = () => { nativeCancels++ }
+  try {
+    const speaking = f.controller.speak('可以正常读完的长句。', 'soft', undefined, [], 'browser')
+    await settle()
+    const utterance = f.utterances[0], beforeCancel = nativeCancels
+    utterance.onstart()
+    assert.equal(clock.active(), 0)
+    assert.equal(clock.entries[0].cleared, 1)
+    clock.fire(0, true)
+    assert.equal(f.events.playing.at(-1), true)
+    utterance.onpause()
+    clock.fire(0, true)
+    assert.equal(f.events.playing.at(-1), false)
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    utterance.onresume()
+    assert.equal(f.events.playing.at(-1), true)
+    assert.deepEqual(f.events.mouth.at(-1), [null, 0])
+    assert.equal(nativeCancels, beforeCancel)
+    assert.equal(clock.entries.length, 1, 'resume is not a new start deadline')
+    utterance.onend()
+    await speaking
+    assert.equal(clock.entries[0].cleared, 1)
+    assert.equal(f.events.problem.at(-1), '')
+  }
+  finally { f.close() }
+})
+
+test('synchronous native completion or speak failure clears the installed start deadline', async () => {
+  for (const scenario of ['start-end', 'end-without-start', 'error-without-start', 'speak-throws']) {
+    const clock = startDeadlineClock()
+    const f = fixture(undefined, { scheduleBrowserStartDeadline: clock.schedule })
+    window.speechSynthesis.speak = utterance => {
+      f.utterances.push(utterance)
+      assert.equal(clock.active(), 1, 'deadline is installed before native speak')
+      if (scenario === 'speak-throws') throw new Error('test: native speak rejected')
+      if (scenario === 'start-end') utterance.onstart()
+      if (scenario === 'error-without-start') utterance.onerror()
+      else utterance.onend()
+    }
+    try {
+      await f.controller.speak('同步测试。', 'bright', undefined, [], 'browser')
+      assert.equal(clock.active(), 0)
+      assert.equal(clock.entries[0].cleared, 1)
+      const before = structuredClone(f.events)
+      clock.fire(0, true)
+      assert.deepEqual(f.events, before)
+      assert.equal(f.events.preparing.at(-1), false)
+      if (scenario === 'start-end') assert.equal(f.events.problem.at(-1), '')
+      else if (scenario === 'end-without-start') assert.match(f.events.problem.at(-1), /未确认开始播放/)
+      else assert.match(f.events.problem.at(-1), /语音播放失败/)
+    }
+    finally { f.close() }
+  }
+})
+
+test('a synchronously expired native scheduler clears once without submitting an utterance or the next sentence', async () => {
+  let scheduled = 0, cleared = 0
+  const f = fixture(undefined, { scheduleBrowserStartDeadline(expired, milliseconds) {
+    scheduled++
+    assert.equal(milliseconds, BROWSER_SPEECH_START_DEADLINE_MS)
+    expired()
+    return () => { cleared++ }
+  } })
+  try {
+    await f.controller.speak('一句。不能继续。', 'neutral', undefined, [], 'browser')
+    assert.equal(scheduled, 1)
+    assert.equal(cleared, 1)
+    assert.equal(f.utterances.length, 0)
+    assert.equal(f.events.preparing.at(-1), false)
+    assert.equal(f.events.playing.at(-1), false)
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    assert.match(f.events.problem.at(-1), /停止等待/)
+    f.controller.cancel()
+    assert.equal(cleared, 1, 'completed ownership was already retired')
+  }
+  finally { f.close() }
+})
+
+test('a failed native scheduler releases preparation and keeps the specific speech failure without speaking', async () => {
+  let scheduled = 0
+  const f = fixture(undefined, { scheduleBrowserStartDeadline() {
+    scheduled++
+    throw new Error('test: scheduler unavailable')
+  } })
+  try {
+    await f.controller.speak('一句。不能继续。', 'neutral', undefined, [], 'browser')
+    assert.equal(scheduled, 1)
+    assert.equal(f.utterances.length, 0)
+    assert.equal(f.events.preparing.at(-1), false)
+    assert.equal(f.events.playing.at(-1), false)
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    assert.match(f.events.problem.at(-1), /浏览器语音播放失败/)
+    assert.doesNotMatch(f.events.problem.at(-1), /迟迟未确认开始/)
+  }
+  finally { f.close() }
+})
+
+test('cancel and dispose retire a pending native deadline, including an already-queued callback', async () => {
+  for (const operation of ['cancel', 'dispose']) {
+    const clock = startDeadlineClock()
+    const f = fixture(undefined, { scheduleBrowserStartDeadline: clock.schedule })
+    let nativeCancels = 0
+    window.speechSynthesis.cancel = () => { nativeCancels++ }
+    try {
+      const speaking = f.controller.speak('旧句。', 'bright', undefined, [], 'browser')
+      await settle()
+      f.controller[operation]()
+      await speaking
+      assert.equal(clock.active(), 0)
+      const stopped = structuredClone(f.events), beforeCancel = nativeCancels
+      clock.fire(0, true)
+      for (const type of ['onstart', 'onend', 'onerror', 'onpause', 'onresume']) f.utterances[0][type]()
+      assert.deepEqual(f.events, stopped)
+      assert.equal(nativeCancels, beforeCancel)
+    }
+    finally { f.close() }
+  }
+})
+
+test('a replaced native start cannot cancel or change the fresh turn through its stale deadline or events', async () => {
+  const clock = startDeadlineClock()
+  const f = fixture(undefined, { scheduleBrowserStartDeadline: clock.schedule })
+  let nativeCancels = 0
+  window.speechSynthesis.cancel = () => { nativeCancels++ }
+  try {
+    const old = f.controller.speak('旧句。', 'bright', undefined, [], 'browser')
+    await settle()
+    const fresh = f.controller.speak('新句。', 'soft', undefined, [], 'browser')
+    await old
+    await settle()
+    assert.equal(clock.active(), 1)
+    f.utterances[1].onstart()
+    const current = structuredClone(f.events), beforeCancel = nativeCancels
+    clock.fire(0, true)
+    for (const type of ['onstart', 'onend', 'onerror', 'onpause', 'onresume']) f.utterances[0][type]()
+    assert.deepEqual(f.events, current)
+    assert.equal(nativeCancels, beforeCancel)
+    f.utterances[1].onend()
+    await fresh
+    assert.deepEqual(f.events.delivery, ['soft'])
+  }
+  finally { f.close() }
+})
+
+test('native cancellation at the start deadline may synchronously end/error or throw without retaining ownership', async () => {
+  for (const behavior of ['old-events', 'throws']) {
+    const clock = startDeadlineClock()
+    const f = fixture(undefined, { scheduleBrowserStartDeadline: clock.schedule })
+    try {
+      const speaking = f.controller.speak('不返回事件的句子。', 'bright', undefined, [], 'browser')
+      await settle()
+      window.speechSynthesis.cancel = () => {
+        if (behavior === 'throws') throw new Error('test: native cancel unavailable')
+        f.utterances[0].onend()
+        f.utterances[0].onerror()
+        f.utterances[0].onstart()
+      }
+      clock.fire()
+      await speaking
+      assert.equal(clock.active(), 0)
+      assert.deepEqual(f.events.delivery, [])
+      assert.equal(f.events.playing.at(-1), false)
+      assert.equal(f.events.preparing.at(-1), false)
+      assert.match(f.events.problem.at(-1), /迟迟未确认开始/)
+    }
+    finally { window.speechSynthesis.cancel = () => {}; f.close() }
+  }
+})
+
+test('a native cancel listener can start a fresh turn before deadline UI cleanup without stale state writes', async () => {
+  const clock = startDeadlineClock()
+  const f = fixture(undefined, { scheduleBrowserStartDeadline: clock.schedule })
+  let fresh, nativeCancels = 0, replaceOnCancel = false
+  window.speechSynthesis.cancel = () => {
+    nativeCancels++
+    if (!replaceOnCancel) return
+    replaceOnCancel = false
+    fresh = f.controller.speak('新句。', 'soft', undefined, [], 'browser')
+  }
+  try {
+    const old = f.controller.speak('旧句。', 'bright', undefined, [], 'browser')
+    await settle()
+    replaceOnCancel = true
+    clock.fire()
+    await old
+    await settle()
+    assert.equal(f.utterances.length, 2)
+    assert.equal(f.events.preparing.at(-1), true)
+    assert.equal(f.events.problem.at(-1), '')
+    const beforeCancel = nativeCancels
+    clock.fire(0, true)
+    assert.equal(nativeCancels, beforeCancel)
+    f.utterances[1].onstart()
+    f.utterances[1].onend()
+    await fresh
+  }
+  finally { f.close() }
+})
+
+test('each deadline cleanup callback may start a fresh turn without later old cleanup or native cancellation', async () => {
+  for (const trigger of ['onPreparing', 'onPlaying', 'onMouth', 'onProblem']) {
+    const clock = startDeadlineClock()
+    let f, fresh, armed = false, nativeCancels = 0
+    const entries = { onPreparing: 'preparing', onPlaying: 'playing', onMouth: 'mouth', onProblem: 'problem' }
+    f = fixture(undefined, { scheduleBrowserStartDeadline: clock.schedule }, {
+      [trigger](...args) {
+        f.events[entries[trigger]].push(trigger === 'onMouth' ? args : args[0])
+        if (!armed) return
+        armed = false
+        fresh = f.controller.speak('新句。', 'soft', undefined, [], 'browser')
+      },
+    })
+    window.speechSynthesis.cancel = () => { nativeCancels++ }
+    try {
+      const old = f.controller.speak('旧句。', 'bright', undefined, [], 'browser')
+      await settle()
+      armed = true
+      clock.fire()
+      await old
+      await settle()
+      assert.equal(f.utterances.length, 2)
+      assert.equal(f.events.preparing.at(-1), true)
+      assert.equal(f.events.problem.at(-1), '')
+      const current = structuredClone(f.events), beforeCancel = nativeCancels
+      clock.fire(0, true)
+      assert.deepEqual(f.events, current)
+      assert.equal(nativeCancels, beforeCancel)
+      f.utterances[1].onstart()
+      f.utterances[1].onend()
+      await fresh
+      assert.deepEqual(f.events.delivery, ['soft'])
+    }
+    finally { f.close() }
+  }
+})
+
+test('fragmented terminal punctuation and closing quotes reach every speech engine with the original tone', async () => {
+  for (const engine of ['local', 'cloud', 'browser']) {
+    const calls = []
+    const f = fixture(async () => ({ async *stream(text) { calls.push(text); yield clip() } }), {
+      async synthesizeCloud(sentence) { calls.push(sentence.text); return cloudClip() },
+    })
+    try {
+      const input = f.controller.beginStream('', 'bright', undefined, engine)
+      for (const fragment of ['“真的', '吗？', '！', '”']) {
+        input.push(fragment)
+        await settle()
+        assert.equal(calls.length + f.utterances.length, 0, 'the terminal suffix is not submitted prematurely')
+      }
+      input.setDelivery('soft')
+      await settle()
+      const submitted = () => engine === 'browser' ? f.utterances.map(u => u.text) : calls
+      assert.deepEqual(submitted(), ['“真的吗？！”'])
+      input.push('嗯，先缓一下。')
+      input.finish()
+      await settle()
+      if (engine === 'browser') {
+        assert.deepEqual(f.events.delivery, [])
+        f.utterances[0].onstart()
+        assert.deepEqual(f.events.delivery, ['bright'])
+        f.utterances[0].onend()
+        await settle()
+        assert.deepEqual(submitted(), ['“真的吗？！”', '嗯，先缓一下。'])
+        f.utterances[1].onstart()
+        assert.deepEqual(f.events.delivery, ['bright', 'soft'])
+        f.utterances[1].onend()
+      }
+      else {
+        assert.deepEqual(submitted(), ['“真的吗？！”', '嗯，先缓一下。'])
+        assert.deepEqual(f.events.delivery, ['bright'], 'preparing the next sentence cannot change the current expression')
+        f.audio.end()
+        assert.deepEqual(f.events.delivery, ['bright', 'soft'])
+        f.audio.end()
+      }
+    }
+    finally { f.close() }
+  }
+})
+
+test('canceling a pending terminal suffix cannot submit old speech or block the next newline-committed sentence', async () => {
+  for (const engine of ['local', 'cloud', 'browser']) {
+    const calls = []
+    const f = fixture(async () => ({ async *stream(text) { calls.push(text); yield clip() } }), {
+      async synthesizeCloud(sentence) { calls.push(sentence.text); return cloudClip() },
+    })
+    try {
+      const old = f.controller.beginStream('', 'bright', undefined, engine)
+      old.push('旧句？！')
+      await settle()
+      assert.equal(calls.length + f.utterances.length, 0)
+      old.cancel()
+      old.finish()
+      old.push('不能泄漏。\n')
+      const fresh = f.controller.beginStream('', 'soft', undefined, engine)
+      fresh.push('新句。\n')
+      await settle()
+      assert.deepEqual(engine === 'browser' ? f.utterances.map(u => u.text) : calls, ['新句。'])
+      fresh.finish()
+      if (engine === 'browser') {
+        f.utterances[0].onstart()
+        f.utterances[0].onend()
+      }
+      else f.audio.end()
+      await settle()
+      assert.equal(calls.length + f.utterances.length, 1)
+      assert.deepEqual(f.events.delivery, ['soft'])
+      assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    }
+    finally { f.close() }
+  }
+})
+
 test('already-ready same-tone clips share playback without altering PCM, pauses or per-clip mouth calibration', async () => {
   const clips = [shapedClip(0.05, 6615), shapedClip(0.006, 8260), shapedClip(0.34, 10438)]
   const calls = []
@@ -202,6 +597,81 @@ test('already-ready same-tone clips share playback without altering PCM, pauses 
     assert.equal(calls.length, 3, 'replay preparation never resynthesizes')
   }
   finally { f.close() }
+})
+
+test('controller full-cache replacement constructs only a 44-byte header and preserves exact queued PCM', async () => {
+  const clips = [shapedClip(0.05, 6615), shapedClip(0.006, 8260), shapedClip(0.34, 10438)]
+  const calls = []
+  const f = fixture(async () => ({ async *stream(text) {
+    calls.push(text)
+    const current = clips[calls.length - 1]
+    yield { audio: { data: current.samples, sampling_rate: current.sampleRate } }
+  } }))
+  const OriginalBuffer = globalThis.ArrayBuffer
+  const OriginalFloat32 = globalThis.Float32Array
+  const buffers = [], floats = []
+  try {
+    await f.controller.speak('一。二。三。', 'bright')
+    assert.deepEqual(calls, ['一。', '二。', '三。'])
+    assert.equal(f.audio.plays, 1)
+    f.audio.end()
+    assert.equal(f.audio.plays, 2, 'the two ready same-tone successors play as one queued batch')
+    const queuedSource = f.audio.src
+    const beforeLoads = f.audio.loads
+
+    // Observe only the synchronous ended -> advance -> full-cache composition
+    // path. Restore constructors before fetch/blob readers or any await, whose
+    // own allocations are outside this production-path assertion.
+    try {
+      globalThis.ArrayBuffer = new Proxy(OriginalBuffer, { construct(target, args) {
+        buffers.push(args[0]); return Reflect.construct(target, args)
+      } })
+      globalThis.Float32Array = new Proxy(OriginalFloat32, { construct(target, args) {
+        floats.push(typeof args[0] === 'number' ? args[0] : 'non-length input')
+        return Reflect.construct(target, args)
+      } })
+      f.audio.end()
+    }
+    finally {
+      globalThis.ArrayBuffer = OriginalBuffer
+      globalThis.Float32Array = OriginalFloat32
+    }
+
+    assert.deepEqual(buffers, [44], 'the real controller allocates only an explicit WAV header')
+    assert.deepEqual(floats, [], 'complete replay does not concatenate a full-length Float32 buffer')
+    assert.notEqual(f.audio.src, queuedSource)
+    assert.equal(f.audio.loads, beforeLoads + 1)
+    assert.equal(f.audio.paused, true, 'replacing a finished batch prepares cache, not playback intent')
+    assert.equal(f.audio.plays, 2, 'full-cache installation does not automatically replay')
+    assert.equal(f.events.playing.at(-1), false)
+    assert.equal(f.events.preparing.at(-1), false)
+    assert.equal(f.events.ready.at(-1), true)
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    assert.deepEqual(calls, ['一。', '二。', '三。'], 'cache preparation starts no additional inference')
+
+    const wav = await (await fetch(f.audio.src)).arrayBuffer()
+    const total = clips.reduce((count, current) => count + current.samples.length, 0)
+    const view = new DataView(wav)
+    assert.equal(wav.byteLength, 44 + total * 2)
+    assert.equal(view.getUint32(24, true), 44100)
+    assert.equal(view.getUint32(40, true), total * 2)
+    let index = 0
+    for (const current of clips) {
+      for (const sample of current.samples) {
+        const value = Math.max(-1, Math.min(1, sample))
+        const expected = Math.trunc(value < 0 ? value * 0x8000 : value * 0x7fff) || 0
+        assert.equal(view.getInt16(44 + index++ * 2, true), expected)
+      }
+    }
+    await f.audio.play()
+    assert.equal(f.audio.plays, 3)
+    assert.equal(calls.length, 3, 'explicit replay also reuses completed cache without inference')
+  }
+  finally {
+    globalThis.ArrayBuffer = OriginalBuffer
+    globalThis.Float32Array = OriginalFloat32
+    f.close()
+  }
 })
 
 test('ready playback joining is bounded by clip count, duration and tone changes', async () => {
@@ -377,12 +847,12 @@ test('local generation can fill an underrun when later streamed text finally arr
   const f = fixture(async () => ({ async *stream(text) { calls.push(text); yield clip() } }))
   try {
     const input = f.controller.beginStream('', 'neutral')
-    input.push('先说一句。')
+    input.push('先说一句。后')
     await settle()
     f.audio.end()
     await settle()
     assert.equal(f.events.preparing.at(-1), true)
-    input.push('后来这句也要出声。')
+    input.push('来这句也要出声。')
     input.finish()
     await settle()
     assert.deepEqual(calls, ['先说一句。', '后来这句也要出声。'])
@@ -523,6 +993,575 @@ test('pause, resume and cancellation keep the cached mouth track closed while st
     for (const event of ['playing', 'pause', 'ended', 'error']) f.audio.dispatchEvent(new Event(event))
     assert.deepEqual(f.events, canceled, 'late frames and media events cannot reuse canceled tracks')
     assert.equal(f.audio.src, '')
+  }
+  finally { f.close() }
+})
+
+test('a stationary playable media clock closes speaking once and resumes from real advancement without replay', async () => {
+  let generated = 0
+  const current = shapedClip(0.006, 24000 * 6, 24000)
+  const f = fixture(undefined, { async synthesizeCloud() { generated++; return current } })
+  try {
+    await f.controller.speak('已经缓存的一句。', 'bright', undefined, [], 'cloud')
+    f.audio.end()
+    await f.audio.play()
+    const source = f.audio.src, loads = f.audio.loads, plays = f.audio.plays
+    const baseline = 100_000
+    for (const elapsed of [0, 500, 1000, 1499]) {
+      f.tick(0.12, baseline + elapsed)
+      assert.equal(f.events.playing.at(-1), true)
+      assert.ok(f.events.mouth.at(-1)[0] > 0.1)
+    }
+    f.tick(0.12, baseline + 1500)
+    assert.equal(f.audio.paused, false)
+    assert.equal(f.audio.readyState, 4)
+    assert.equal(f.audio.seeking, false)
+    assert.equal(f.events.playing.at(-1), false)
+    assert.equal(f.events.preparing.at(-1), true)
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    assert.equal(f.queuedFrames(), 1, 'keep one observer, not a dead stopped animation')
+    const stalled = structuredClone(f.events)
+    f.tick(0.12, baseline + 2000)
+    f.tick(0.12, baseline + 2500)
+    assert.deepEqual(f.events, stalled, 'stationary observations do not repeatedly write UI')
+    for (const event of ['playing', 'timeupdate', 'canplay', 'seeked'])
+      f.audio.dispatchEvent(new Event(event))
+    assert.deepEqual(f.events, stalled, 'native events alone cannot reopen a clock-stalled source')
+    assert.equal(f.queuedFrames(), 1)
+    // A fresh baseline after a long RAF gap, even at a different media time,
+    // cannot claim recovery; a subsequently observed forward step can.
+    f.tick(0.2, baseline + 5000)
+    assert.deepEqual(f.events, stalled)
+    f.tick(0.3, baseline + 5500)
+    assert.equal(f.events.playing.at(-1), true)
+    assert.equal(f.events.preparing.at(-1), false)
+    assert.ok(f.events.mouth.at(-1)[0] > 0.1)
+    assert.equal(f.audio.src, source)
+    assert.equal(f.audio.loads, loads)
+    assert.equal(f.audio.plays, plays)
+    assert.equal(generated, 1, 'clock recovery never resynthesizes the cache')
+    assert.equal(f.queuedFrames(), 1)
+  }
+  finally { f.close() }
+})
+
+test('quantized advancing playback at low FPS and long healthy RAF gaps never manufacture a stall', async () => {
+  const current = shapedClip(0.006, 24000 * 12, 24000)
+  const f = fixture(undefined, { async synthesizeCloud() { return current } })
+  try {
+    await f.controller.speak('正常在播放。', 'neutral', undefined, [], 'cloud')
+    const baseline = 100_000
+    for (let frame = 0; frame <= 18; frame++) {
+      const timestamp = frame * 500
+      f.tick(Math.floor(timestamp / 100) / 10, baseline + timestamp)
+      assert.equal(f.events.playing.at(-1), true, '2 FPS with 100 ms quantization')
+      assert.equal(f.events.preparing.at(-1), false)
+      assert.equal(f.queuedFrames(), 1)
+    }
+    f.tick(10, baseline + 20_000)
+    f.tick(10.1, baseline + 20_500)
+    assert.equal(f.events.playing.at(-1), true, 'background return establishes a healthy baseline')
+    assert.equal(f.events.preparing.at(-1), false)
+  }
+  finally { f.close() }
+})
+
+test('a clock stall revokes local and cloud generation permission without skipping the waiting sentence', { timeout: 1000 }, async () => {
+  for (const engine of ['local', 'cloud']) {
+    const calls = []
+    const f = fixture(async () => ({ async *stream(text) { calls.push(text); yield clip() } }), {
+      async synthesizeCloud(sentence) { calls.push(sentence.text); return cloudClip() },
+    })
+    try {
+      f.audio.addEventListener('playing', () => { stallAt(f, 0.05) }, { once: true })
+      const speaking = f.controller.speak('一。二。三。', 'neutral', undefined, [], engine)
+      await settle()
+      assert.deepEqual(calls, ['一。'])
+      assert.equal(f.events.playing.at(-1), false)
+      for (let index = 0; index < 3; index++) await settle()
+      assert.equal(calls.length, 1, 'do not busy-loop or compute/fetch after stalled permission')
+      f.tick(0.06, 102_000)
+      await settle()
+      assert.deepEqual(calls, engine === 'cloud' ? ['一。', '二。'] : ['一。', '二。', '三。'])
+      assert.equal(f.events.playing.at(-1), true)
+      f.audio.end()
+      await settle()
+      await speaking
+      assert.deepEqual(calls, ['一。', '二。', '三。'], 'retain the exact original sentence order')
+    }
+    finally { f.close() }
+  }
+})
+
+test('an in-flight result may finish at a clock stall but cannot start another local computation', { timeout: 1000 }, async () => {
+  const second = deferred()
+  let computed = 0
+  const f = fixture(async () => ({ async *stream() {
+    for (let index = 0; index < 3; index++) {
+      computed++
+      yield index === 1 ? await second.promise : clip()
+    }
+  } }))
+  try {
+    const speaking = f.controller.speak('一个输入，三段。')
+    await settle()
+    assert.equal(computed, 2)
+    stallAt(f, 0.05)
+    second.resolve(clip())
+    for (let index = 0; index < 3; index++) await settle()
+    assert.equal(computed, 2)
+    assert.equal(f.events.playing.at(-1), false)
+    f.tick(0.06, 102_000)
+    await speaking
+    assert.equal(computed, 3)
+  }
+  finally { f.close() }
+})
+
+test('pause, wait and seek retire the stalled observer and reset its baseline for verified playback intent', async () => {
+  for (const method of ['pause', 'waiting', 'seeking']) {
+    const f = fixture(undefined, { async synthesizeCloud() { return cloudClip() } })
+    try {
+      await f.controller.speak('一。', 'neutral', undefined, [], 'cloud')
+      stallAt(f, 0.05)
+      const oldFrame = f.frameCallbacks()[0]
+      if (method === 'pause') f.audio.pause()
+      else {
+        if (method === 'waiting') f.audio.readyState = 2
+        else f.audio.seeking = true
+        f.audio.dispatchEvent(new Event(method))
+      }
+      assert.equal(f.queuedFrames(), 0)
+      const stopped = structuredClone(f.events)
+      oldFrame(102_000)
+      assert.deepEqual(f.events, stopped)
+      assert.equal(f.queuedFrames(), 0)
+      if (method === 'pause') await f.audio.play()
+      else {
+        f.audio.readyState = 4
+        f.audio.seeking = false
+        f.audio.dispatchEvent(new Event(method === 'seeking' ? 'seeked' : 'playing'))
+      }
+      assert.equal(f.events.playing.at(-1), true)
+      f.tick(0.05, 102_000)
+      f.tick(0.05, 102_500)
+      assert.equal(f.events.playing.at(-1), true, 'old stall duration cannot leak across interruption')
+      assert.equal(f.queuedFrames(), 1)
+    }
+    finally { f.close() }
+  }
+})
+
+test('cancel, dispose and media error release a clock-stalled local or cloud waiter and queued RAF', { timeout: 1000 }, async () => {
+  for (const engine of ['local', 'cloud']) {
+    for (const method of ['cancel', 'dispose', 'error']) {
+      const calls = []
+      const f = fixture(async () => ({ async *stream(text) { calls.push(text); yield clip() } }), {
+        async synthesizeCloud(sentence) { calls.push(sentence.text); return cloudClip() },
+      })
+      try {
+        f.audio.addEventListener('playing', () => { stallAt(f, 0.05) }, { once: true })
+        const speaking = f.controller.speak('一。二。三。', 'neutral', undefined, [], engine)
+        await settle()
+        const oldFrames = f.frameCallbacks()
+        if (method === 'error') {
+          f.audio.error = { code: 3 }
+          f.audio.dispatchEvent(new Event('error'))
+        }
+        else f.controller[method]()
+        await speaking
+        assert.deepEqual(calls, ['一。'])
+        assert.equal(f.queuedFrames(), 0)
+        assert.equal(f.audio.src, '')
+        const canceled = structuredClone(f.events)
+        for (const callback of oldFrames) callback(102_000)
+        for (const event of ['playing', 'waiting', 'seeked', 'ended']) f.audio.dispatchEvent(new Event(event))
+        assert.deepEqual(f.events, canceled)
+        assert.equal(f.queuedFrames(), 0)
+      }
+      finally { f.close() }
+    }
+  }
+})
+
+test('already-queued RAF cannot touch replacement chunks, full cache or a newer turn', async () => {
+  const f = fixture(async () => ({ async *stream() { yield clip() } }))
+  try {
+    await f.controller.speak('第一句。第二句。', 'bright', undefined, [{ start: 4, delivery: 'soft' }])
+    const firstSource = f.audio.src, firstFrames = f.frameCallbacks()
+    f.audio.end()
+    assert.notEqual(f.audio.src, firstSource)
+    f.tick(0.05, 100_000)
+    const secondState = structuredClone(f.events), secondFrames = f.frameCallbacks()
+    for (const callback of firstFrames) callback(102_000)
+    assert.deepEqual(f.events, secondState)
+    assert.equal(f.queuedFrames(), 1)
+    f.audio.end()
+    assert.equal(f.queuedFrames(), 0, 'full-cache replacement remains paused')
+    const cacheState = structuredClone(f.events)
+    for (const callback of secondFrames) callback(102_000)
+    assert.deepEqual(f.events, cacheState)
+    assert.equal(f.queuedFrames(), 0)
+    await f.audio.play()
+    const cacheFrames = f.frameCallbacks()
+    await f.controller.speak('新的回复。', 'curious')
+    f.tick(0.05, 100_000)
+    const fresh = structuredClone(f.events)
+    for (const callback of cacheFrames) callback(102_000)
+    assert.deepEqual(f.events, fresh)
+    assert.equal(f.queuedFrames(), 1)
+    stallAt(f, 0.05, 101_000)
+    assert.equal(f.events.playing.at(-1), false, 'an old callback cannot reset the new clock')
+  }
+  finally { f.close() }
+})
+
+test('stall and recovery UI callbacks can start a fresh turn without stale writes or a second RAF', async () => {
+  for (const phase of ['stall', 'recovery']) {
+    const callbackNames = phase === 'stall' ? ['mouth', 'playing', 'preparing'] : ['playing', 'preparing']
+    for (const callbackName of callbackNames) {
+      let f, armed = false, snapshot, replaced = false
+      const override = (name, value) => {
+        f.events[name].push(value)
+        const trigger = phase === 'stall'
+          ? (name === 'mouth' ? value[0] === 0 : value === (name === 'preparing'))
+          : value === (name === 'playing')
+        if (!armed || !trigger) return
+        armed = false
+        replaced = true
+        void f.controller.speak('新的一轮。', 'curious', undefined, [], 'browser')
+        snapshot = structuredClone(f.events)
+      }
+      f = fixture(undefined, { async synthesizeCloud() { return cloudClip() } }, {
+        [`on${callbackName[0].toUpperCase()}${callbackName.slice(1)}`]: callbackName === 'mouth'
+          ? (open, form) => override('mouth', [open, form])
+          : value => override(callbackName, value),
+      })
+      try {
+        await f.controller.speak('原来的一轮。', 'bright', undefined, [], 'cloud')
+        if (phase === 'stall') { armed = true; stallAt(f, 0.05) }
+        else { stallAt(f, 0.05); armed = true; f.tick(0.06, 102_000) }
+        assert.equal(replaced, true, `${phase}/${callbackName}`)
+        assert.deepEqual(f.events, snapshot, 'no remaining old callback may overwrite new preparation')
+        assert.equal(f.queuedFrames(), 0, 'the retired observer cannot schedule another frame')
+        await settle()
+        assert.equal(f.utterances.length, 1)
+        f.utterances[0].onstart()
+        assert.equal(f.events.delivery.at(-1), 'curious')
+        assert.equal(f.events.playing.at(-1), true)
+        assert.deepEqual(f.events.mouth.at(-1), [null, 0])
+      }
+      finally { f.close() }
+    }
+  }
+})
+
+test('ended cleanup callbacks may restart the same source without an old ending advancing the reply', async () => {
+  for (const callbackName of ['mouth', 'playing', 'preparing']) {
+    let f, armed = false, restarted = false
+    const override = (name, value) => {
+      f.events[name].push(value)
+      if (!armed) return
+      armed = false
+      restarted = true
+      void f.audio.play()
+    }
+    f = fixture(async () => ({ async *stream() { yield clip() } }), {}, {
+      [`on${callbackName[0].toUpperCase()}${callbackName.slice(1)}`]: callbackName === 'mouth'
+        ? (open, form) => override('mouth', [open, form])
+        : value => override(callbackName, value),
+    })
+    try {
+      await f.controller.speak('第一句。第二句。', 'bright', undefined, [{ start: 4, delivery: 'soft' }])
+      f.tick(0.05, 100_000)
+      const source = f.audio.src, loads = f.audio.loads, plays = f.audio.plays
+      const oldFrames = f.frameCallbacks()
+      armed = true
+      f.audio.end()
+      assert.equal(restarted, true)
+      assert.equal(f.audio.ended, false)
+      assert.equal(f.audio.src, source, 'an old ended event must not steal a same-source restart')
+      assert.equal(f.audio.loads, loads)
+      assert.equal(f.audio.plays, plays + 1)
+      assert.equal(f.events.playing.at(-1), true)
+      assert.ok(f.events.mouth.at(-1)[0] > 0.1)
+      assert.equal(f.queuedFrames(), 1)
+      const restartedState = structuredClone(f.events)
+      for (const callback of oldFrames) callback(102_000)
+      assert.deepEqual(f.events, restartedState)
+      f.audio.end()
+      assert.notEqual(f.audio.src, source, 'a later genuine end still advances to the queued sentence')
+      assert.equal(f.events.delivery.at(-1), 'soft')
+    }
+    finally { f.close() }
+  }
+})
+
+test('mouth and delivery RAF callbacks cannot keep animating after replacing their source', async () => {
+  for (const callbackName of ['mouth', 'delivery']) {
+    let f, armed = false, snapshot
+    const override = (name, value) => {
+      f.events[name].push(value)
+      if (!armed) return
+      armed = false
+      f.controller.cancel()
+      snapshot = structuredClone(f.events)
+    }
+    f = fixture(async () => ({ async *stream() { yield clip() } }), {}, {
+      [`on${callbackName[0].toUpperCase()}${callbackName.slice(1)}`]: callbackName === 'mouth'
+        ? (open, form) => override('mouth', [open, form])
+        : value => override('delivery', value),
+    })
+    try {
+      await f.controller.speak('第一句。第二句。', 'bright', undefined, [{ start: 4, delivery: 'soft' }])
+      f.audio.end()
+      f.audio.end()
+      await f.audio.play()
+      armed = true
+      f.tick(0.15, 100_000)
+      assert.equal(armed, false)
+      assert.deepEqual(f.events, snapshot)
+      assert.equal(f.queuedFrames(), 0)
+      assert.equal(f.audio.src, '')
+    }
+    finally { f.close() }
+  }
+})
+
+test('media waiting closes the mouth and speaking state until current-source playback actually resumes', async () => {
+  const f = fixture(async () => ({ async *stream() { yield clip() } }))
+  try {
+    await f.controller.speak('缓存里的语音。')
+    f.tick(0.05)
+    const opening = f.events.mouth.at(-1)
+    assert.ok(opening[0] > 0.1)
+    const source = f.audio.src
+    const cached = await (await fetch(source)).arrayBuffer()
+    const playRequests = f.audio.plays
+    f.audio.readyState = 2
+    f.audio.dispatchEvent(new Event('waiting'))
+    assert.equal(f.audio.paused, false, 'waiting does not remove media playback intent')
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    assert.equal(f.events.playing.at(-1), false)
+    assert.equal(f.events.preparing.at(-1), true)
+    const stopped = structuredClone(f.events)
+    f.tick(0.05)
+    f.audio.dispatchEvent(new Event('playing'))
+    assert.deepEqual(f.events, stopped, 'an event without future media data cannot reopen the mouth')
+    f.audio.readyState = 4
+    f.audio.dispatchEvent(new Event('seeked'))
+    assert.deepEqual(f.events, stopped, 'an unrelated seeked event cannot resume a wait')
+    f.audio.dispatchEvent(new Event('playing'))
+    assert.deepEqual(f.events.mouth.at(-1), opening)
+    assert.equal(f.events.playing.at(-1), true)
+    assert.equal(f.events.preparing.at(-1), false)
+    assert.equal(f.audio.src, source)
+    assert.equal(f.audio.plays, playRequests, 'recovery never starts a new source or requests replay')
+    assert.deepEqual(await (await fetch(f.audio.src)).arrayBuffer(), cached, 'cached PCM stays exact')
+  }
+  finally { f.close() }
+})
+
+test('active buffered seeking suspends expression and mouth, then resumes from the actual cached time', async () => {
+  let generated = 0
+  const f = fixture(async () => ({ async *stream() { generated++; yield clip() } }))
+  try {
+    await f.controller.speak('第一句。第二句。', 'bright', undefined, [{ start: 4, delivery: 'soft' }])
+    f.audio.end()
+    f.audio.end()
+    await f.audio.play()
+    f.tick(0.15)
+    assert.equal(f.events.delivery.at(-1), 'soft')
+    const source = f.audio.src
+    const loads = f.audio.loads
+    const plays = f.audio.plays
+    f.audio.seeking = true
+    f.audio.currentTime = 0.05
+    f.audio.dispatchEvent(new Event('seeking'))
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    assert.equal(f.events.playing.at(-1), false)
+    assert.equal(f.events.preparing.at(-1), true)
+    const seeking = structuredClone(f.events)
+    f.tick(0.05)
+    f.audio.dispatchEvent(new Event('playing'))
+    f.audio.dispatchEvent(new Event('seeked'))
+    assert.deepEqual(f.events, seeking, 'a seek still decoding cannot restore speaking')
+    f.audio.seeking = false
+    f.audio.dispatchEvent(new Event('seeked'))
+    assert.equal(f.events.delivery.at(-1), 'bright')
+    assert.ok(f.events.mouth.at(-1)[0] > 0.1)
+    assert.equal(f.events.playing.at(-1), true)
+    assert.equal(f.events.preparing.at(-1), false)
+    assert.equal(f.audio.src, source)
+    assert.equal(f.audio.loads, loads)
+    assert.equal(f.audio.plays, plays, 'buffered seeked recovery does not call play again')
+    assert.equal(generated, 2, 'cached seeking never resynthesizes')
+
+    f.audio.pause()
+    f.audio.seeking = true
+    f.audio.dispatchEvent(new Event('seeking'))
+    f.audio.currentTime = 0.15
+    f.audio.seeking = false
+    f.audio.dispatchEvent(new Event('seeked'))
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    assert.equal(f.events.playing.at(-1), false, 'paused seek cannot restore playback intent')
+    assert.equal(f.events.preparing.at(-1), false)
+    await f.audio.play()
+    assert.equal(f.events.delivery.at(-1), 'soft')
+    assert.ok(f.events.mouth.at(-1)[0] > 0.1)
+  }
+  finally { f.close() }
+})
+
+test('a seek with unavailable future data remains closed until a later verified playing event', async () => {
+  const f = fixture(async () => ({ async *stream() { yield clip() } }))
+  try {
+    await f.controller.speak('这句还在缓冲。')
+    f.tick(0.05)
+    f.audio.seeking = true
+    f.audio.dispatchEvent(new Event('seeking'))
+    f.audio.readyState = 2
+    f.audio.seeking = false
+    f.audio.dispatchEvent(new Event('seeked'))
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    assert.equal(f.events.playing.at(-1), false)
+    f.audio.dispatchEvent(new Event('playing'))
+    assert.equal(f.events.playing.at(-1), false)
+    f.audio.readyState = 4
+    f.audio.dispatchEvent(new Event('playing'))
+    assert.ok(f.events.mouth.at(-1)[0] > 0.1)
+    assert.equal(f.events.playing.at(-1), true)
+  }
+  finally { f.close() }
+})
+
+test('queued RAF reads seek and ready state before media events can freeze an open mouth', async () => {
+  for (const interruption of ['waiting', 'seeking']) {
+    const f = fixture(async () => ({ async *stream() { yield clip() } }))
+    try {
+      await f.controller.speak('一句语音。')
+      f.tick(0.05)
+      assert.ok(f.events.mouth.at(-1)[0] > 0.1)
+      if (interruption === 'waiting') f.audio.readyState = 2
+      else f.audio.seeking = true
+      f.tick(0.05)
+      assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+      assert.equal(f.events.playing.at(-1), false)
+      const stopped = structuredClone(f.events)
+      f.tick(0.06)
+      assert.deepEqual(f.events, stopped, 'suspended RAF does not schedule further mouth updates')
+      if (interruption === 'seeking') {
+        // A short buffered seek can finish before its queued seeking task is
+        // delivered. The RAF-observed current-source seek still pairs seeked.
+        f.audio.seeking = false
+        f.audio.dispatchEvent(new Event('seeking'))
+        assert.deepEqual(f.events, stopped)
+        f.audio.dispatchEvent(new Event('seeked'))
+        assert.equal(f.events.playing.at(-1), true)
+        assert.ok(f.events.mouth.at(-1)[0] > 0.1)
+      }
+    }
+    finally { f.close() }
+  }
+})
+
+test('waiting and seeking revoke a yielded local or cloud permit without skipping the same input', { timeout: 1000 }, async () => {
+  for (const engine of ['local', 'cloud']) {
+    for (const interruption of ['waiting', 'seeking']) {
+      const calls = []
+      const f = fixture(async () => ({ async *stream(text) { calls.push(text); yield clip() } }), {
+        async synthesizeCloud(sentence) { calls.push(sentence.text); return cloudClip() },
+      })
+      try {
+        f.audio.addEventListener('playing', () => {
+          let microtasks = Promise.resolve()
+          for (let index = 0; index < 4; index++) microtasks = microtasks.then(() => {})
+          void microtasks.then(() => {
+            if (interruption === 'waiting') f.audio.readyState = 2
+            else f.audio.seeking = true
+            f.audio.dispatchEvent(new Event(interruption))
+          })
+        }, { once: true })
+        const speaking = f.controller.speak('一。二。三。', 'neutral', undefined, [], engine)
+        await settle()
+        assert.deepEqual(calls, ['一。'], `${engine}/${interruption}: cannot start after a revoked permit`)
+        assert.equal(f.audio.paused, false)
+        assert.equal(f.events.playing.at(-1), false)
+        for (let index = 0; index < 3; index++) await settle()
+        assert.equal(calls.length, 1, 'interruption cannot buy or compute ahead, or busy-loop')
+        f.audio.readyState = 4
+        f.audio.seeking = false
+        f.audio.dispatchEvent(new Event(interruption === 'seeking' ? 'seeked' : 'playing'))
+        await settle()
+        assert.deepEqual(calls, engine === 'cloud' ? ['一。', '二。'] : ['一。', '二。', '三。'],
+          'resuming keeps the exact sentence and original lookahead cap')
+        f.audio.end()
+        await settle()
+        await speaking
+        assert.deepEqual(calls, ['一。', '二。', '三。'])
+      }
+      finally { f.close() }
+    }
+  }
+})
+
+test('cancel, dispose and media errors release interrupted local and cloud waiters without further generation', { timeout: 1000 }, async () => {
+  for (const engine of ['local', 'cloud']) {
+    for (const method of ['cancel', 'dispose', 'error']) {
+      const calls = []
+      let iteratorClosed = false
+      const f = fixture(async () => ({ async *stream(text) {
+        try { calls.push({ text }); yield clip() }
+        finally { iteratorClosed = true }
+      } }), { async synthesizeCloud(sentence, signal) { calls.push({ text: sentence.text, signal }); return cloudClip() } })
+      try {
+        f.audio.addEventListener('playing', () => {
+          f.audio.readyState = 2
+          f.audio.dispatchEvent(new Event('waiting'))
+        }, { once: true })
+        const speaking = f.controller.speak('一。二。三。', 'neutral', undefined, [], engine)
+        await settle()
+        assert.equal(calls.length, 1)
+        if (method === 'error') {
+          f.audio.error = { code: 3 }
+          f.audio.dispatchEvent(new Event('error'))
+        }
+        else f.controller[method]()
+        await speaking
+        assert.equal(calls.length, 1)
+        if (engine === 'local') assert.equal(iteratorClosed, true)
+        else assert.ok(calls[0].signal.aborted)
+        assert.equal(f.audio.src, '')
+        assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+        const stopped = structuredClone(f.events)
+        f.audio.readyState = 4
+        f.audio.seeking = false
+        for (const event of ['playing', 'waiting', 'seeking', 'seeked', 'pause', 'ended', 'error'])
+          f.audio.dispatchEvent(new Event(event))
+        assert.deepEqual(f.events, stopped, 'late recovery events cannot reopen canceled audio')
+      }
+      finally { f.close() }
+    }
+  }
+})
+
+test('stale interruption and seek-completion events cannot disturb the new playable source', async () => {
+  const f = fixture(async () => ({ async *stream() { yield clip() } }))
+  try {
+    await f.controller.speak('旧回复。', 'bright')
+    f.audio.seeking = true
+    f.audio.dispatchEvent(new Event('seeking'))
+    await f.controller.speak('新回复。', 'soft')
+    f.tick(0.05)
+    const current = structuredClone(f.events)
+    for (const event of ['waiting', 'seeking', 'seeked']) f.audio.dispatchEvent(new Event(event))
+    assert.deepEqual(f.events, current, 'events are checked against current state and current seek source')
+    f.controller.cancel()
+    const canceled = structuredClone(f.events)
+    f.audio.seeking = true
+    f.audio.readyState = 2
+    for (const event of ['waiting', 'seeking', 'seeked']) f.audio.dispatchEvent(new Event(event))
+    assert.deepEqual(f.events, canceled)
   }
   finally { f.close() }
 })
@@ -678,6 +1717,7 @@ test('fallback keeps the first sentence but skips code and link destinations', a
     f.utterances[0].onend()
     await settle()
     assert.equal(f.utterances[1].text, '第二句。')
+    f.utterances[1].onstart()
     f.utterances[1].onend()
     await speaking
     assert.equal(f.utterances.length, 2)
@@ -695,6 +1735,7 @@ test('actual silence for a readable sentence is still a synthesis failure', asyn
     await settle()
     assert.equal(f.utterances[0].text, '这句需要出声。')
     assert.match(f.events.problem.at(-1), /本地声线不可用/)
+    f.utterances[0].onstart()
     f.utterances[0].onend()
     await speaking
   }
@@ -736,6 +1777,413 @@ test('direct browser stream and replay never load Kokoro or call cloud synthesis
     assert.equal(f.events.ready.at(-1), false)
   }
   finally { f.close() }
+})
+
+test('browser end without a start reports unconfirmed playback and stops direct/fallback queued speech', { timeout: 1000 }, async () => {
+  for (const engine of ['browser', 'local', 'cloud']) {
+    for (const playback of ['stream', 'replay']) {
+      let loads = 0, cloudCalls = 0
+      const f = fixture(async () => { loads++; throw new Error('test: local voice unavailable') }, {
+        async synthesizeCloud() { cloudCalls++; throw new SpeechApiError('rate_limited', 429) },
+      })
+      try {
+        let speaking
+        if (playback === 'replay')
+          speaking = f.controller.speak('第一句。不能自动继续。', 'bright', undefined, [], engine)
+        else {
+          const input = f.controller.beginStream('', 'bright', undefined, engine)
+          input.push('第一句。不能自动继续。')
+          input.finish()
+        }
+        await settle()
+        const first = f.utterances[0]
+        assert.ok(first)
+        const work = { loads, cloudCalls }
+        const pending = structuredClone(f.events)
+        first.onresume()
+        first.onpause()
+        assert.deepEqual(f.events, pending, 'events before start cannot pretend audio has begun')
+        first.onend()
+        await settle()
+        assert.equal(f.utterances.length, 1, 'end without start must not enqueue another sentence')
+        await speaking
+        assert.equal(f.events.playing.at(-1), false)
+        assert.equal(f.events.preparing.at(-1), false)
+        assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+        assert.deepEqual(f.events.delivery, [])
+        assert.equal(f.events.problem.at(-1), '系统语音未确认开始播放，请更换语音模式或检查浏览器与系统声线。')
+        assert.deepEqual({ loads, cloudCalls }, work, 'unconfirmed playback cannot retry providers or download a model')
+        assert.equal(loads, engine === 'local' ? 1 : 0)
+        assert.equal(cloudCalls, engine === 'cloud' ? 1 : 0)
+        assert.equal(f.audio.src, '')
+        assert.equal(f.audio.plays, 0)
+        const stopped = structuredClone(f.events)
+        first.onstart()
+        first.onresume()
+        first.onpause()
+        first.onerror()
+        first.onend()
+        await settle()
+        assert.deepEqual(f.events, stopped, 'finished no-start events cannot erase the warning or reopen the mouth')
+        assert.equal(f.utterances.length, 1)
+      }
+      finally { f.close() }
+    }
+  }
+})
+
+test('browser resume before start is inert but a later genuine start enables pause/resume normally', async () => {
+  let loads = 0, cloudCalls = 0
+  const f = fixture(async () => { loads++; throw new Error('unexpected local model') }, {
+    async synthesizeCloud() { cloudCalls++; throw new Error('unexpected cloud call') },
+  })
+  try {
+    const speaking = f.controller.speak('先等开始，再继续。', 'soft', undefined, [], 'browser')
+    await settle()
+    const utterance = f.utterances[0]
+    const pending = structuredClone(f.events)
+    utterance.onresume()
+    utterance.onpause()
+    utterance.onresume()
+    assert.deepEqual(f.events, pending)
+    assert.equal(f.events.playing.at(-1), false)
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    utterance.onstart()
+    assert.equal(f.events.playing.at(-1), true)
+    assert.deepEqual(f.events.mouth.at(-1), [null, 0])
+    assert.equal(f.events.delivery.at(-1), 'soft')
+    utterance.onpause()
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    utterance.onresume()
+    assert.deepEqual(f.events.mouth.at(-1), [null, 0])
+    utterance.onend()
+    await speaking
+    assert.equal(f.events.playing.at(-1), false)
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    assert.ok(f.events.problem.every(message => !message.includes('未确认开始播放')))
+    assert.equal(loads, 0)
+    assert.equal(cloudCalls, 0)
+    assert.equal(f.utterances.length, 1)
+  }
+  finally { f.close() }
+})
+
+test('an unstarted old browser/fallback end cannot overwrite an active replacement turn', async () => {
+  for (const engine of ['browser', 'local', 'cloud']) {
+    let loads = 0, cloudCalls = 0
+    const f = fixture(async () => { loads++; throw new Error('test: local voice unavailable') }, {
+      async synthesizeCloud() { cloudCalls++; throw new SpeechApiError('rate_limited', 429) },
+    })
+    try {
+      const oldSpeaking = f.controller.speak('旧句从未开始。', 'bright', undefined, [], engine)
+      await settle()
+      const old = f.utterances[0]
+      const newSpeaking = f.controller.speak('新句已经开始。', 'soft', undefined, [], 'browser')
+      await oldSpeaking
+      await settle()
+      const fresh = f.utterances[1]
+      fresh.onstart()
+      const before = structuredClone(f.events)
+      const work = { loads, cloudCalls }
+      old.onend()
+      old.onresume()
+      old.onpause()
+      old.onerror()
+      old.onstart()
+      await settle()
+      assert.deepEqual(f.events, before)
+      assert.deepEqual({ loads, cloudCalls }, work)
+      assert.equal(f.events.playing.at(-1), true)
+      assert.equal(f.events.delivery.at(-1), 'soft')
+      assert.deepEqual(f.events.mouth.at(-1), [null, 0])
+      assert.ok(f.events.problem.every(message => !message.includes('未确认开始播放')))
+      fresh.onend()
+      await newSpeaking
+    }
+    finally { f.close() }
+  }
+})
+
+test('browser error before start keeps its specific failure and late end/resume cannot replace it', async () => {
+  let loads = 0, cloudCalls = 0
+  const f = fixture(async () => { loads++; throw new Error('unexpected local model') }, {
+    async synthesizeCloud() { cloudCalls++; throw new Error('unexpected cloud call') },
+  })
+  try {
+    const speaking = f.controller.speak('失败一句。不要继续。', 'bright', undefined, [], 'browser')
+    await settle()
+    const first = f.utterances[0]
+    first.onerror()
+    const stopped = structuredClone(f.events)
+    first.onend()
+    first.onresume()
+    first.onpause()
+    first.onstart()
+    assert.deepEqual(f.events, stopped)
+    await speaking
+    assert.equal(f.utterances.length, 1)
+    assert.match(f.events.problem.at(-1), /浏览器语音播放失败/)
+    assert.doesNotMatch(f.events.problem.at(-1), /未确认开始播放/)
+    assert.equal(f.events.playing.at(-1), false)
+    assert.equal(f.events.preparing.at(-1), false)
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    assert.equal(loads, 0)
+    assert.equal(cloudCalls, 0)
+  }
+  finally { f.close() }
+})
+
+test('browser pause/resume closes the mouth without completing a sentence or starting model/cloud work', async () => {
+  let loads = 0, cloudCalls = 0
+  const f = fixture(async () => { loads++; throw new Error('browser must remain lightweight') }, {
+    async synthesizeCloud() { cloudCalls++; throw new Error('browser must not call cloud') },
+  })
+  try {
+    const input = f.controller.beginStream('', 'bright', undefined, 'browser')
+    input.push('第一句。')
+    input.setDelivery('soft')
+    input.push('第二句。')
+    input.finish()
+    await settle()
+    const first = f.utterances[0]
+    assert.ok(first)
+    first.onstart()
+    assert.equal(f.events.playing.at(-1), true)
+    assert.deepEqual(f.events.mouth.at(-1), [null, 0])
+    first.onpause()
+    assert.equal(f.events.playing.at(-1), false)
+    assert.equal(f.events.preparing.at(-1), false)
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    await settle()
+    assert.equal(f.utterances.length, 1, 'pause cannot complete the current sentence')
+    first.onresume()
+    assert.equal(f.events.playing.at(-1), true)
+    assert.equal(f.events.preparing.at(-1), false)
+    assert.deepEqual(f.events.mouth.at(-1), [null, 0])
+    assert.equal(f.events.delivery.at(-1), 'bright', 'resume keeps the current audible cue')
+    await settle()
+    assert.equal(f.utterances.length, 1, 'resume cannot enqueue a second utterance')
+    assert.equal(loads, 0)
+    assert.equal(cloudCalls, 0)
+    assert.equal(f.audio.plays, 0, 'browser events do not start the PCM player')
+    first.onend()
+    await settle()
+    assert.equal(f.utterances.length, 2)
+    assert.equal(f.events.delivery.at(-1), 'bright', 'the queued cue remains inaudible until its own start')
+    const second = f.utterances[1]
+    second.onstart()
+    assert.equal(f.events.delivery.at(-1), 'soft')
+    second.onpause()
+    second.onresume()
+    assert.equal(f.events.delivery.at(-1), 'soft')
+    second.onend()
+    await settle()
+    assert.equal(f.events.playing.at(-1), false)
+    assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+    assert.equal(f.events.preparing.at(-1), false)
+    assert.equal(f.utterances.length, 2)
+    assert.equal(loads, 0)
+    assert.equal(cloudCalls, 0)
+  }
+  finally { f.close() }
+})
+
+test('local and cloud fallback pause/resume stays on its utterance without inference or request retries', async () => {
+  for (const engine of ['local', 'cloud']) {
+    for (const playback of ['stream', 'replay']) {
+      let loads = 0, cloudCalls = 0
+      const f = fixture(async () => { loads++; throw new Error('test: local voice unavailable') }, {
+        async synthesizeCloud() { cloudCalls++; throw new SpeechApiError('rate_limited', 429) },
+      })
+      try {
+        let speaking
+        if (playback === 'replay')
+          speaking = f.controller.speak('第一句。第二句。', 'soft', undefined, [], engine)
+        else {
+          const input = f.controller.beginStream('', 'soft', undefined, engine)
+          input.push('第一句。第二句。')
+          input.finish()
+        }
+        await settle()
+        const first = f.utterances[0]
+        assert.ok(first, `${engine} ${playback} must have entered browser fallback`)
+        assert.equal(f.events.state.at(-1), 'fallback')
+        assert.equal(loads, engine === 'local' ? 1 : 0)
+        assert.equal(cloudCalls, engine === 'cloud' ? 1 : 0)
+        const initialWork = { loads, cloudCalls }
+        first.onstart()
+        for (let cycle = 0; cycle < 2; cycle++) {
+          first.onpause()
+          assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+          assert.equal(f.events.playing.at(-1), false)
+          assert.equal(f.events.preparing.at(-1), false)
+          await settle()
+          assert.equal(f.utterances.length, 1)
+          first.onresume()
+          assert.deepEqual(f.events.mouth.at(-1), [null, 0])
+          assert.equal(f.events.playing.at(-1), true)
+          assert.equal(f.events.delivery.at(-1), 'soft')
+          assert.equal(f.events.preparing.at(-1), false)
+          await settle()
+          assert.equal(f.utterances.length, 1)
+          assert.deepEqual({ loads, cloudCalls }, initialWork, 'pause/resume must not retry the unavailable provider')
+        }
+        assert.equal(f.audio.src, '')
+        assert.equal(f.audio.plays, 0)
+        first.onend()
+        await settle()
+        assert.equal(f.utterances.length, 2)
+        f.utterances[1].onstart()
+        f.utterances[1].onend()
+        await speaking
+        await settle()
+        assert.deepEqual({ loads, cloudCalls }, initialWork)
+        assert.equal(f.events.playing.at(-1), false)
+        assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+      }
+      finally { f.close() }
+    }
+  }
+})
+
+test('cancel/dispose makes late browser pause/resume callbacks inert without advancing queued sentences', async () => {
+  for (const method of ['cancel', 'dispose']) {
+    let loads = 0, cloudCalls = 0
+    const f = fixture(async () => { loads++; throw new Error('unexpected model call') }, {
+      async synthesizeCloud() { cloudCalls++; throw new Error('unexpected cloud call') },
+    })
+    try {
+      const speaking = f.controller.speak('旧一。旧二。', 'bright', undefined, [], 'browser')
+      await settle()
+      const old = f.utterances[0]
+      old.onstart()
+      old.onpause()
+      f.controller[method]()
+      await speaking
+      const stopped = structuredClone(f.events)
+      old.onpause()
+      old.onresume()
+      old.onend()
+      old.onerror()
+      await settle()
+      assert.deepEqual(f.events, stopped)
+      assert.equal(f.utterances.length, 1)
+      assert.equal(f.events.playing.at(-1), false)
+      assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+      assert.equal(loads, 0)
+      assert.equal(cloudCalls, 0)
+    }
+    finally { f.close() }
+  }
+})
+
+test('old browser and fallback pause/resume cannot stop or relabel a replacement turn', async () => {
+  for (const engine of ['browser', 'local', 'cloud']) {
+    let loads = 0, cloudCalls = 0
+    const f = fixture(async () => { loads++; throw new Error('test: no local voice') }, {
+      async synthesizeCloud() { cloudCalls++; throw new SpeechApiError('rate_limited', 429) },
+    })
+    try {
+      const oldSpeaking = f.controller.speak('旧回复。', 'bright', undefined, [], engine)
+      await settle()
+      const old = f.utterances[0]
+      old.onstart()
+      const newSpeaking = f.controller.speak('新回复。', 'soft', undefined, [], 'browser')
+      await oldSpeaking
+      await settle()
+      const fresh = f.utterances[1]
+      fresh.onstart()
+      const before = structuredClone(f.events)
+      const beforeWork = { loads, cloudCalls }
+      old.onpause()
+      old.onresume()
+      await settle()
+      assert.deepEqual(f.events, before)
+      assert.deepEqual({ loads, cloudCalls }, beforeWork)
+      assert.equal(f.events.delivery.at(-1), 'soft')
+      assert.equal(f.events.playing.at(-1), true)
+      assert.deepEqual(f.events.mouth.at(-1), [null, 0])
+      fresh.onpause()
+      assert.equal(f.events.playing.at(-1), false)
+      fresh.onresume()
+      assert.equal(f.events.playing.at(-1), true)
+      assert.equal(f.events.delivery.at(-1), 'soft')
+      fresh.onend()
+      await newSpeaking
+    }
+    finally { f.close() }
+  }
+})
+
+test('completed browser utterance pause/resume is inert before and during the next sentence of the same run', async () => {
+  for (const engine of ['browser', 'local', 'cloud']) {
+    const f = fixture(async () => { throw new Error('test: local voice unavailable') }, {
+      async synthesizeCloud() { throw new SpeechApiError('rate_limited', 429) },
+    })
+    try {
+      const speaking = f.controller.speak('一。二。', 'bright', undefined, [{ start: 2, delivery: 'soft' }], engine)
+      await settle()
+      const first = f.utterances[0]
+      first.onstart()
+      first.onend()
+      const finished = structuredClone(f.events)
+      first.onpause()
+      first.onresume()
+      assert.deepEqual(f.events, finished, 'completed events are inert before the next microtask')
+      await settle()
+      const second = f.utterances[1]
+      second.onstart()
+      const fresh = structuredClone(f.events)
+      first.onpause()
+      first.onresume()
+      assert.deepEqual(f.events, fresh, 'same-run old events cannot alter the newer utterance')
+      assert.equal(f.events.delivery.at(-1), 'soft')
+      assert.equal(f.events.playing.at(-1), true)
+      second.onend()
+      await speaking
+      const allFinished = structuredClone(f.events)
+      second.onpause()
+      second.onresume()
+      await settle()
+      assert.deepEqual(f.events, allFinished, 'the final completed utterance cannot reopen its mouth')
+    }
+    finally { f.close() }
+  }
+})
+
+test('failed browser utterance ignores late pause/resume and never starts its next sentence', async () => {
+  for (const engine of ['browser', 'local', 'cloud']) {
+    let loads = 0, cloudCalls = 0
+    const f = fixture(async () => { loads++; throw new Error('test: local voice unavailable') }, {
+      async synthesizeCloud() { cloudCalls++; throw new SpeechApiError('rate_limited', 429) },
+    })
+    try {
+      const speaking = f.controller.speak('失败一句。不能继续。', 'bright', undefined, [], engine)
+      await settle()
+      const failed = f.utterances[0]
+      failed.onstart()
+      failed.onpause()
+      failed.onerror()
+      const stopped = structuredClone(f.events)
+      const beforeWork = { loads, cloudCalls }
+      failed.onpause()
+      failed.onresume()
+      assert.deepEqual(f.events, stopped)
+      await speaking
+      const done = structuredClone(f.events)
+      failed.onresume()
+      failed.onpause()
+      await settle()
+      assert.deepEqual(f.events, done)
+      assert.deepEqual({ loads, cloudCalls }, beforeWork)
+      assert.equal(f.utterances.length, 1)
+      assert.equal(f.events.playing.at(-1), false)
+      assert.equal(f.events.preparing.at(-1), false)
+      assert.deepEqual(f.events.mouth.at(-1), [0, 0])
+      assert.match(f.events.problem.at(-1), /浏览器语音播放失败/)
+    }
+    finally { f.close() }
+  }
 })
 
 test('cloud stream/replay preserve English, omit Markdown secrets and apply cues only on playback', async () => {
@@ -954,6 +2402,7 @@ test('cloud failure before audio uses browser fallback without Kokoro or paid-re
       f.utterances[0].onend()
       await settle()
       assert.equal(f.utterances[1].text, '第二句。')
+      f.utterances[1].onstart()
       f.utterances[1].onend()
       await speaking
       await settle()
@@ -977,6 +2426,7 @@ test('unconfigured cloud falls back to browser speech without starting the local
     assert.match(f.events.problem.at(-1), /云端语音生成失败/)
     assert.match(f.events.problem.at(-1), /不会下载本地大模型/)
     assert.doesNotMatch(f.events.problem.at(-1), /Cloud voice is not configured/)
+    f.utterances[0].onstart()
     f.utterances[0].onend()
     await speaking
     assert.equal(loads, 0)

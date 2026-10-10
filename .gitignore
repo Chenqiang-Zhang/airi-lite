@@ -6,6 +6,7 @@ dist/
 .env.*
 !.env.example
 .data/
+.codex-efficient-workflow/
 
 # Live2D sample data is downloaded separately under its own license.
 public/models/*

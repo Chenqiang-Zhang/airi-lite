@@ -268,3 +268,56 @@ test('finish is idempotent and post-finish pushes cannot create more speech', ()
   assert.equal(parser.finish(), '')
   assert.equal(parser.push('```\n不应再输出'), '')
 })
+
+test('a boundary resolves a held ASCII exclamation before the following prose', () => {
+  for (const prefix of ['真的?!', '实际是42!']) {
+    const parser = new SpokenTextFilter()
+    const boundaries = []
+    const emitted = parser.push(prefix)
+    parser.atSentenceBoundary(text => boundaries.push(text))
+    assert.deepEqual(boundaries, [])
+    assert.equal(parser.push('下一句。'), '下一句。')
+    assert.equal(emitted + boundaries.join(''), prefix)
+    assert.equal(boundaries.length, 1, 'a simultaneous digit/bang candidate drains as one old-tone ending')
+    assert.equal(parser.finish(), '')
+  }
+})
+
+test('a held exclamation can become a silent image without reading its description or URL', () => {
+  const parser = new SpokenTextFilter()
+  const boundaries = []
+  assert.equal(parser.push('真的吗?!'), '真的吗?')
+  parser.atSentenceBoundary(text => boundaries.push(text))
+  assert.equal(parser.push('[不读这里?!](https://private.invalid/secret)下一句。'), '下一句。')
+  assert.deepEqual(boundaries, [''])
+  assert.equal(parser.finish(), '')
+})
+
+test('a label exclamation is already literal and a boundary does not change its destination silence', () => {
+  const parser = new SpokenTextFilter()
+  const boundaries = []
+  assert.equal(parser.push('[真的吗?!'), '真的吗?!')
+  parser.atSentenceBoundary(text => boundaries.push(text))
+  assert.equal(parser.push('](https://private.invalid/secret)下一句。'), '下一句。')
+  assert.deepEqual(boundaries, [''])
+  assert.equal(parser.finish(), '')
+})
+
+test('a pending exclamation boundary is bounded, replaceable and drained by finish only once', () => {
+  const parser = new SpokenTextFilter()
+  const boundaries = []
+  assert.equal(parser.push('真的吗?!'), '真的吗?')
+  for (let index = 0; index < 10_000; index++)
+    parser.atSentenceBoundary(text => boundaries.push([index, text]))
+  assert.ok(JSON.stringify(parser).length < 1000)
+  assert.equal(parser.finish(), '')
+  assert.deepEqual(boundaries, [[9_999, '!']])
+  assert.equal(parser.finish(), '')
+
+  const canceled = new SpokenTextFilter()
+  canceled.push('真的吗?!')
+  canceled.atSentenceBoundary(() => assert.fail('cancel must discard the held ending callback'))
+  canceled.cancel()
+  assert.equal(canceled.finish(), '')
+  assert.equal(canceled.push('下一句。'), '')
+})

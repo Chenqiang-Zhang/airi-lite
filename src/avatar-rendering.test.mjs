@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { attachAvatarRenderLoop, resolveAvatarRenderBudget } from './avatar-rendering.ts'
+import { applyAvatarRenderBudget, attachAvatarRenderLoop, resolveAvatarRenderBudget } from './avatar-rendering.ts'
 
 function fixture({ hidden = false, interactionEnabled = true, budget, priority = 0 } = {}) {
   const events = []
@@ -98,6 +98,62 @@ test('invalid hints and DPR never manufacture weak hardware or a broken resoluti
     cores: 2,
     get saveData() { throw new Error('denied') },
   }, 2), { maxFPS: 30, resolution: 1.25, antialias: false })
+})
+
+test('explicit economy caps frame rate and pixels even when weak-device hints are absent', () => {
+  for (const hints of [{}, { memoryGB: 16, cores: 16 }, { memoryGB: 2 }, null]) {
+    assert.deepEqual(resolveAvatarRenderBudget(hints, 3, 'economy'), { maxFPS: 30, resolution: 1, antialias: false })
+    assert.equal(resolveAvatarRenderBudget(hints, 0.75, 'economy').resolution, 0.75)
+  }
+  assert.deepEqual(resolveAvatarRenderBudget({}, 3, 'auto'), resolveAvatarRenderBudget({}, 3))
+})
+
+test('live budget switching keeps own ticker/model alive and rescales renderer plus pointer coordinates', () => {
+  const f = fixture()
+  const resize = []
+  f.app.screen = { width: 390, height: 420 }
+  f.app.renderer.resolution = 2
+  f.app.renderer.plugins.interaction.resolution = 2
+  f.app.renderer.resize = (width, height) => resize.push({ width, height, resolution: f.app.renderer.resolution })
+  const subscriptions = [...f.callbacks]
+  const lifecycle = f.events.filter(([name]) => name === 'start' || name === 'stop').length
+  applyAvatarRenderBudget(f.app, resolveAvatarRenderBudget({}, 2, 'economy'))
+  assert.equal(f.app.ticker.maxFPS, 30)
+  assert.equal(f.app.ticker.minFPS, 10)
+  assert.equal(f.app.renderer.resolution, 1)
+  assert.equal(f.app.renderer.plugins.interaction.resolution, 1)
+  assert.deepEqual(resize, [{ width: 390, height: 420, resolution: 1 }])
+  assert.equal(f.started(), true)
+  assert.deepEqual(f.callbacks, subscriptions, 'no model remount or update callback replacement')
+  assert.equal(f.events.filter(([name]) => name === 'start' || name === 'stop').length, lifecycle)
+  f.tick(33)
+  assert.deepEqual(f.frames, [33], 'model/mouth updates continue at the real elapsed time')
+  applyAvatarRenderBudget(f.app, resolveAvatarRenderBudget({}, 2, 'economy'))
+  assert.equal(resize.length, 1, 'an unchanged resolution needs no backing-buffer resize')
+  f.changeVisibility(true)
+  applyAvatarRenderBudget(f.app, resolveAvatarRenderBudget({}, 2, 'auto'))
+  assert.equal(f.started(), false, 'changing quality cannot start a hidden avatar')
+  assert.equal(f.app.renderer.plugins.interaction.useSystemTicker, false)
+  assert.equal(f.app.renderer.plugins.interaction.resolution, 2)
+  f.changeVisibility(false)
+  f.tick(17)
+  assert.deepEqual(f.frames, [33, 17])
+  f.loop.destroy()
+})
+
+test('invalid live budgets/dimensions fail before changing render or input state', () => {
+  const changes = []
+  const app = { ticker: { maxFPS: 60, minFPS: 10 }, screen: { width: 390, height: 420 },
+    renderer: { resolution: 2, plugins: { interaction: { resolution: 2 } }, resize() { changes.push('resize') } } }
+  for (const budget of [{ maxFPS: 0, resolution: 1 }, { maxFPS: 30, resolution: NaN }, { maxFPS: 60, resolution: 0 }]) {
+    assert.throws(() => applyAvatarRenderBudget(app, budget), RangeError)
+    assert.equal(app.ticker.maxFPS, 60)
+    assert.equal(app.renderer.resolution, 2)
+    assert.equal(app.renderer.plugins.interaction.resolution, 2)
+  }
+  app.screen.width = 0
+  assert.throws(() => applyAvatarRenderBudget(app, resolveAvatarRenderBudget({}, 2, 'economy')), RangeError)
+  assert.equal(changes.length, 0)
 })
 
 test('own ticker updates the model before rendering and enforces a bounded delta', () => {

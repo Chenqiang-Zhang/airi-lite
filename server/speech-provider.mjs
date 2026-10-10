@@ -1,4 +1,4 @@
-import { readMinimaxConfig, synthesiseMinimax } from './minimax.mjs'
+import { MINIMAX_ENDPOINTS, readMinimaxConfig, synthesiseMinimax } from './minimax.mjs'
 import { estimateElevenLabsReservation, readElevenLabsConfig, synthesiseElevenLabs } from './elevenlabs.mjs'
 
 const MINIMAX_MODELS = new Set(['speech-2.8-hd', 'speech-2.8-turbo'])
@@ -21,8 +21,12 @@ export function resolveSpeechProvider(config) {
   // Configs injected by existing MiniMax tests/tools predate provider selection.
   const provider = config?.provider ?? 'minimax'
   if (provider === 'minimax' && MINIMAX_MODELS.has(config?.model)) {
+    const selectedRegion = config.region === undefined ? 'cn' : config.region
+    const region = typeof selectedRegion === 'string' && Object.hasOwn(MINIMAX_ENDPOINTS, selectedRegion)
+      ? selectedRegion : null
     return {
-      configured: config.configured === true, provider, model: config.model,
+      configured: config.configured === true && Boolean(region)
+        && config.endpoint === MINIMAX_ENDPOINTS[region], provider, model: config.model, region,
       ledgerFilename: 'tts-budget.json',
       estimateReservation: (_config, request) => 2 * request.text.length,
       synthesise: synthesiseMinimax,

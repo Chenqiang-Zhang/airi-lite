@@ -3,16 +3,19 @@ import { Live2DFactory, Live2DModel } from 'pixi-live2d-display/cubism4'
 import type { Cubism4InternalModel } from 'pixi-live2d-display/cubism4'
 import { attachAvatarPerformance } from './avatar-performance'
 import { createAvatarMountScope, loadAvatarResource, releaseAvatarModel, releaseAvatarRendererTextures } from './avatar-mount'
-import { attachAvatarRenderLoop, resolveAvatarRenderBudget } from './avatar-rendering'
+import { applyAvatarRenderBudget, attachAvatarRenderLoop, resolveAvatarRenderBudget } from './avatar-rendering'
+import type { AvatarRenderProfile } from './avatar-rendering'
 import { readDeviceHints } from './speech-mode'
 import type { DeviceHints } from './speech-mode'
 
-export async function mountHiyori(container: HTMLElement, options: { signal?: AbortSignal, deviceHints?: DeviceHints } = {}) {
+export async function mountHiyori(container: HTMLElement, options: { signal?: AbortSignal, deviceHints?: DeviceHints, renderProfile?: AvatarRenderProfile } = {}) {
   const scope = createAvatarMountScope(options.signal)
   try {
     scope.assertActive()
     Object.assign(window, { PIXI })
-    const renderBudget = resolveAvatarRenderBudget(options.deviceHints ?? readDeviceHints(), window.devicePixelRatio)
+    const deviceHints = options.deviceHints ?? readDeviceHints()
+    let renderBudget = resolveAvatarRenderBudget(deviceHints, window.devicePixelRatio, options.renderProfile)
+    const contextAntialias = renderBudget.antialias
     const app = new PIXI.Application({
       width: Math.max(1, container.clientWidth),
       height: Math.max(1, container.clientHeight),
@@ -90,7 +93,16 @@ export async function mountHiyori(container: HTMLElement, options: { signal?: Ab
       setActivity: actor.setActivity,
       setMouth: actor.setMouth,
       setDelivery: actor.setDelivery,
-      renderBudget,
+      get renderBudget() { return { ...renderBudget } },
+      setRenderProfile(profile: AvatarRenderProfile) {
+        if (!scope.disposed) {
+          const next = resolveAvatarRenderBudget(deviceHints, window.devicePixelRatio, profile)
+          applyAvatarRenderBudget(app, next)
+          // Keep an honest report of the existing WebGL context's AA policy.
+          renderBudget = { ...next, antialias: contextAntialias }
+        }
+        return { ...renderBudget }
+      },
       destroy: scope.dispose,
     }
   }

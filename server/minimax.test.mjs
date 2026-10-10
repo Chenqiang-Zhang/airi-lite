@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { buildMinimaxRequest, collectMinimaxStream, MAX_AUDIO_BYTES, readMinimaxConfig, speechHealth, synthesiseMinimax } from './minimax.mjs'
+import { buildMinimaxRequest, collectMinimaxStream, MAX_AUDIO_BYTES, MAX_USAGE_CHARACTERS, readMinimaxConfig, speechHealth, synthesiseMinimax } from './minimax.mjs'
 
 const env = {
   MINIMAX_TTS_ENABLED: '1', MINIMAX_API_KEY: 'test-secret-key', MINIMAX_VOICE_ID: 'test-private-voice',
@@ -48,8 +48,11 @@ function byteStream(content, width = 257) {
 }
 
 test('activation requires the explicit switch, credentials, fixed region/model and positive integer budget', () => {
-  assert.deepEqual(speechHealth(readMinimaxConfig({})), { configured: false, provider: 'minimax', model: 'speech-2.8-turbo' })
+  assert.deepEqual(speechHealth(readMinimaxConfig({})),
+    { configured: false, provider: 'minimax', model: 'speech-2.8-turbo', region: 'cn' })
   assert.equal(config.configured, true)
+  assert.equal(config.region, 'cn')
+  assert.equal(config.endpoint, 'https://api.minimax.cn/v1/t2a_v2')
   for (const key of ['MINIMAX_TTS_ENABLED', 'MINIMAX_API_KEY', 'MINIMAX_VOICE_ID', 'MINIMAX_TTS_DAILY_CHAR_LIMIT']) {
     const invalid = { ...env }
     delete invalid[key]
@@ -57,8 +60,19 @@ test('activation requires the explicit switch, credentials, fixed region/model a
   }
   for (const dailyLimit of ['0', '-1', '2.5', '1e3', 'Infinity', '999999999999999999999999'])
     assert.equal(readMinimaxConfig({ ...env, MINIMAX_TTS_DAILY_CHAR_LIMIT: dailyLimit }).configured, false)
-  for (const region of ['international', 'https://127.0.0.1', '__proto__'])
+  for (const region of ['international', 'https://127.0.0.1', '__proto__', 'GLOBAL',
+    'https://api.minimax.io/v1/t2a_v2', 'global/../../cn']) {
     assert.equal(readMinimaxConfig({ ...env, MINIMAX_TTS_REGION: region }).configured, false)
+    assert.equal(readMinimaxConfig({ ...env, MINIMAX_TTS_REGION: region }).region, null)
+    assert.equal(readMinimaxConfig({ ...env, MINIMAX_TTS_REGION: region }).endpoint, null)
+    assert.equal(speechHealth(readMinimaxConfig({ ...env, MINIMAX_TTS_REGION: region })).region, null)
+  }
+  const international = readMinimaxConfig({ ...env, MINIMAX_TTS_REGION: ' global ' })
+  assert.equal(international.configured, true)
+  assert.equal(international.region, 'global')
+  assert.equal(international.endpoint, 'https://api.minimax.io/v1/t2a_v2')
+  assert.deepEqual(speechHealth(international),
+    { configured: true, provider: 'minimax', model: 'speech-2.8-turbo', region: 'global' })
   assert.equal(readMinimaxConfig({ ...env, MINIMAX_TTS_MODEL: 'speech-02-hd' }).configured, false)
   assert.equal(readMinimaxConfig({ ...env, MINIMAX_TTS_MODEL: 'speech-2.8-hd' }).configured, true)
   assert.equal(JSON.stringify(speechHealth(config)).includes('test-'), false)
@@ -98,6 +112,38 @@ test('collects bounded MP3 once, replaces cumulative same-segment words, and use
   assert.equal(result.sampleRate, 32_000)
   assert.deepEqual(result.words, [{ text: '你', start: 0, end: 0.2 },
     { text: '好', start: 0.2, end: 0.5 }, { text: '！', start: 0.6, end: 0.9 }])
+  assert.equal(Object.hasOwn(result, 'usage'), false)
+})
+
+test('optional final usage is factual and bounded; absent billable usage is never guessed from text', async () => {
+  for (const [metadata, usage] of [
+    [{ usage_characters: 0, word_count: 0 }, { billableCharacters: 0, textCharacters: 0 }],
+    [{ usage_characters: 12, word_count: 3 }, { billableCharacters: 12, textCharacters: 3 }],
+    [{ usage_characters: MAX_USAGE_CHARACTERS }, { billableCharacters: MAX_USAGE_CHARACTERS }],
+    [{ usage_characters: 1, word_count: MAX_USAGE_CHARACTERS },
+      { billableCharacters: 1, textCharacters: MAX_USAGE_CHARACTERS }],
+    [{ word_count: 3 }, undefined],
+    [{}, undefined],
+  ]) {
+    const frames = fixture()
+    frames[0].extra_info = { usage_characters: 'ignored intermediate field' }
+    frames[2].extra_info = { ...finalInfo, ...metadata }
+    const result = await collectMinimaxStream(stream(frames), { textLength: 3 })
+    assert.deepEqual(result.usage, usage)
+    assert.equal(Object.hasOwn(result, 'usage'), usage !== undefined)
+  }
+})
+
+test('malformed optional final usage fields fail closed rather than report guessed charges', async () => {
+  for (const field of ['usage_characters', 'word_count']) {
+    for (const value of [-1, 0.5, '12', null, true, [], {}, MAX_USAGE_CHARACTERS + 1,
+      Number.MAX_SAFE_INTEGER + 1, Infinity]) {
+      const frames = fixture()
+      frames[2].extra_info = { ...finalInfo, [field]: value }
+      await assert.rejects(collectMinimaxStream(stream(frames), { textLength: 3 }),
+        { code: 'TTS_UPSTREAM_INVALID' })
+    }
+  }
 })
 
 test('zero-duration words are omitted without expanding timestamps; backward words still fail', async () => {
@@ -148,6 +194,32 @@ test('no subtitle produces empty words and unsafe subtitle_file is never fetched
   })
   assert.equal(calls, 1)
   assert.deepEqual(result.words, [])
+})
+
+test('international requests use only the pinned endpoint and reject config host/region overrides', async () => {
+  const international = readMinimaxConfig({ ...env, MINIMAX_TTS_REGION: 'global' })
+  let calls = 0
+  const fetchImpl = async (url, options) => {
+    calls++
+    assert.equal(url, 'https://api.minimax.io/v1/t2a_v2')
+    assert.equal(options.redirect, 'error')
+    assert.equal(options.headers.Authorization, 'Bearer test-secret-key')
+    assert.equal(JSON.parse(options.body).voice_setting.voice_id, 'test-private-voice')
+    return new Response(stream(fixture()), { headers: { 'content-type': 'text/event-stream' } })
+  }
+  const result = await synthesiseMinimax(international,
+    { text: '你好！', delivery: 'neutral', endpoint: 'https://attacker.invalid' }, { fetchImpl })
+  assert.equal(result.audio, mp3.toString('base64'))
+  assert.equal(calls, 1)
+  for (const invalid of [{ ...international, endpoint: 'https://attacker.invalid' },
+    { ...international, endpoint: 'https://api.minimax.cn/v1/t2a_v2' },
+    { ...international, region: null }, { ...international, region: 'international' },
+    { ...international, region: new String('global') }, { ...international, model: 'unsupported-model' }]) {
+    assert.equal(speechHealth(invalid).configured, false)
+    await assert.rejects(synthesiseMinimax(invalid, { text: '你好！', delivery: 'neutral' }, { fetchImpl }),
+      { code: 'TTS_NOT_CONFIGURED' })
+  }
+  assert.equal(calls, 1)
 })
 
 test('rejects provider errors, malformed/truncated streams, missing final/audio and invalid format/duration', async () => {

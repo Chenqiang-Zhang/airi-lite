@@ -1,5 +1,7 @@
 import type { DeviceHints } from './speech-mode'
 
+export type AvatarRenderProfile = 'auto' | 'economy'
+
 export interface AvatarRenderBudget {
   maxFPS: 30 | 60
   resolution: number
@@ -12,7 +14,7 @@ function positiveFinite(value: unknown): value is number {
 
 // Device hints are an opt-in saving heuristic, not a GPU benchmark. Missing
 // WebGPU says nothing about the WebGL renderer used by Live2D.
-export function resolveAvatarRenderBudget(hints: DeviceHints = {}, dpr = 1): AvatarRenderBudget {
+export function resolveAvatarRenderBudget(hints: DeviceHints = {}, dpr = 1, profile: AvatarRenderProfile = 'auto'): AvatarRenderBudget {
   const candidate: unknown = hints
   const read = (key: keyof DeviceHints): unknown => {
     try {
@@ -24,14 +26,43 @@ export function resolveAvatarRenderBudget(hints: DeviceHints = {}, dpr = 1): Ava
   }
   const memory = read('memoryGB')
   const cores = read('cores')
-  const saving = read('saveData') === true
+  const saving = profile === 'economy' || read('saveData') === true
     || (positiveFinite(memory) && memory <= 4)
     || (positiveFinite(cores) && cores <= 2)
   const ratio = positiveFinite(dpr) ? dpr : 1
   return {
     maxFPS: saving ? 30 : 60,
-    resolution: Math.min(ratio, saving ? 1.25 : 2),
+    resolution: Math.min(ratio, profile === 'economy' ? 1 : saving ? 1.25 : 2),
     antialias: !saving,
+  }
+}
+
+interface AvatarBudgetTarget {
+  ticker: { maxFPS: number, minFPS: number }
+  screen: { width: number, height: number }
+  renderer: {
+    resolution: number
+    resize: (width: number, height: number) => void
+    plugins?: { interaction?: { resolution: number } }
+  }
+}
+
+// Keep the current model, ticker and media clock. PIXI6's interaction manager
+// caches resolution separately; update it too so hit testing does not drift.
+// Antialias belongs to the existing context and cannot be changed here.
+export function applyAvatarRenderBudget(app: AvatarBudgetTarget, budget: AvatarRenderBudget) {
+  if ((budget.maxFPS !== 30 && budget.maxFPS !== 60) || !positiveFinite(budget.resolution))
+    throw new RangeError('Invalid avatar render budget')
+  const { width, height } = app.screen
+  if (!positiveFinite(width) || !positiveFinite(height))
+    throw new RangeError('Invalid avatar render dimensions')
+  app.ticker.maxFPS = budget.maxFPS
+  app.ticker.minFPS = 10
+  const interaction = app.renderer.plugins?.interaction
+  if (interaction) interaction.resolution = budget.resolution
+  if (app.renderer.resolution !== budget.resolution) {
+    app.renderer.resolution = budget.resolution
+    app.renderer.resize(width, height)
   }
 }
 

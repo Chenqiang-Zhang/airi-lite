@@ -77,7 +77,8 @@ export class SpeechSentenceStream implements AsyncIterable<SpokenSentence> {
     // Compare the latest request, not just the applied tone: a keycap may
     // defer the callback, and a newer cue must still be able to replace it.
     this.requestedDelivery = delivery
-    // A held keycap base is either a real old-tone digit or a silent emoji.
+    // A held keycap base is a real old-tone digit or a silent emoji; ASCII !
+    // is old-tone punctuation or the start of a silent Markdown image.
     // Resolve it before flushing the old clause, then apply the newest cue
     // before the next ordinary character is emitted by the filter.
     this.filter.atSentenceBoundary(pendingOutput => {

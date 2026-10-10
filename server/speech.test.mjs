@@ -29,12 +29,13 @@ function request(body = JSON.stringify(payload), headers = {}) {
   readable.socket = { remoteAddress: 'test-ip' }
   return readable
 }
-function audioResponse() {
+function audioResponse(usageInfo = {}) {
   // Only a structural fake frame; this is not real/provider/decoded audio.
   const mp3 = Buffer.alloc(576)
   Buffer.from([0xff, 0xfb, 0x98, 0xc0]).copy(mp3)
   const chunk = { base_resp: { status_code: 0 }, data: { status: 2, audio: mp3.toString('hex') },
-    extra_info: { audio_format: 'mp3', audio_sample_rate: 32_000, audio_channel: 1, audio_size: mp3.length, audio_length: 36 } }
+    extra_info: { audio_format: 'mp3', audio_sample_rate: 32_000, audio_channel: 1, audio_size: mp3.length,
+      audio_length: 36, ...usageInfo } }
   return new Response(`data: ${JSON.stringify(chunk)}\n\n`, { headers: { 'content-type': 'text/event-stream' } })
 }
 function create(options = {}) {
@@ -66,10 +67,18 @@ test('input permits only bounded well-formed text and delivery; no client identi
   assert.deepEqual(normaliseSpeechRequest(payload), payload)
   assert.equal(normaliseSpeechRequest({ text: 'a'.repeat(360), delivery: 'soft' }).text.length, 360)
   assert.equal(normaliseSpeechRequest({ text: '😀'.repeat(180), delivery: 'bright' }).text.length, 360)
+  assert.deepEqual(normaliseSpeechRequest({ ...payload, expectedProvider: 'minimax', expectedRegion: 'global' }),
+    { ...payload, expectedProvider: 'minimax', expectedRegion: 'global' })
+  assert.deepEqual(normaliseSpeechRequest({ ...payload, expectedRegion: 'cn' }), { ...payload, expectedRegion: 'cn' })
   for (const invalid of [null, [], {}, { ...payload, text: '' }, { ...payload, text: '  ' },
     { ...payload, text: 'a'.repeat(361) }, { ...payload, text: '😀'.repeat(181) }, { ...payload, text: '\u0000' },
     { ...payload, text: '\ud800' }, { ...payload, delivery: 'angry' }, { ...payload, delivery: null },
-    { ...payload, voice_id: 'attacker' }, { ...payload, model: 'attacker' }, { ...payload, baseUrl: 'http://127.0.0.1' }])
+    { ...payload, voice_id: 'attacker' }, { ...payload, model: 'attacker' }, { ...payload, baseUrl: 'http://127.0.0.1' },
+    { ...payload, endpoint: 'https://api.minimax.io/v1/t2a_v2' },
+    { ...payload, expectedRegion: 'international' }, { ...payload, expectedRegion: 'GLOBAL' },
+    { ...payload, expectedRegion: null }, { ...payload, expectedRegion: '' },
+    { ...payload, expectedRegion: 'global', expectedProvider: 'elevenlabs' },
+    { ...payload, expectedRegion: 'cn', expectedProvider: 'elevenlabs' }])
     assert.throws(() => normaliseSpeechRequest(invalid), { code: 'TTS_INVALID_REQUEST' })
 })
 
@@ -92,6 +101,67 @@ test('success returns only the MP3 contract and reserves exactly twice the entir
   assert.equal(data.sampleRate, 32_000)
   assert.deepEqual(data.words, [])
   assert.equal(result.headers['Cache-Control'], 'no-store')
+})
+
+test('actual optional usage is exposed but never changes or refunds the local protective reservation', async (context) => {
+  const { path, budget } = await temporaryBudget(context, 2 * payload.text.length)
+  let calls = 0
+  const handler = create({ budget, fetchImpl: async () => {
+    calls++
+    return audioResponse({ usage_characters: 0, word_count: payload.text.length })
+  } })
+  const response = await run(handler)
+  assert.equal(response.status, 200)
+  assert.deepEqual(JSON.parse(response.body).usage, { billableCharacters: 0, textCharacters: payload.text.length })
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).reservedCharacters, 2 * payload.text.length)
+  const capped = await run(handler)
+  assert.equal(capped.status, 429)
+  assert.equal(JSON.parse(capped.body).code, 'TTS_DAILY_LIMIT')
+  assert.equal(calls, 1)
+})
+
+test('region consent defaults to mainland only and region mismatch cannot reserve or choose another endpoint', async () => {
+  const international = readSpeechConfig({ MINIMAX_TTS_ENABLED: '1', MINIMAX_API_KEY: 'test-key-do-not-leak',
+    MINIMAX_VOICE_ID: 'test-private-voice', MINIMAX_TTS_DAILY_CHAR_LIMIT: '1000', MINIMAX_TTS_REGION: 'global' })
+  const order = []
+  const handler = create({ config: international,
+    budget: { reserve: async characters => order.push(['reserve', characters]) },
+    fetchImpl: async (url, options) => {
+      order.push(['fetch', url])
+      assert.equal(options.redirect, 'error')
+      return audioResponse({ usage_characters: 7 })
+    } })
+  assert.deepEqual(handler.health(),
+    { configured: true, provider: 'minimax', model: 'speech-2.8-turbo', region: 'global' })
+  for (const guarded of [payload, { ...payload, expectedProvider: 'minimax' },
+    { ...payload, expectedProvider: 'minimax', expectedRegion: 'cn' }]) {
+    const response = await run(handler, request(JSON.stringify(guarded)))
+    assert.equal(response.status, 409)
+    assert.equal(JSON.parse(response.body).code, 'TTS_PROVIDER_CHANGED')
+  }
+  const mainland = create({ budget: { reserve: async () => order.push(['wrong reserve']) },
+    fetchImpl: async () => order.push(['wrong fetch']) })
+  assert.deepEqual(mainland.health(),
+    { configured: true, provider: 'minimax', model: 'speech-2.8-turbo', region: 'cn' })
+  assert.equal((await run(mainland, request(JSON.stringify({ ...payload, expectedRegion: 'global' })))).status, 409)
+  assert.deepEqual(order, [])
+  const response = await run(handler,
+    request(JSON.stringify({ ...payload, expectedProvider: 'minimax', expectedRegion: 'global' })))
+  assert.equal(response.status, 200)
+  assert.deepEqual(JSON.parse(response.body).usage, { billableCharacters: 7 })
+  assert.deepEqual(order, [['reserve', 2 * payload.text.length], ['fetch', 'https://api.minimax.io/v1/t2a_v2']])
+})
+
+test('injected MiniMax host/unknown region fails health before spending instead of forwarding secrets', async () => {
+  let calls = 0
+  for (const invalid of [{ ...config, endpoint: 'https://attacker.invalid' }, { ...config, region: 'international' },
+    { ...config, region: 'global' }, { ...config, region: null }]) {
+    const handler = create({ config: invalid, budget: { reserve: async () => { calls++ } },
+      fetchImpl: async () => { calls++ } })
+    assert.equal(handler.health().configured, false)
+    assert.equal((await run(handler)).status, 503)
+  }
+  assert.equal(calls, 0)
 })
 
 test('disabled configuration and invalid access code never reserve or call upstream', async () => {

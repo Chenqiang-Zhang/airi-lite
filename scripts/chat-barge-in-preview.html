@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模拟打断诊断 · 无真实模型请求</title>
+<style>
+  body { margin: 2rem auto; max-width: 760px; padding: 0 1rem; font: 16px/1.6 system-ui; background: #f8f5ef; color: #302d29; }
+  button, a { margin-right: .7rem; } button { padding: .55rem .8rem; cursor: pointer; }
+  pre { padding: 1rem; background: white; border: 1px solid #ded8cf; white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+<h1>模拟打断诊断</h1>
+<p>仅用于本机 --barge-in 模式。回复为固定测试句；语音由模拟服务配置决定，不调用真实供应商。诊断只显示下列公开固定测试句，其他内容已省略。</p>
+<p>在实际聊天页面依次发送「开始慢回复。」「改讲公园。」。每轮会在首段后等待下面的手动释放，给输入与观察留出时间。仅输入或确认输入法候选不应增加请求数。</p>
+<p><a href="/airi/" target="_blank" rel="noopener">打开实际 Vue 聊天页</a></p>
+<p><button id="old">释放旧回合 #1</button><button id="fresh">释放新回合 #2</button><button id="third">释放第三回合 #3</button></p>
+<p id="action" role="status">等待读取…</p>
+<pre id="status" aria-live="polite"></pre>
+<script type="module">
+const action = document.querySelector('#action')
+const status = document.querySelector('#status')
+async function refresh() {
+  try {
+    const response = await fetch('/airi/api/mock-barge-in', { cache: 'no-store' })
+    if (!response.ok) throw new Error('请使用 --barge-in 启动本机模拟服务。')
+    status.textContent = JSON.stringify(await response.json(), null, 2)
+  }
+  catch (error) { status.textContent = error.message }
+}
+for (const [id, number] of [['old', 1], ['fresh', 2], ['third', 3]]) {
+  document.querySelector(`#${id}`).addEventListener('click', async () => {
+    const response = await fetch(`/airi/api/mock-barge-in/release/${number}`, { method: 'POST' })
+    action.textContent = response.ok ? `已释放模拟回合 #${number}。` : `回合 #${number} 尚未等待或已经释放。`
+    await refresh()
+  })
+}
+await refresh()
+action.textContent = '诊断每秒刷新；按钮只释放固定模拟流。'
+const timer = setInterval(refresh, 1000)
+window.addEventListener('pagehide', () => clearInterval(timer), { once: true })
+</script>
+</html>

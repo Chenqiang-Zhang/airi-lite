@@ -13,7 +13,12 @@ export interface ProviderStatus {
   model: string
   provider: 'deepseek'
   accessProtected: boolean
-  speech?: { configured: boolean, provider: 'minimax' | 'elevenlabs' | 'unavailable', model: string }
+  speech?: {
+    configured: boolean
+    provider: 'minimax' | 'elevenlabs' | 'unavailable'
+    model: string
+    region?: 'cn' | 'global' | null
+  }
 }
 
 interface StreamEvent {

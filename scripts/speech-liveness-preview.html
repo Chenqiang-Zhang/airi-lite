@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>语音启动活性诊断 · 离线模拟 · 仅本机</title>
+  <style>
+    :root { font: 15px/1.6 system-ui; color: #302b38; background: #f5f1f8; }
+    body { margin: 0; }
+    main { max-width: 1000px; margin: auto; padding: 24px; }
+    h1 { margin: 0 0 12px; font-size: 25px; }
+    h2 { margin: 0 0 8px; font-size: 18px; }
+    p { margin: 8px 0; }
+    .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 18px 0; }
+    .card { padding: 18px; border: 1px solid #ddd2e6; border-radius: 14px; background: white; }
+    .warning { color: #785764; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+    button { font: inherit; padding: 8px 12px; border: 1px solid #bcaacd; border-radius: 8px; background: #faf7fd; cursor: pointer; }
+    button:disabled { opacity: .45; cursor: default; }
+    audio { width: 100%; }
+    progress { width: 100%; height: 14px; accent-color: #8d69ac; }
+    pre { font: 13px/1.7 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; margin: 10px 0 0; }
+    #trace { max-height: 300px; overflow-y: auto; }
+    #problem { color: #963b49; }
+    @media (max-width: 700px) { main { padding: 14px; } .panels { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>语音启动活性诊断</h1>
+  <p class="warning">仅允许 loopback。这里是开发用离线模拟，不是生产 App，也不验证声音自然度、可听性或音素嘴形。没有 Key、聊天/语音 API 或模型下载。</p>
+  <div class="panels">
+    <section class="card">
+      <h2>1. 无事件系统朗读 stub · 完全无声</h2>
+      <p>用户点击后，临时吞掉本页 SpeechSynthesis 的 speak / cancel 调用，不产生任何 start / end / error 事件，也不调用真实系统声线。</p>
+      <p>使用生产控制器的原始启动截止时间，不加速计时。请等约 15 秒，看 preparing 是否退出、嘴形是否归零并显示停止提示。</p>
+      <div class="controls">
+        <button id="start-stub" disabled>开始无事件测试（真实等 15 秒）</button>
+        <button id="stop" disabled>取消当前诊断</button>
+      </div>
+      <progress id="deadline-progress" value="0" max="15000" aria-label="无事件测试真实等待进度"></progress>
+      <p id="deadline">准备读取生产截止策略……</p>
+      <p>本页不提供真实系统朗读模式。真实原生声线检查请另用 <a href="./browser-speech-preview.html">独立系统语音诊断页</a>，不会自动打开或朗读。</p>
+    </section>
+    <section class="card">
+      <h2>2. 独立 PCM 正常路径 · 会播放音调</h2>
+      <p>可选：用户点击后在本机生成 8 秒调制音调，通过生产控制器与真实 HTMLAudio 播放。它不是人声；cloud 状态只表示注入 PCM 的路径，不代表网络请求。</p>
+      <div class="controls">
+        <button id="start-pcm" disabled>生成并播放本机音调</button>
+        <button id="pause" disabled>暂停 PCM</button>
+        <button id="resume" disabled>继续 / 回放 PCM</button>
+        <button id="seek" disabled>PCM 拖到 2 秒（不调用 play）</button>
+      </div>
+      <audio id="audio" controls preload="auto" aria-label="本机 PCM 原生播放器"></audio>
+      <p>暂停和拖动只操作这个原生播放器，不伪造媒体事件。系统语音仍被本页 stub 隔离。</p>
+    </section>
+  </div>
+  <section class="card">
+    <h2>当前观测</h2>
+    <pre id="status" role="status">检查本机地址……</pre>
+    <p id="problem" aria-live="polite"></p>
+    <h2>无事件测试断言</h2>
+    <pre id="checks">尚未运行。PASS 只验证本次离线状态机与真实等待时间。</pre>
+    <h2>事件记录</h2>
+    <pre id="trace">尚未操作。</pre>
+  </section>
+</main>
+<script type="module">
+const byId = id => document.getElementById(id)
+const allowed = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)
+  && ['http:', 'https:'].includes(location.protocol)
+
+if (!allowed) {
+  byId('status').textContent = '拒绝运行：此诊断页只允许 http(s) loopback 地址。'
+}
+else {
+  const { createSpeechController, BROWSER_SPEECH_START_DEADLINE_MS } = await import('../src/speech.ts')
+  const audio = byId('audio')
+  const synthesis = window.speechSynthesis
+  const canStub = synthesis && typeof synthesis.speak === 'function'
+    && typeof synthesis.cancel === 'function' && typeof window.SpeechSynthesisUtterance === 'function'
+  const originalDescriptors = canStub ? {
+    speak: Object.getOwnPropertyDescriptor(synthesis, 'speak'),
+    cancel: Object.getOwnPropertyDescriptor(synthesis, 'cancel'),
+  } : null
+  const history = []
+  let mode = 'idle', outcome = '未开始', voiceState = 'idle'
+  let playing = false, preparing = false, audioReady = false, mouth = 0, form = 0, delivery = 'neutral', problem = ''
+  let startedAt = null, settledAt = null, operation = 0, disposed = false, used = false, stubInstalled = false
+  let stubSpeaks = 0, stubCancels = 0, pcmSegments = 0, modelCalls = 0, sourceLoads = 0
+
+  const elapsed = () => startedAt === null ? 0 : Math.max(0, (settledAt ?? performance.now()) - startedAt)
+  const duration = () => Number.isFinite(audio.duration) ? audio.duration : 0
+  const render = () => {
+    if (disposed) return
+    byId('status').textContent = [
+      `诊断模式: ${mode === 'stub' ? '无事件 stub（完全无声）' : mode === 'pcm' ? '本机 PCM（真实 HTMLAudio）' : '未开始'} · ${outcome}`,
+      `真实经过: ${(elapsed() / 1000).toFixed(3)} 秒 · 生产启动截止: ${BROWSER_SPEECH_START_DEADLINE_MS} ms`,
+      `控制器 state: ${voiceState} · preparing: ${preparing} · playing: ${playing} · audioReady: ${audioReady}`,
+      `嘴形 mouth: ${mouth === null ? '系统语音无波形近似' : mouth.toFixed(4)} · form: ${form.toFixed(4)} · delivery: ${delivery}`,
+      `stub speak / cancel: ${stubSpeaks} / ${stubCancels} · 本机 PCM 段: ${pcmSegments}`,
+      `本地模型调用: ${modelCalls} · 项目 API 请求: 0（仅注入依赖）`,
+      `原生媒体: t=${audio.currentTime.toFixed(3)} / ${duration().toFixed(3)} 秒 · paused=${audio.paused} · seeking=${audio.seeking} · readyState=${audio.readyState}`,
+      `媒体 loadedmetadata: ${sourceLoads} · error: ${audio.error?.code ?? '无'}`,
+    ].join('\n')
+    Object.assign(byId('status').dataset, {
+      mode, outcome, elapsedMs: String(elapsed()), deadlineMs: String(BROWSER_SPEECH_START_DEADLINE_MS),
+      preparing: String(preparing), playing: String(playing), mouth: String(mouth), form: String(form),
+      stubSpeaks: String(stubSpeaks), stubCancels: String(stubCancels), pcmSegments: String(pcmSegments),
+      modelCalls: String(modelCalls), projectApiRequests: '0', sourceLoads: String(sourceLoads),
+    })
+    byId('problem').textContent = problem
+    byId('deadline-progress').value = mode === 'stub' ? Math.min(elapsed(), BROWSER_SPEECH_START_DEADLINE_MS) : 0
+    for (const id of ['pause', 'resume', 'seek']) byId(id).disabled = mode !== 'pcm' || !audioReady
+    byId('stop').disabled = !preparing && !playing && !audioReady
+  }
+  const note = message => {
+    history.push(`${elapsed().toFixed(1)}ms ${message}`)
+    if (history.length > 40) history.shift()
+    byId('trace').textContent = history.join('\n')
+    render()
+  }
+  const restoreMethod = name => {
+    const descriptor = originalDescriptors[name]
+    if (descriptor) Object.defineProperty(synthesis, name, descriptor)
+    else delete synthesis[name]
+  }
+  const installStub = () => {
+    if (stubInstalled) return true
+    if (!canStub) return false
+    const changed = []
+    try {
+      for (const [name, value] of [
+        ['speak', () => { stubSpeaks++; note('stub 吞掉 speak：不发任何 utterance 事件，不启动真实声线。') }],
+        ['cancel', () => { stubCancels++; note('stub 吞掉 cancel：没有真实系统语音可取消。') }],
+      ]) {
+        Object.defineProperty(synthesis, name, { value, configurable: true, writable: true })
+        changed.push(name)
+      }
+      stubInstalled = true
+      return true
+    }
+    catch {
+      for (const name of changed.reverse()) restoreMethod(name)
+      problem = '无法安装本页隔离 stub；拒绝运行，避免意外调用真实系统声线。'
+      render()
+      return false
+    }
+  }
+  const controller = createSpeechController(audio, {
+    onState(value) { voiceState = value; render() },
+    onPreparing(value) { if (preparing !== value) { preparing = value; note(`控制器 preparing=${value}`) } },
+    onPlaying(value) { if (playing !== value) { playing = value; note(`控制器 playing=${value}`) } },
+    onAudioReady(value) { audioReady = value; render() },
+    onMouth(value, colour) { mouth = value; form = colour; render() },
+    onDelivery(value) { delivery = value; note(`生产控制器 delivery=${value}`) },
+    onProblem(value) { problem = value; if (value) note(`生产控制器提示：${value}`); else render() },
+  }, {
+    // The default production startup timer is deliberately not overridden.
+    async loadModel() { modelCalls++; throw new Error('诊断页禁止模型加载') },
+    async synthesizeCloud(sentence, signal) {
+      if (signal.aborted) throw new DOMException('Cancelled', 'AbortError')
+      pcmSegments++
+      const rate = 24000, seconds = 8
+      const samples = Float32Array.from({ length: rate * seconds }, (_, index) => {
+        const time = index / rate
+        const edge = Math.max(0, Math.min(1, time / .08, (seconds - time) / .08))
+        const pulse = Math.max(0, Math.sin(time * Math.PI * 5)) ** 2
+        return .08 * edge * pulse * Math.sin(2 * Math.PI * 240 * time)
+      })
+      note(`本机生成 PCM 段 ${pcmSegments}；不请求云端。`)
+      return { samples, sampleRate: rate, words: [] }
+    },
+  })
+  audio.volume = .35
+
+  const begin = selectedMode => {
+    if (!installStub()) return null
+    used = true
+    operation++
+    mode = selectedMode; outcome = '运行中'; startedAt = performance.now(); settledAt = null
+    history.length = 0; stubSpeaks = stubCancels = pcmSegments = modelCalls = sourceLoads = 0
+    byId('checks').textContent = selectedMode === 'stub' ? '等待生产 15 秒截止，不伪造或提前触发事件……' : 'PCM 路径不作为系统语音截止断言。'
+    delete byId('checks').dataset.failures
+    note(selectedMode === 'stub' ? '用户开始完全无声测试；使用生产 browser 路径与默认 timer。' : '用户开始本机 PCM；系统声线保持 stub 隔离。')
+    return operation
+  }
+  byId('start-stub').addEventListener('click', () => {
+    const current = begin('stub')
+    if (current === null) return
+    void controller.speak('这是第一句无声测试。这里的第二句不应该被启动。', 'bright', undefined, [], 'browser').then(() => {
+      if (disposed || current !== operation || mode !== 'stub') return
+      settledAt = performance.now(); outcome = '控制器已结束本次测试'
+      const checks = [
+        [elapsed() >= BROWSER_SPEECH_START_DEADLINE_MS, '真实等待达到生产启动截止，没有加速 timer。'],
+        [stubSpeaks === 1, '只提交第一句，未把无事件当作成功继续朗读。'],
+        [!preparing && !playing && mouth === 0 && form === 0, 'preparing / playing 退出，嘴形归零。'],
+        [problem.includes('迟迟未确认开始'), '显示生产控制器的启动截止提示。'],
+        [modelCalls === 0 && pcmSegments === 0, '没有模型加载、PCM 合成或 API 请求。'],
+      ]
+      byId('checks').textContent = checks.map(([ok, message]) => `${ok ? 'PASS' : 'FAIL'} ${message}`).join('\n')
+      byId('checks').dataset.failures = String(checks.filter(([ok]) => !ok).length)
+      note(`生产 speak Promise 在 ${elapsed().toFixed(1)}ms 结算。`)
+    }).catch(() => {
+      if (disposed || current !== operation) return
+      settledAt = performance.now(); outcome = '诊断异常（不是截止 PASS）'
+      problem = '生产朗读抛出异常，请检查开发控制台；此结果不作为启动截止通过。'
+      render()
+    })
+  })
+  byId('start-pcm').addEventListener('click', () => {
+    const current = begin('pcm')
+    if (current === null) return
+    void controller.speak('这是本机调制音调测试。', 'bright', undefined, [], 'cloud').catch(() => {
+      if (disposed || current !== operation) return
+      problem = 'PCM 诊断异常，不作为真实播放或启动截止通过。'
+      render()
+    })
+  })
+  byId('stop').addEventListener('click', () => {
+    operation++; settledAt = performance.now(); outcome = '已手动取消（不验证截止）'
+    controller.cancel()
+    note('用户取消当前 run；不提前触发生产截止。')
+  })
+  byId('pause').addEventListener('click', () => { audio.pause(); note('用户调用真实 HTMLAudio.pause()。') })
+  byId('resume').addEventListener('click', async () => {
+    if (mode !== 'pcm' || !audioReady) return
+    try { await audio.play(); note('用户调用真实 HTMLAudio.play()。') }
+    catch { problem = 'PCM 播放被浏览器阻止，请使用原生播放器检查。'; render() }
+  })
+  byId('seek').addEventListener('click', () => {
+    if (mode !== 'pcm' || !audioReady || duration() < 2) return
+    audio.currentTime = 2
+    note('用户设置真实 HTMLAudio.currentTime=2；不调用 play、不伪造事件。')
+  })
+  const listeners = []
+  for (const type of ['loadedmetadata', 'playing', 'pause', 'waiting', 'seeking', 'seeked', 'ended', 'error']) {
+    const listener = () => {
+      if (type === 'loadedmetadata') sourceLoads++
+      note(`真实 HTMLAudio ${type}：t=${audio.currentTime.toFixed(3)}s · paused=${audio.paused} · ready=${audio.readyState}`)
+    }
+    audio.addEventListener(type, listener)
+    listeners.push([type, listener])
+  }
+  byId('deadline').textContent = `生产策略：${BROWSER_SPEECH_START_DEADLINE_MS / 1000} 秒未确认开始便结束当前朗读。此页不覆盖该策略。`
+  byId('deadline-progress').max = BROWSER_SPEECH_START_DEADLINE_MS
+  if (canStub) {
+    byId('start-stub').disabled = false
+    byId('start-pcm').disabled = false
+  }
+  else problem = '当前浏览器缺少可隔离的 SpeechSynthesis；拒绝启动模拟或可能回退到真实声线的 PCM 路径。'
+  const ticker = setInterval(render, 100)
+  render()
+  addEventListener('pagehide', () => {
+    disposed = true; operation++
+    clearInterval(ticker)
+    // Dispose while the local stub still owns cancel; never cancel native
+    // speech on an unused page or after restoring the real engine methods.
+    if (used) controller.dispose()
+    for (const [type, listener] of listeners) audio.removeEventListener(type, listener)
+    if (stubInstalled) {
+      restoreMethod('speak'); restoreMethod('cancel')
+      stubInstalled = false
+    }
+  }, { once: true })
+}
+</script>
+</body>
+</html>

@@ -1,20 +1,23 @@
 <script setup lang="ts">
 import type { PersonaConfig } from './persona'
-import { MAX_MESSAGE_CHARS, normaliseChatRequest } from '../shared/chat-request.mjs'
+import { MAX_MESSAGE_CHARS } from '../shared/chat-request.mjs'
 
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code'
 import { ChatApiError, fetchProviderStatus, streamChat } from './api'
 import { fetchCloudSpeech } from './cloud-speech'
+import type { SpeechUsage } from './cloud-speech'
 import { loadCloudProviderConsent, readCloudSpeechService, resolveConsentedSpeechMode, saveCloudProviderConsent } from './cloud-provider'
 import { clearConversation, loadConversation, saveConversation } from './conversation'
 import type { ConversationMessage } from './conversation'
 import { createChatScrollController } from './chat-scroll'
-import { createAssistantMessage, interruptAssistantMessage } from './chat-turn'
+import { createAssistantMessage, createChatTurnCoordinator, createComposerGuard, interruptAssistantMessage, prepareTypedMessage } from './chat-turn'
 import type { AvatarActivity } from './avatar-performance'
 import { createAvatarContext } from './avatar-context'
 import { loadAvatarModule } from './avatar-startup'
+import { loadAvatarRenderProfile, saveAvatarRenderProfile } from './avatar-render-settings'
+import type { AvatarRenderBudget } from './avatar-rendering'
 import { chooseDelivery } from './delivery'
 import type { Delivery } from './delivery'
 import { clearUserMemory, loadUserMemory, proposeUserMemory, saveUserMemory, USER_MEMORY_LIMIT } from './memory'
@@ -54,6 +57,11 @@ const avatarActivity = computed<AvatarActivity>(() => isSpeaking.value ? 'speaki
 const personaOpen = ref(false)
 const memoryOpen = ref(false)
 const voiceOpen = ref(false)
+const renderOpen = ref(false)
+const renderSettingsError = ref('')
+const selectedRenderProfile = ref(loadAvatarRenderProfile())
+const draftRenderProfile = ref(selectedRenderProfile.value)
+const activeRenderBudget = ref<AvatarRenderBudget | null>(null)
 const voiceSettingsError = ref('')
 const selectedVoice = ref<VoiceId>(loadVoice())
 const draftVoice = ref<VoiceId>(selectedVoice.value)
@@ -66,6 +74,7 @@ const cloudAvailable = computed(() => cloudService.value.configured)
 const cloudProviderLabel = computed(() => cloudService.value.label)
 const cloudModel = computed(() => cloudService.value.model)
 const cloudConsentProvider = ref(loadCloudProviderConsent())
+const lastCloudUsage = ref<(SpeechUsage & { label: string }) | null>(null)
 const speechPolicy = computed(() => resolveConsentedSpeechMode(selectedSpeechMode.value, deviceHints, cloudService.value, cloudConsentProvider.value))
 const draftSpeechPolicy = computed(() => {
   const policy = resolveSpeechMode(draftSpeechMode.value, deviceHints, cloudAvailable.value)
@@ -91,8 +100,6 @@ if (savedAccessCode && !accessCode.value) {
   sessionStorage.removeItem('airi-demo-access-code')
   lastError.value = INVALID_ACCESS_CODE_MESSAGE
 }
-const activeController = ref<AbortController | null>(null)
-const activeAssistantId = ref<number | null>(null)
 let live2d: Awaited<ReturnType<typeof import('./live2d')['mountHiyori']>> | null = null
 const avatarContext = createAvatarContext({ onChange: delivery => live2d?.setDelivery(delivery) })
 const avatarMountController = new AbortController()
@@ -100,11 +107,21 @@ let viewDisposed = false
 let latestMouth: { opening: number | null, form: number } = { opening: 0, form: 0 }
 let speech: ReturnType<typeof createSpeechController> | null = null
 let activeCloudProvider: 'minimax' | 'elevenlabs' = 'minimax'
+let activeCloudRegion: 'cn' | 'global' = 'cn'
 let chatScroll: ReturnType<typeof createChatScrollController> | null = null
 const restoredMessages = loadConversation()
 const messages = ref<Message[]>(restoredMessages.length
   ? restoredMessages.map((message, index) => ({ ...message, id: index + 1 }))
   : [{ id: 1, role: 'assistant', text: persona.value.greeting }])
+let lastMessageId = Math.max(Date.now(), ...messages.value.map(message => message.id))
+const nextMessageId = () => ++lastMessageId
+const composerGuard = createComposerGuard()
+const canInterrupt = computed(() => isGenerating.value || isSpeaking.value || isPreparingSpeech.value)
+const chatTurns = createChatTurnCoordinator({
+  interrupt: id => (messages.value = interruptAssistantMessage(messages.value, id)),
+  cancelSpeech: () => speech?.cancel(),
+  onGenerating: generating => (isGenerating.value = generating),
+})
 
 const providerLabel = computed(() => ({
   checking: '检查大脑连接…',
@@ -149,10 +166,21 @@ onMounted(async () => {
     onAudioReady: ready => (audioAvailable.value = ready),
     onProblem: message => (voiceProblem.value = message),
   }, {
-    synthesizeCloud: (sentence, signal) => fetchCloudSpeech({
-      text: sentence.text, delivery: sentence.delivery, accessCode: accessCode.value, signal,
-      expectedProvider: activeCloudProvider,
-    }),
+    synthesizeCloud: async (sentence, signal) => {
+      const provider = activeCloudProvider
+      const region = activeCloudRegion
+      const clip = await fetchCloudSpeech({
+        text: sentence.text, delivery: sentence.delivery, accessCode: accessCode.value, signal,
+        expectedProvider: provider,
+        ...(provider === 'minimax' ? { expectedRegion: region } : {}),
+      })
+      if (!signal.aborted && !viewDisposed)
+        lastCloudUsage.value = clip.usage ? {
+          ...clip.usage, label: provider === 'minimax'
+            ? region === 'cn' ? 'MiniMax · 国内' : 'MiniMax · 国际' : 'ElevenLabs',
+        } : null
+      return clip
+    },
   })
   refreshProviderStatus()
   if (!modelStage.value)
@@ -161,12 +189,15 @@ onMounted(async () => {
     const { mountHiyori } = await loadAvatarModule({ signal: avatarMountController.signal })
     // Read the current stage and state, not a snapshot from before downloads.
     if (viewDisposed || avatarMountController.signal.aborted || !modelStage.value) return
-    const avatar = await mountHiyori(modelStage.value, { signal: avatarMountController.signal, deviceHints })
+    const avatar = await mountHiyori(modelStage.value, { signal: avatarMountController.signal, deviceHints,
+      renderProfile: selectedRenderProfile.value })
     if (viewDisposed) {
       avatar.destroy()
       return
     }
     live2d = avatar
+    // A user may have changed the preference while model assets were loading.
+    activeRenderBudget.value = live2d.setRenderProfile(selectedRenderProfile.value)
     live2d.setMouth(latestMouth.opening, latestMouth.form)
     syncAvatarActivity()
     modelStatus.value = ''
@@ -181,7 +212,7 @@ onUnmounted(() => {
   viewDisposed = true
   avatarMountController.abort()
   chatScroll?.destroy()
-  activeController.value?.abort()
+  chatTurns.stop()
   speech?.dispose()
   avatarContext.destroy()
   live2d?.destroy()
@@ -239,60 +270,43 @@ function replayLastResponse() {
 }
 
 async function sendMessage() {
-  const text = input.value.trim()
-  if (!text || isGenerating.value)
-    return
-  if (text.length > MAX_MESSAGE_CHARS) {
-    lastError.value = `消息太长，请缩短到 ${MAX_MESSAGE_CHARS} 字符以内。`
-    return
-  }
-  if (accessProtected.value && !accessCode.value) {
-    lastError.value = '请先输入体验码。'
-    return
-  }
-  if (accessCode.value && !isValidAccessCode(accessCode.value)) {
-    accessDraft.value = accessCode.value
-    accessCode.value = ''
-    sessionStorage.removeItem('airi-demo-access-code')
-    lastError.value = INVALID_ACCESS_CODE_MESSAGE
-    return
-  }
-
-  let chatRequest: ReturnType<typeof normaliseChatRequest>
+  if (!composerGuard.canSubmit() || viewDisposed) return
+  let assistantMessage!: ReturnType<typeof createAssistantMessage>
+  let userMessage!: Message
+  let submission: ReturnType<typeof claimTypedTurn>
   try {
-    chatRequest = normaliseChatRequest({
-      messages: [
-        ...messages.value.filter(message => message.source !== 'fallback').map(message => ({ role: message.role, content: message.text })),
-        { role: 'user', content: text },
-      ],
-      persona: persona.value,
-      userMemory: userMemory.value,
-    })
+    submission = claimTypedTurn()
   }
   catch (error) {
     lastError.value = error instanceof Error ? error.message : '聊天内容过大，请精简后再发送。'
     return
   }
+  if (!submission) return
+  const { prepared: { text, request: chatRequest, accessCode: turnAccessCode }, turn } = submission
+  const controller = turn.controller
+  const isCurrent = () => chatTurns.isCurrent(turn) && !viewDisposed
 
-  speech?.cancel()
-  avatarContext.beginTurn(text)
-
-  lastError.value = ''
-  interactionNotice.value = ''
-  const userMessage: Message = { id: Date.now(), role: 'user', text }
-  messages.value.push(userMessage)
-  chatScroll?.jumpToLatest()
-  live2d?.acknowledge()
-  input.value = ''
-  await nextTick()
-
-  const assistantMessage = createAssistantMessage(Date.now() + 1)
-  messages.value.push(assistantMessage)
-
-  isGenerating.value = true
-  const controller = new AbortController()
-  activeController.value = controller
-  activeAssistantId.value = assistantMessage.id
+  // Draft consumption and both message IDs are synchronous, so a second submit
+  // from the same event cannot duplicate a request or replace this claim.
+  function claimTypedTurn() {
+    return chatTurns.submit(() => prepareTypedMessage({
+      text: input.value, messages: messages.value, persona: persona.value,
+      userMemory: userMemory.value, accessProtected: accessProtected.value, accessCode: accessCode.value,
+    }), (prepared) => {
+      live2d?.clearReaction()
+      avatarContext.beginTurn(prepared.text)
+      voiceProblem.value = ''
+      lastError.value = ''
+      interactionNotice.value = ''
+      userMessage = { id: nextMessageId(), role: 'user', text: prepared.text }
+      assistantMessage = createAssistantMessage(nextMessageId())
+      messages.value.push(userMessage, assistantMessage)
+      input.value = ''
+      chatScroll?.jumpToLatest()
+      live2d?.acknowledge()
+      return assistantMessage.id
+    })
+  }
   const speechStream: { current: ReturnType<ReturnType<typeof createSpeechController>['beginStream']> | null } = { current: null }
   let chatSucceeded = false
   let latestDelivery: Delivery | undefined
@@ -301,14 +315,16 @@ async function sendMessage() {
   if (turnSpeechEngine === 'cloud') pinCloudProvider()
 
   try {
+    await nextTick()
+    if (!isCurrent()) return
     await streamChat({
       messages: chatRequest.messages,
       persona: chatRequest.persona,
       userMemory: chatRequest.userMemory,
-      accessCode: accessCode.value,
+      accessCode: turnAccessCode,
       signal: controller.signal,
       onDelivery: (delivery) => {
-        if (controller.signal.aborted || activeController.value !== controller)
+        if (!isCurrent())
           return
         assistantMessage.delivery ??= delivery
         latestDelivery = delivery
@@ -317,7 +333,7 @@ async function sendMessage() {
         speechStream.current?.setDelivery(delivery)
       },
       onDelta: (chunk) => {
-        if (controller.signal.aborted || activeController.value !== controller)
+        if (!isCurrent())
           return
         assistantMessage.text += chunk
         assistantMessage.source = 'deepseek'
@@ -329,13 +345,14 @@ async function sendMessage() {
         speechStream.current?.push(chunk)
       },
     })
+    if (!isCurrent()) return
     chatSucceeded = true
     speechStream.current?.finish()
     assistantMessage.delivery ??= chooseDelivery(text, assistantMessage.text)
     providerMode.value = 'deepseek'
   }
   catch (error) {
-    if (controller.signal.aborted)
+    if (!isCurrent())
       return
 
     lastError.value = error instanceof Error ? error.message : '生成回复失败'
@@ -355,21 +372,18 @@ async function sendMessage() {
     }
   }
   finally {
+    // A revoked stream may release late; even its cleanup must not touch the
+    // new turn's speech, status, draft, history persistence, or delivery cues.
+    if (!isCurrent()) return
     if (!chatSucceeded)
       speechStream.current?.cancel()
-    const aborted = controller.signal.aborted
-    if (activeController.value === controller) {
-      isGenerating.value = false
-      activeController.value = null
-      activeAssistantId.value = null
-    }
-    if (!aborted && assistantMessage.text)
+    if (assistantMessage.text)
       assistantMessage.delivery ??= chooseDelivery(text, assistantMessage.text)
-    if (!aborted)
-      saveConversation(messages.value)
-    if (!aborted && assistantMessage.text && !speechStream.current) {
+    saveConversation(messages.value)
+    if (assistantMessage.text && !speechStream.current) {
       speak(assistantMessage.text, assistantMessage.delivery, assistantMessage.deliveryCues)
     }
+    chatTurns.finish(turn)
   }
 }
 
@@ -388,7 +402,7 @@ function applyPersona() {
   }
   savePersona(persona.value)
   if (messages.value.length === 1 && messages.value[0].role === 'assistant') {
-    messages.value = [{ id: Date.now(), role: 'assistant', text: persona.value.greeting }]
+    messages.value = [{ id: nextMessageId(), role: 'assistant', text: persona.value.greeting }]
     clearConversation()
   }
   personaOpen.value = false
@@ -449,6 +463,32 @@ function openVoiceEditor() {
   voiceOpen.value = true
 }
 
+function openRenderEditor() {
+  closeChatSettings()
+  draftRenderProfile.value = selectedRenderProfile.value
+  renderSettingsError.value = ''
+  renderOpen.value = true
+}
+
+function applyRenderProfile() {
+  if (viewDisposed) return
+  try {
+    saveAvatarRenderProfile(draftRenderProfile.value)
+  }
+  catch {
+    renderSettingsError.value = '未能保存画面设置，当前画面保持不变。请检查浏览器本地存储。'
+    return
+  }
+  selectedRenderProfile.value = draftRenderProfile.value
+  try {
+    if (live2d) activeRenderBudget.value = live2d.setRenderProfile(selectedRenderProfile.value)
+    renderOpen.value = false
+  }
+  catch {
+    renderSettingsError.value = '选择已保存，但画面未完整应用。刷新后请重新检查；聊天与语音未被重启。'
+  }
+}
+
 function previewVoice(voice: VoiceId) {
   if (isGenerating.value) return
   activeDelivery.value = 'neutral'
@@ -489,7 +529,7 @@ function applyVoice() {
     const nextVoice = saveVoice(draftVoice.value)
     const nextMode = saveSpeechMode(draftSpeechMode.value)
     const nextConsent = saveCloudProviderConsent(nextMode === 'cloud'
-      && cloudService.value.provider !== 'unavailable' ? cloudService.value.provider : null)
+      ? cloudService.value.scope : null)
     selectedVoice.value = nextVoice
     selectedSpeechMode.value = nextMode
     cloudConsentProvider.value = nextConsent
@@ -503,23 +543,18 @@ function applyVoice() {
 }
 
 function pinCloudProvider() {
-  // Capture the vendor for this speech run. The server compares this guard
-  // before reserving; an already-open page cannot drift to a newly deployed one.
+  // Pin vendor and region for the run, not whichever health responds later.
+  // The server compares both before reserving or sending reply text upstream.
   activeCloudProvider = cloudService.value.provider === 'elevenlabs' ? 'elevenlabs' : 'minimax'
+  activeCloudRegion = cloudService.value.region === 'global' ? 'global' : 'cn'
+  lastCloudUsage.value = null
 }
 
 function stopCurrentTurn() {
   live2d?.clearReaction()
-  const controller = activeController.value
-  if (controller) {
-    controller.abort()
-    activeController.value = null
-    isGenerating.value = false
-    messages.value = interruptAssistantMessage(messages.value, activeAssistantId.value)
-    activeAssistantId.value = null
+  if (chatTurns.stop()) {
     saveConversation(messages.value)
   }
-  speech?.cancel()
   avatarContext.clear()
   voiceProblem.value = ''
   lastError.value = ''
@@ -530,10 +565,7 @@ function stopCurrentTurn() {
 function resetConversation() {
   closeChatSettings()
   live2d?.clearReaction()
-  activeController.value?.abort()
-  activeController.value = null
-  activeAssistantId.value = null
-  speech?.cancel()
+  chatTurns.stop()
   avatarContext.clear()
   voiceProblem.value = ''
   isGenerating.value = false
@@ -541,7 +573,7 @@ function resetConversation() {
   lastError.value = ''
   interactionNotice.value = ''
   messages.value = [{
-    id: Date.now(),
+    id: nextMessageId(),
     role: 'assistant',
     text: persona.value.greeting,
   }]
@@ -601,6 +633,7 @@ function saveAccessCode() {
               <button type="button" @click="openPersonaEditor">角色人格</button>
               <button type="button" @click="openMemoryEditor">个人记忆{{ userMemory ? ' · 已保存' : '' }}</button>
               <button type="button" :disabled="isGenerating" @click="openVoiceEditor">选择声线</button>
+              <button type="button" @click="openRenderEditor">画面与性能</button>
               <button type="button" @click="resetConversation">清空当前对话</button>
             </div>
           </details>
@@ -628,9 +661,9 @@ function saveAccessCode() {
       </form>
 
       <form class="composer" @submit.prevent="sendMessage">
-        <input ref="composerInput" v-model="input" :maxlength="MAX_MESSAGE_CHARS" :disabled="accessProtected && !accessCode" :aria-label="`发送给 ${characterName} 的消息`" autocomplete="off" :placeholder="isGenerating ? '可以先写下一句，停下后发送……' : '输入一段文字……'" @focus="composerFocused = true" @blur="composerFocused = false">
-        <button type="submit" :disabled="isGenerating || !input.trim() || (accessProtected && !accessCode)">
-          {{ isGenerating ? '生成中' : '发送' }}
+        <input ref="composerInput" v-model="input" :maxlength="MAX_MESSAGE_CHARS" :disabled="accessProtected && !accessCode" :aria-label="`发送给 ${characterName} 的消息`" autocomplete="off" :placeholder="canInterrupt ? '输入下一句，直接打断并发送……' : '输入一段文字……'" @focus="composerFocused = true" @blur="composerFocused = false" @compositionstart="composerGuard.compositionStart" @compositionend="composerGuard.compositionEnd" @keydown="composerGuard.keydown">
+        <button type="submit" :disabled="!input.trim() || (accessProtected && !accessCode)">
+          {{ canInterrupt ? '打断并发送' : '发送' }}
         </button>
       </form>
 
@@ -729,6 +762,35 @@ function saveAccessCode() {
       </aside>
     </div>
 
+    <div v-if="renderOpen" class="persona-backdrop" @click.self="renderOpen = false">
+      <aside class="persona-panel voice-panel" aria-label="画面与性能设置">
+        <div class="persona-heading">
+          <div>
+            <p class="eyebrow">DISPLAY</p>
+            <h2>画面与性能</h2>
+          </div>
+          <button class="close-button" type="button" aria-label="关闭画面设置" @click="renderOpen = false">×</button>
+        </div>
+        <p class="persona-intro">节能档保留嘴形、表情与动作，只降低角色的帧率和绘制分辨率。不切换声线，也不会重播语音或重新载入人物。</p>
+        <form class="persona-form" @submit.prevent="applyRenderProfile">
+          <label class="speech-mode-field">
+            <span>角色画面</span>
+            <select v-model="draftRenderProfile" aria-label="角色画面模式">
+              <option value="auto">自动 · 按设备信息</option>
+              <option value="economy">节能 · 30 fps / 1x 像素上限</option>
+            </select>
+          </label>
+          <p class="memory-hint">自动档依据设备提示选择 30 或 60 fps，上限不是实际测速。若发热或卡顿，可以手动选节能；角色贴图与语音模型大小不变。</p>
+          <p v-if="activeRenderBudget" class="memory-hint" role="status">当前帧率上限 {{ activeRenderBudget.maxFPS }} fps · 绘制像素倍率 {{ activeRenderBudget.resolution.toFixed(2) }}x。抗锯齿在角色载入时确定，切档不会重建绘图上下文。</p>
+          <p v-else class="memory-hint" role="status">选择会在角色载入后应用，文字聊天与语音仍可使用。</p>
+          <p v-if="renderSettingsError" class="memory-warning" role="alert">{{ renderSettingsError }}</p>
+          <div class="persona-actions">
+            <button class="primary-button" type="submit">保存并应用画面设置</button>
+          </div>
+        </form>
+      </aside>
+    </div>
+
     <div v-if="voiceOpen" class="persona-backdrop" @click.self="voiceOpen = false">
       <aside class="persona-panel voice-panel" aria-label="声线设置">
         <div class="persona-heading">
@@ -751,7 +813,7 @@ function saveAccessCode() {
             </select>
           </label>
           <p class="memory-hint">{{ draftSpeechPolicy.notice }}</p>
-          <p v-if="draftSpeechMode === 'cloud' && cloudAvailable && cloudConsentProvider !== cloudService.provider" class="memory-warning" role="status">当前云端供应商尚未确认。试听会发送这段测试文字；确认并保存后才用于后续回复。</p>
+          <p v-if="draftSpeechMode === 'cloud' && cloudAvailable && cloudConsentProvider !== cloudService.scope" class="memory-warning" role="status">当前云端供应商或地区尚未确认。试听会发送这段测试文字；确认并保存后才用于后续回复。</p>
           <p class="memory-hint">本地 Kokoro 合成不上传朗读正文；浏览器语音可能使用系统联网声线。只有你选择云端模式时，需朗读的回复正文才会发给服务端配置的 {{ cloudProviderLabel }} 服务，密钥仅保存在服务器。聊天内容仍会发给 DeepSeek。</p>
           <button class="secondary-button" type="button" :disabled="isGenerating" @click="previewSpeechMode">试听当前模式</button>
           <div v-for="option in draftSpeechPolicy.engine === 'local' ? VOICE_OPTIONS : []" :key="option.id" class="voice-choice">
@@ -762,6 +824,10 @@ function saveAccessCode() {
             <button class="secondary-button" type="button" :aria-label="`试听${option.label}`" :disabled="isGenerating" @click="previewVoice(option.id)">试听</button>
           </div>
           <p class="memory-hint" role="status">{{ voiceProblem || voiceLabel }}</p>
+          <p v-if="lastCloudUsage" class="memory-hint" role="status">
+            最近一段云端合成：{{ lastCloudUsage.label }} · {{ lastCloudUsage.billableCharacters }} 个计费字符<span v-if="lastCloudUsage.textCharacters !== undefined">（文本参考 {{ lastCloudUsage.textCharacters }} 字符）</span>。
+            这是供应商返回的单段用量，不是累计费用或账户余额；实际扣款以平台账单为准。
+          </p>
           <p v-if="voiceSettingsError" class="memory-warning" role="alert">{{ voiceSettingsError }}</p>
           <div class="persona-actions">
             <button class="primary-button" type="submit" :disabled="isGenerating">{{ draftSpeechMode === 'cloud' ? '确认并保存云端设置' : '保存语音设置' }}</button>

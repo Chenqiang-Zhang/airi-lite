@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>原生音频暂停与拖动回归 · 仅本机</title>
+  <style>
+    :root { font: 15px/1.55 system-ui; color: #332f3c; background: #f5f1f8; }
+    body { margin: 0; }
+    main { max-width: 1100px; margin: auto; padding: 24px; }
+    h1 { font-size: 24px; margin: 0 0 12px; }
+    h2 { font-size: 17px; }
+    p { margin: 10px 0; }
+    .panels { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(240px, 1fr); gap: 20px; }
+    .card { padding: 18px; border: 1px solid #ded4e7; border-radius: 14px; background: #fff; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+    button { font: inherit; padding: 8px 12px; border: 1px solid #beb0cc; border-radius: 8px; background: #f8f5fb; cursor: pointer; }
+    button:disabled { opacity: .45; cursor: default; }
+    audio { width: 100%; }
+    pre { margin: 10px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.65 ui-monospace, monospace; }
+    #trace { max-height: 330px; overflow-y: auto; }
+    #stage { height: 420px; width: 100%; overflow: hidden; }
+    #mouth-track { height: 12px; background: #eee8f4; border-radius: 10px; overflow: hidden; }
+    #mouth-bar { height: 100%; width: 0; background: #9973ba; }
+    .warning { color: #6d536e; }
+    #problem { color: #943d46; }
+    @media (max-width: 760px) { main { padding: 14px; } .panels { grid-template-columns: 1fr; } #stage { height: 300px; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>原生音频暂停与拖动回归</h1>
+  <p class="warning">仅限 loopback。音源是本页生成的两段调制音调（各 6 秒，bright / soft），不是人声，也不能证明语音自然度或音素对应。使用项目真实 createSpeechController 和原生 HTMLAudioElement；没有 Key、TTS 网络请求或大模型下载。</p>
+  <div class="panels">
+    <section class="card">
+      <h2>1. 建立完整缓存</h2>
+      <p>点击开始，等两段播完；播放器将自动装入 12 秒完整缓存并暂停。随后回放、暂停和拖动均不应重新合成。系统音量可先调低。</p>
+      <div class="controls">
+        <button id="start" disabled>开始两段诊断音调</button>
+        <button id="replay" disabled>播放完整缓存</button>
+        <button id="pause" disabled>暂停</button>
+        <button id="resume" disabled>继续</button>
+        <button id="stop" disabled>取消并清空</button>
+      </div>
+      <audio id="audio" controls preload="auto" aria-label="原生诊断音频播放器"></audio>
+      <h2>2. 原生拖动</h2>
+      <p>下面按钮仅设置 audio.currentTime，不伪造 seeking / seeked / playing 事件。也可以使用原生播放器进度条。</p>
+      <div class="controls">
+        <button id="seek-bright" disabled>拖到 2 秒 · bright</button>
+        <button id="seek-soft" disabled>拖到 8 秒 · soft</button>
+      </div>
+      <div id="mouth-track" aria-label="生产控制器嘴形开口"><div id="mouth-bar"></div></div>
+      <pre id="status" aria-live="polite">检查本机地址……</pre>
+      <p id="problem" aria-live="polite"></p>
+      <h2>运行断言</h2>
+      <pre id="assertions" aria-live="polite">尚未操作。PASS 只代表本次原生媒体状态与缓存检查。</pre>
+      <h2>原生媒体事件（最近 48 条）</h2>
+      <pre id="trace"></pre>
+    </section>
+    <aside class="card">
+      <h2>可选：真实 Hiyori</h2>
+      <p>音频诊断不依赖角色。按需加载固定官方 Cubism Core 和仓库已有模型，失败仍可完成媒体回归。</p>
+      <button id="avatar" disabled>加载真实 Live2D</button>
+      <p id="avatar-status">未加载（不会自动访问官方 Core）。</p>
+      <label>真实角色渲染档：<select id="render-profile" aria-label="诊断角色渲染档" disabled><option value="auto">自动</option><option value="economy">节能</option></select></label>
+      <p id="render-budget">载入角色后可原地切档；不改变音频或保存用户设置。</p>
+      <div id="stage"></div>
+      <p>This content uses sample data owned and copyrighted by Live2D Inc.<br>Hiyori Momose · Illustration: Kani Biimu</p>
+      <p class="warning">嘴形使用真实 PCM 能量轨迹，而非中文音素标注。原生事件数量与是否真的听到音调是不同证据；仍需检查系统输出与听感。</p>
+    </aside>
+  </div>
+</main>
+<script type="module">
+  const byId = id => document.getElementById(id)
+  const status = byId('status')
+  const allowed = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)
+    && ['http:', 'https:'].includes(location.protocol)
+  if (!allowed) {
+    status.textContent = '拒绝运行：此诊断页只允许 http(s)://127.0.0.1、localhost 或 [::1]。'
+  }
+  else {
+    const { createSpeechController } = await import('../src/speech.ts')
+    const audio = byId('audio')
+    const SAMPLE_RATE = 24000
+    const SEGMENT_SECONDS = 6
+    const FULL_SECONDS = SEGMENT_SECONDS * 2
+    let actor = null, avatarAbort = null, disposed = false, epoch = 0
+    let creationAntialias = null
+    let playing = false, preparing = false, audioReady = false, voiceState = 'idle'
+    let delivery = 'neutral', mouth = 0, maxMouth = 0, form = 0, problem = '', failureCount = 0
+    let synthesisCount = 0, sourceLoads = 0, completeCache = false
+    const nativeCounts = { playing: 0, seeking: 0, seeked: 0, waiting: 0, play: 0, pause: 0 }
+    const history = [], checks = [], sourceIds = new Map()
+    let nextSourceId = 1, observedSeek = null
+
+    const sourceId = () => {
+      const source = audio.currentSrc || audio.getAttribute('src') || ''
+      if (!source) return '无'
+      if (!sourceIds.has(source)) sourceIds.set(source, nextSourceId++)
+      return `音源 ${sourceIds.get(source)}`
+    }
+    const note = message => {
+      history.push(`${performance.now().toFixed(0)}ms ${message}`)
+      if (history.length > 48) history.shift()
+      byId('trace').textContent = history.join('\n')
+    }
+    const check = (ok, message) => {
+      if (!ok) failureCount++
+      checks.push(`${ok ? 'PASS' : 'FAIL'} ${message}`)
+      if (checks.length > 18) checks.shift()
+      byId('assertions').textContent = checks.join('\n')
+      byId('assertions').dataset.failures = String(failureCount)
+    }
+    const inform = message => {
+      checks.push(`INFO ${message}`)
+      if (checks.length > 18) checks.shift()
+      byId('assertions').textContent = checks.join('\n')
+    }
+    const duration = () => Number.isFinite(audio.duration) ? audio.duration : 0
+    const isFullCache = () => completeCache && audioReady
+      && Math.abs(duration() - FULL_SECONDS) < 0.03 && Boolean(audio.currentSrc)
+    const syncActor = () => {
+      actor?.setActivity(playing ? 'speaking' : preparing ? 'thinking' : 'idle')
+      actor?.setDelivery(playing ? delivery : 'neutral')
+    }
+    const render = () => {
+      status.textContent = [
+        `控制器状态: ${voiceState}（cloud 表示注入路径，不是网络调用）`,
+        `playing: ${playing} · preparing: ${preparing} · audioReady: ${audioReady}`,
+        `原生 paused: ${audio.paused} · seeking: ${audio.seeking} · ended: ${audio.ended}`,
+        `readyState: ${audio.readyState} · currentTime: ${audio.currentTime.toFixed(3)} / ${duration().toFixed(3)} 秒`,
+        `mouth: ${mouth.toFixed(4)} · 最大开口: ${maxMouth.toFixed(4)} · form: ${form.toFixed(4)} · delivery: ${delivery}`,
+        `合成段次数: ${synthesisCount} · 音源 loadedmetadata 次数: ${sourceLoads} · 当前: ${sourceId()}`,
+        `完整缓存: ${isFullCache()} · 实际 playing / seeking / seeked: ${nativeCounts.playing} / ${nativeCounts.seeking} / ${nativeCounts.seeked}`,
+        `实际 play / pause / waiting: ${nativeCounts.play} / ${nativeCounts.pause} / ${nativeCounts.waiting}`,
+        `媒体 error: ${audio.error?.code ?? '无'} · 静音: ${audio.muted} · 音量: ${audio.volume.toFixed(2)}`,
+        `本轮断言失败累计: ${failureCount}（不随日志裁剪清除）`,
+      ].join('\n')
+      Object.assign(status.dataset, {
+        playing: String(playing), preparing: String(preparing), paused: String(audio.paused),
+        seeking: String(audio.seeking), readyState: String(audio.readyState),
+        mouth: String(mouth), maxMouth: String(maxMouth), form: String(form), delivery,
+        synthesisCount: String(synthesisCount), sourceLoads: String(sourceLoads),
+        playingEvents: String(nativeCounts.playing), seekingEvents: String(nativeCounts.seeking),
+        seekedEvents: String(nativeCounts.seeked), completeCache: String(isFullCache()),
+      })
+      byId('mouth-bar').style.width = `${Math.min(1, Math.max(0, mouth)) * 100}%`
+      byId('problem').textContent = problem
+      byId('replay').disabled = !isFullCache()
+      byId('seek-bright').disabled = !isFullCache()
+      byId('seek-soft').disabled = !isFullCache()
+      byId('pause').disabled = !audioReady
+      byId('resume').disabled = !audioReady
+      syncActor()
+      if (actor) {
+        const budget = actor.renderBudget, canvas = byId('stage').querySelector('canvas')
+        byId('render-budget').textContent = `帧率上限 ${budget.maxFPS} fps · 绘制倍率 ${budget.resolution.toFixed(2)}x · 创建时抗锯齿 ${budget.antialias} · 画布 ${canvas?.width} × ${canvas?.height}`
+      }
+    }
+
+    function diagnosticTone(tone) {
+      const data = new Float32Array(SAMPLE_RATE * SEGMENT_SECONDS)
+      const base = tone === 'soft' ? 205 : 330
+      for (let index = 0; index < data.length; index++) {
+        const time = index / SAMPLE_RATE
+        const edge = Math.min(1, time / .07, (SEGMENT_SECONDS - time) / .07)
+        const pulse = Math.max(0, Math.sin(time * Math.PI * (tone === 'soft' ? 5 : 7))) ** 2
+        const pause = time > 2.9 && time < 3.15 ? 0 : 1
+        const carrier = Math.sin(2 * Math.PI * base * time + .7 * Math.sin(time * Math.PI * 3))
+          + .2 * Math.sin(2 * Math.PI * base * 2 * time)
+        data[index] = .11 * edge * pause * pulse * carrier
+      }
+      return data
+    }
+    const controller = createSpeechController(audio, {
+      onState(value) { voiceState = value; render() },
+      onPlaying(value) { playing = value; render() },
+      onPreparing(value) { preparing = value; render() },
+      onAudioReady(value) { audioReady = value; render() },
+      onProblem(value) { problem = value; render() },
+      onDelivery(value) {
+        delivery = value
+        note(`生产控制器语气 ${value} @ ${audio.currentTime.toFixed(3)}s`)
+        render()
+      },
+      onMouth(opening, value) {
+        mouth = opening ?? 0; form = value
+        maxMouth = Math.max(maxMouth, mouth)
+        actor?.setMouth(opening, value)
+        render()
+      },
+    }, {
+      async synthesizeCloud(sentence, signal) {
+        if (signal.aborted) throw new DOMException('Cancelled', 'AbortError')
+        synthesisCount++
+        note(`本机 PCM 合成段 ${synthesisCount} · ${sentence.delivery}（无网络）`)
+        render()
+        return { samples: diagnosticTone(sentence.delivery), sampleRate: SAMPLE_RATE }
+      },
+    })
+
+    // Listeners are installed after production controller listeners. These only
+    // observe browser-generated events; the fixture never dispatches a media event.
+    const eventTypes = ['loadstart', 'emptied', 'loadedmetadata', 'loadeddata', 'canplay',
+      'canplaythrough', 'play', 'playing', 'pause', 'waiting', 'seeking', 'seeked', 'ended', 'error']
+    const mediaListeners = []
+    for (const type of eventTypes) {
+      const listener = () => {
+        if (type in nativeCounts) nativeCounts[type]++
+        if (type === 'loadedmetadata') {
+          sourceLoads++
+          completeCache = synthesisCount === 2 && Math.abs(duration() - FULL_SECONDS) < .03
+          if (completeCache) {
+            check(audio.paused, '12 秒完整缓存已装入并保持暂停；没有自动重播。')
+            check(synthesisCount === 2, '完整缓存来自恰好 2 段本机 PCM。')
+          }
+        }
+        note(`原生 ${type} · ${sourceId()} · t=${audio.currentTime.toFixed(3)} · paused=${audio.paused} · seeking=${audio.seeking} · ready=${audio.readyState}`)
+        if (type === 'seeking') {
+          observedSeek = { epoch, source: audio.currentSrc, paused: audio.paused,
+            synthesis: synthesisCount, loads: sourceLoads, playingEvents: nativeCounts.playing,
+            wasFullCache: isFullCache() }
+          check(!playing && mouth === 0 && form === 0, '原生 seeking 时控制器停下嘴形。')
+        }
+        if (type === 'seeked' && observedSeek) {
+          const operation = observedSeek
+          observedSeek = null
+          // Event dispatch and play() promises are asynchronous. Observe a later
+          // frame, without manufacturing a playing event or hiding real ones.
+          setTimeout(() => {
+            if (disposed || operation.epoch !== epoch || operation.source !== audio.currentSrc) return
+            if (operation.wasFullCache) {
+              check(synthesisCount === operation.synthesis, '缓存 seek 未重新合成。')
+              check(sourceLoads === operation.loads, '缓存 seek 没有重新加载音源。')
+            }
+            if (audio.paused) check(!playing && mouth === 0 && form === 0, '暂停状态 seeked 后仍闭嘴，不擅自播放。')
+            else if (!audio.seeking && audio.readyState >= 3 && !audio.ended && !audio.error)
+              check(playing, '播放中 seeked 且有未来数据时恢复真实嘴形循环。')
+            else inform('seeked 后暂无可播放未来数据，暂不判定恢复；检查后续原生事件。')
+            inform(`本次 seek 后额外原生 playing 事件实际发生 ${nativeCounts.playing - operation.playingEvents} 次；不要求一定有或没有。`)
+            render()
+          }, 160)
+        }
+        if (type === 'pause' && audio.paused)
+          check(!playing && mouth === 0 && form === 0, '原生 pause 后嘴形归零。')
+        render()
+      }
+      audio.addEventListener(type, listener)
+      mediaListeners.push([type, listener])
+    }
+    const ticker = setInterval(render, 100)
+    const snapshot = () => ({ epoch, synthesis: synthesisCount, source: audio.currentSrc,
+      loads: sourceLoads, full: isFullCache() })
+    const verifyCachedOperation = (operation, name) => {
+      setTimeout(() => {
+        if (disposed || operation.epoch !== epoch) return
+        if (!operation.full) { inform(`${name} 在逐段生成期间进行；不作为完整缓存断言。`); return }
+        check(synthesisCount === operation.synthesis, `${name} 未重新合成。`)
+        check(audio.currentSrc === operation.source && sourceLoads === operation.loads, `${name} 复用同一完整缓存音源。`)
+        render()
+      }, 180)
+    }
+    byId('start').addEventListener('click', () => {
+      epoch++
+      controller.cancel()
+      synthesisCount = 0; sourceLoads = 0; completeCache = false; observedSeek = null
+      maxMouth = 0; failureCount = 0; byId('assertions').dataset.failures = '0'
+      for (const type in nativeCounts) nativeCounts[type] = 0
+      history.length = 0; checks.length = 0; sourceIds.clear(); nextSourceId = 1
+      byId('trace').textContent = ''; byId('assertions').textContent = '等待真实媒体事件……'
+      note('开始：真实控制器的注入路径，仅生成 PCM，不下载模型。')
+      const stream = controller.beginStream('', 'bright', 'zf_001', 'cloud')
+      stream.push('第一段是轻快的诊断音调。')
+      stream.setDelivery('soft')
+      stream.push('第二段是柔和的诊断音调。')
+      stream.finish()
+      render()
+    })
+    byId('replay').addEventListener('click', async () => {
+      if (!isFullCache()) return
+      const operation = snapshot()
+      note('用户操作：原生 currentTime=0，然后 play() 回放完整缓存。')
+      audio.currentTime = 0
+      try { await audio.play(); verifyCachedOperation(operation, '完整缓存回放') }
+      catch (error) { problem = `原生播放失败: ${error.message}`; render() }
+    })
+    byId('pause').addEventListener('click', () => {
+      const operation = snapshot()
+      note('用户操作：原生 pause()。')
+      audio.pause()
+      verifyCachedOperation(operation, '暂停')
+    })
+    byId('resume').addEventListener('click', async () => {
+      if (!audioReady) return
+      const operation = snapshot()
+      note('用户操作：原生 play() 继续。')
+      try { await audio.play(); verifyCachedOperation(operation, '继续播放') }
+      catch (error) { problem = `原生播放失败: ${error.message}`; render() }
+    })
+    for (const [id, target] of [['seek-bright', 2], ['seek-soft', 8]]) {
+      byId(id).addEventListener('click', () => {
+        if (!isFullCache()) return
+        note(`用户操作：原生 currentTime=${target}；不调用 play()。`)
+        audio.currentTime = target
+        render()
+      })
+    }
+    byId('stop').addEventListener('click', () => {
+      epoch++
+      controller.cancel()
+      completeCache = false; observedSeek = null
+      note('用户操作：取消并清空缓存。')
+      check(!playing && !preparing && !audioReady && mouth === 0 && form === 0, '取消后音频及嘴形状态归零。')
+      render()
+    })
+
+    byId('render-profile').addEventListener('change', () => {
+      if (!actor || disposed) return
+      const operation = snapshot(), canvas = byId('stage').querySelector('canvas')
+      const paused = audio.paused, time = audio.currentTime
+      const budget = actor.setRenderProfile(byId('render-profile').value)
+      check(byId('stage').querySelector('canvas') === canvas, '切渲染档复用同一角色画布。')
+      check(audio.paused === paused && audio.currentTime >= time - .02, '切渲染档不暂停或倒带音频。')
+      check(budget.antialias === creationAntialias, '切渲染档如实保留创建时的抗锯齿策略。')
+      check(Math.abs(canvas.width - parseFloat(canvas.style.width) * budget.resolution) <= 1
+        && Math.abs(canvas.height - parseFloat(canvas.style.height) * budget.resolution) <= 1,
+        '真实画布 backing buffer 按当前绘制倍率更新。')
+      note(`用户原地切角色渲染档：${byId('render-profile').value}，帧率上限 ${budget.maxFPS}。`)
+      verifyCachedOperation(operation, '切角色渲染档')
+      render()
+    })
+
+    byId('avatar').addEventListener('click', async () => {
+      if (actor || avatarAbort || disposed) return
+      const button = byId('avatar'), output = byId('avatar-status')
+      button.disabled = true
+      output.textContent = '加载固定官方 Core 与本地 Hiyori；媒体诊断仍可操作……'
+      avatarAbort = new AbortController()
+      const timeout = setTimeout(() => avatarAbort?.abort(), 20000)
+      try {
+        if (!window.Live2DCubismCore) {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement('script')
+            script.src = 'https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js'
+            const finish = error => {
+              script.onload = null; script.onerror = null
+              avatarAbort?.signal.removeEventListener('abort', aborted)
+              error ? reject(error) : resolve()
+            }
+            const aborted = () => { script.remove(); finish(new Error('角色加载超时或取消')) }
+            script.onload = () => finish()
+            script.onerror = () => finish(new Error('官方 Cubism Core 无法加载'))
+            avatarAbort.signal.addEventListener('abort', aborted, { once: true })
+            document.head.appendChild(script)
+          })
+        }
+        const { mountHiyori } = await import('../src/live2d.ts')
+        const mounted = await mountHiyori(byId('stage'), { signal: avatarAbort.signal })
+        if (disposed) { mounted.destroy(); return }
+        actor = mounted
+        creationAntialias = actor.renderBudget.antialias
+        byId('render-profile').disabled = false
+        actor.setMouth(mouth, form)
+        syncActor()
+        output.textContent = '真实 Hiyori 已挂载，嘴形与语气来自生产控制器回调。'
+        render()
+      }
+      catch (error) {
+        if (!disposed) {
+          output.textContent = `角色不可用: ${error.message}。音频诊断不受影响。`
+          button.disabled = false
+        }
+      }
+      finally { clearTimeout(timeout); avatarAbort = null }
+    })
+    byId('start').disabled = false
+    byId('stop').disabled = false
+    byId('avatar').disabled = false
+    render()
+    addEventListener('pagehide', () => {
+      disposed = true; epoch++
+      clearInterval(ticker)
+      avatarAbort?.abort()
+      controller.dispose()
+      actor?.destroy()
+      for (const [type, listener] of mediaListeners) audio.removeEventListener(type, listener)
+    }, { once: true })
+  }
+</script>
+</body>
+</html>

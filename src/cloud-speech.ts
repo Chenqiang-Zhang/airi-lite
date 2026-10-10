@@ -21,6 +21,13 @@ export interface CloudSpeechClip {
   sampleRate: number
   words: SpeechWord[]
   characters?: SpeechCharacter[]
+  usage?: SpeechUsage
+}
+
+// Provider-reported accounting metadata, not a balance or local estimate.
+export interface SpeechUsage {
+  billableCharacters: number
+  textCharacters?: number
 }
 
 export interface CloudSpeechOptions {
@@ -29,6 +36,7 @@ export interface CloudSpeechOptions {
   // Match the explicitly confirmed service; this cannot select the server's
   // provider. Existing callers default to MiniMax rather than a new paid one.
   expectedProvider?: 'minimax' | 'elevenlabs'
+  expectedRegion?: 'cn' | 'global'
   accessCode?: string
   signal?: AbortSignal
   // A root-relative proxy route, never a provider URL. This also lets Node
@@ -56,7 +64,7 @@ const MESSAGES: Record<SpeechApiErrorCode, string> = {
   unauthorized: '语音服务需要有效体验码，请检查体验码后再试。',
   rate_limited: '语音额度已用完或请求过于频繁，请稍后再试。',
   unavailable: '云端语音暂时不可用或尚未启用，请稍后再试。',
-  provider_changed: '云端语音供应商已变化，请重新选择并确认云端模式。',
+  provider_changed: '云端语音供应商已变化或地区已变化，请重新选择并确认云端模式。',
   upstream: '语音服务暂时无法生成音频，请稍后再试。',
   invalid_response: '语音服务返回了无法使用的音频或字幕，请稍后再试。',
   network: '无法连接语音服务，请检查网络后再试。',
@@ -84,6 +92,7 @@ const MAX_BASE64_LENGTH = Math.ceil(MAX_AUDIO_BYTES / 3) * 4
 const MAX_WORDS = 1024
 const MAX_CHARACTERS = 1024
 const MAX_DURATION_SECONDS = 30
+const MAX_USAGE_CHARACTERS = 1_000_000
 const MIN_RMS = 0.0001
 const TIME_TOLERANCE = 0.05
 const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
@@ -323,6 +332,21 @@ function decodeCharacters(value: unknown, duration: number): SpeechCharacter[] {
   return characters
 }
 
+function decodeUsage(value: unknown): SpeechUsage | undefined {
+  if (value === undefined) return undefined
+  if (!record(value) || Object.keys(value).some(key => !['billableCharacters', 'textCharacters'].includes(key)))
+    throw new SpeechApiError('invalid_response')
+  const validCount = (count: unknown) => typeof count === 'number'
+    && Number.isSafeInteger(count) && count >= 0 && count <= MAX_USAGE_CHARACTERS
+  if (!validCount(value.billableCharacters)
+    || (Object.hasOwn(value, 'textCharacters') && !validCount(value.textCharacters)))
+    throw new SpeechApiError('invalid_response')
+  return {
+    billableCharacters: value.billableCharacters as number,
+    ...(Object.hasOwn(value, 'textCharacters') ? { textCharacters: value.textCharacters as number } : {}),
+  }
+}
+
 function httpError(status: number): SpeechApiError {
   if (status === 401 || status === 403)
     return new SpeechApiError('unauthorized', status)
@@ -344,6 +368,9 @@ export async function fetchCloudSpeech(
   throwIfAborted(options.signal)
   const expectedProvider = options.expectedProvider === undefined ? 'minimax' : options.expectedProvider
   if (expectedProvider !== 'minimax' && expectedProvider !== 'elevenlabs')
+    throw new SpeechApiError('invalid_request')
+  if (options.expectedRegion !== undefined
+    && (expectedProvider !== 'minimax' || !['cn', 'global'].includes(options.expectedRegion)))
     throw new SpeechApiError('invalid_request')
   if (typeof options.text !== 'string' || options.text.length > MAX_TEXT_LENGTH
     || !hasSpokenContent(options.text) || !DELIVERIES.includes(options.delivery))
@@ -369,7 +396,10 @@ export async function fetchCloudSpeech(
         'Content-Type': 'application/json',
         ...(options.accessCode ? { 'X-Demo-Access-Code': options.accessCode } : {}),
       },
-      body: JSON.stringify({ text: options.text, delivery: options.delivery, expectedProvider }),
+      body: JSON.stringify({
+        text: options.text, delivery: options.delivery, expectedProvider,
+        ...(options.expectedRegion !== undefined ? { expectedRegion: options.expectedRegion } : {}),
+      }),
       signal: options.signal,
     })
   }
@@ -399,6 +429,7 @@ export async function fetchCloudSpeech(
     // to allocate audio buffers, then check against the actual decoded clip.
     const words = decodeWords(payload.words, MAX_DURATION_SECONDS)
     const characters = decodeCharacters(payload.characters, MAX_DURATION_SECONDS)
+    const usage = decodeUsage(payload.usage)
     throwIfAborted(options.signal)
     const decodeAudio = dependencies.decodeAudio
       ?? ((audio: ArrayBuffer, signal?: AbortSignal) => decodeWithAudioContext(audio, signal, requestedSampleRate))
@@ -408,7 +439,7 @@ export async function fetchCloudSpeech(
     decodeWords(words, samples.length / sampleRate)
     decodeCharacters(characters, samples.length / sampleRate)
     throwIfAborted(options.signal)
-    return { samples, sampleRate, words, characters }
+    return { samples, sampleRate, words, characters, ...(usage ? { usage } : {}) }
   }
   catch (error) {
     if (options.signal?.aborted || isAbortError(error))

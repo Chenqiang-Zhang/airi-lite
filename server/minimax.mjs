@@ -1,7 +1,10 @@
 import { SpeechProviderError } from './speech-error.mjs'
 
 const MODELS = new Set(['speech-2.8-hd', 'speech-2.8-turbo'])
-const ENDPOINTS = { cn: 'https://api.minimax.cn/v1/t2a_v2' }
+export const MINIMAX_ENDPOINTS = Object.freeze({
+  cn: 'https://api.minimax.cn/v1/t2a_v2',
+  global: 'https://api.minimax.io/v1/t2a_v2',
+})
 export const SPEECH_SAMPLE_RATE = 32_000
 export const MAX_SPEECH_SECONDS = 30
 export const MAX_AUDIO_BYTES = 2 * 1_024 * 1_024
@@ -9,13 +12,20 @@ const MAX_STREAM_BYTES = 6_000_000
 const MAX_FRAME_BYTES = 4_500_000
 const MAX_STREAM_EVENTS = 2_048
 const MAX_WORDS = 720
+// A protocol-sanity ceiling, not a provider billing rule or Chinese multiplier.
+// The request is independently capped at 360 UTF-16 units by the handler; this
+// generous ceiling rejects nonsensical upstream accounting without guessing how
+// either region bills any particular language. It does not alter reservations.
+export const MAX_USAGE_CHARACTERS = 1_000_000
 
 export class MinimaxSpeechError extends SpeechProviderError {}
 
 export function readMinimaxConfig(env = process.env) {
   const selectedModel = env.MINIMAX_TTS_MODEL?.trim() || 'speech-2.8-turbo'
   const model = MODELS.has(selectedModel) ? selectedModel : 'speech-2.8-turbo'
-  const region = env.MINIMAX_TTS_REGION?.trim() || 'cn'
+  const selectedRegion = env.MINIMAX_TTS_REGION?.trim() || 'cn'
+  const region = typeof selectedRegion === 'string' && Object.hasOwn(MINIMAX_ENDPOINTS, selectedRegion)
+    ? selectedRegion : null
   // Reject malformed configuration before health=true or any paid reservation.
   // Native fetch headers cannot represent arbitrary Unicode; do not trim away
   // hidden key whitespace/control characters and accidentally advertise success.
@@ -27,14 +37,18 @@ export function readMinimaxConfig(env = process.env) {
     && rawVoiceId.isWellFormed() && !/[\u0000-\u001f\u007f-\u009f]/.test(rawVoiceId)
   const rawLimit = env.MINIMAX_TTS_DAILY_CHAR_LIMIT?.trim() || ''
   const dailyLimit = /^\d+$/.test(rawLimit) ? Number(rawLimit) : 0
-  const endpoint = Object.hasOwn(ENDPOINTS, region) ? ENDPOINTS[region] : null
+  const endpoint = region ? MINIMAX_ENDPOINTS[region] : null
   const configured = env.MINIMAX_TTS_ENABLED === '1' && validApiKey && validVoiceId && Boolean(endpoint)
     && MODELS.has(selectedModel) && Number.isSafeInteger(dailyLimit) && dailyLimit > 0
-  return Object.freeze({ configured, model, endpoint, apiKey, voiceId, dailyLimit })
+  return Object.freeze({ configured, model, region, endpoint, apiKey, voiceId, dailyLimit })
 }
 
 export function speechHealth(config) {
-  return { configured: config.configured, provider: 'minimax', model: config.model }
+  const selectedRegion = config.region === undefined ? 'cn' : config.region
+  const region = typeof selectedRegion === 'string' && Object.hasOwn(MINIMAX_ENDPOINTS, selectedRegion)
+    ? selectedRegion : null
+  return { configured: config.configured === true && MODELS.has(config.model) && Boolean(region)
+    && config.endpoint === MINIMAX_ENDPOINTS[region], provider: 'minimax', model: config.model, region }
 }
 
 export function buildMinimaxRequest(config, { text, delivery }) {
@@ -62,7 +76,12 @@ export function buildMinimaxRequest(config, { text, delivery }) {
 }
 
 export async function synthesiseMinimax(config, request, { fetchImpl = fetch, signal } = {}) {
-  if (!config.configured)
+  // Defend injected configs as well as readMinimaxConfig: neither a caller nor
+  // a client-provided field may select another host for the secret header.
+  const region = config.region === undefined ? 'cn' : config.region
+  if (!config.configured || !MODELS.has(config.model) || typeof region !== 'string'
+    || !Object.hasOwn(MINIMAX_ENDPOINTS, region)
+    || config.endpoint !== MINIMAX_ENDPOINTS[region])
     throw new MinimaxSpeechError('TTS_NOT_CONFIGURED')
   signal?.throwIfAborted()
   let upstream
@@ -229,6 +248,7 @@ export async function collectMinimaxStream(body, { textLength, signal } = {}) {
       || finalInfo.audio_channel !== 1 || finalInfo.audio_size !== audioBytes
       || !Number.isFinite(duration) || duration <= 0 || duration > MAX_SPEECH_SECONDS)
       throw new MinimaxSpeechError()
+    const usage = readUsage(finalInfo)
     // Structural frame validation rejects obvious wrong/truncated audio. Actual
     // decoder validity and silence checks happen on browser-decoded Float32 PCM.
     validateMp3(audio)
@@ -253,7 +273,8 @@ export async function collectMinimaxStream(body, { textLength, signal } = {}) {
         words.push({ text: word.word, start, end })
       }
     }
-    return { audio: audio.toString('base64'), format: 'mp3', sampleRate: SPEECH_SAMPLE_RATE, words }
+    return { audio: audio.toString('base64'), format: 'mp3', sampleRate: SPEECH_SAMPLE_RATE, words,
+      ...(usage ? { usage } : {}) }
   }
   catch (error) {
     void reader.cancel().catch(() => {})
@@ -265,6 +286,22 @@ export async function collectMinimaxStream(body, { textLength, signal } = {}) {
     signal?.removeEventListener('abort', abortRead)
     reader.releaseLock()
   }
+}
+
+function readUsage(finalInfo) {
+  const hasBillable = Object.hasOwn(finalInfo, 'usage_characters')
+  const hasText = Object.hasOwn(finalInfo, 'word_count')
+  for (const field of ['usage_characters', 'word_count']) {
+    if (Object.hasOwn(finalInfo, field) && (!Number.isSafeInteger(finalInfo[field])
+      || finalInfo[field] < 0 || finalInfo[field] > MAX_USAGE_CHARACTERS))
+      throw new MinimaxSpeechError()
+  }
+  // word_count is informational, not billable. Do not infer billable usage from
+  // it, the text length, local reservations, region, or any language heuristic.
+  if (!hasBillable)
+    return undefined
+  return { billableCharacters: finalInfo.usage_characters,
+    ...(hasText ? { textCharacters: finalInfo.word_count } : {}) }
 }
 
 function validTime(value) {

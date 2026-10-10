@@ -106,7 +106,9 @@ export class SpokenTextFilter {
       for (const char of prefix)
         this.inline(char)
     }
-    if (this.keycapCandidate)
+    // ASCII ! is undecided too: it may be punctuation or the start of ![alt].
+    // Resolve it under the old tone before outputting any following prose.
+    if (this.keycapCandidate || this.bang)
       this.pendingBoundary = callback
     else
       callback(this.take())
@@ -189,6 +191,8 @@ export class SpokenTextFilter {
   }
 
   private resolveBoundary() {
+    if (this.keycapCandidate || this.bang)
+      return
     const callback = this.pendingBoundary
     this.pendingBoundary = null
     callback?.(this.take())
@@ -231,6 +235,7 @@ export class SpokenTextFilter {
     this.bang = false
     this.underscore = false
     this.inlineCode = 0
+    this.resolveBoundary()
     this.ticks = 0
   }
 
@@ -515,12 +520,15 @@ export class SpokenTextFilter {
       return
     }
     if (this.bang) {
-      this.bang = false
       if (char === '[') {
+        this.bang = false
+        this.resolveBoundary()
         this.startLink(true)
         return
       }
       this.emit('!')
+      this.bang = false
+      this.resolveBoundary()
     }
     if (char === '\n' || char === '\r') {
       this.emit(char)

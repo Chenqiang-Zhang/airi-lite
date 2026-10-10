@@ -15,21 +15,24 @@ const MESSAGES = {
   TTS_DAILY_LIMIT: '今日云端语音预留额度已用尽。',
   TTS_BUDGET_UNAVAILABLE: '语音额度记录不可用，云端合成已停止。',
   TTS_TIMEOUT: '云端语音合成超时，请稍后再试。',
-  TTS_PROVIDER_CHANGED: '云端供应商已变更，请刷新并重新确认语音设置。',
+  TTS_PROVIDER_CHANGED: '云端供应商或地区已变更，请刷新并重新确认语音设置。',
   TTS_UPSTREAM_FAILED: '云端语音服务请求失败。',
   TTS_UPSTREAM_INVALID: '云端语音响应不完整或格式无效。',
 }
 
 export function normaliseSpeechRequest(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-    || Object.keys(value).some(key => !['text', 'delivery', 'expectedProvider'].includes(key))
+    || Object.keys(value).some(key => !['text', 'delivery', 'expectedProvider', 'expectedRegion'].includes(key))
     || typeof value.text !== 'string' || !value.text.trim() || value.text.length > 360
     || !value.text.isWellFormed() || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.text)
     || !DELIVERIES.has(value.delivery)
-    || (Object.hasOwn(value, 'expectedProvider') && !['minimax', 'elevenlabs'].includes(value.expectedProvider)))
+    || (Object.hasOwn(value, 'expectedProvider') && !['minimax', 'elevenlabs'].includes(value.expectedProvider))
+    || (Object.hasOwn(value, 'expectedRegion') && (!['cn', 'global'].includes(value.expectedRegion)
+      || value.expectedProvider === 'elevenlabs')))
     throw new SpeechProviderError('TTS_INVALID_REQUEST')
   return { text: value.text, delivery: value.delivery,
-    ...(Object.hasOwn(value, 'expectedProvider') ? { expectedProvider: value.expectedProvider } : {}) }
+    ...(Object.hasOwn(value, 'expectedProvider') ? { expectedProvider: value.expectedProvider } : {}),
+    ...(Object.hasOwn(value, 'expectedRegion') ? { expectedRegion: value.expectedRegion } : {}) }
 }
 
 export function createSpeechRateLimiter({ now = Date.now } = {}) {
@@ -70,7 +73,8 @@ export function createSpeechHandler({
   const acceptRate = createSpeechRateLimiter({ now })
   let active = 0
   return {
-    health: () => ({ configured: provider.configured, provider: provider.provider, model: provider.model }),
+    health: () => ({ configured: provider.configured, provider: provider.provider, model: provider.model,
+      ...(provider.provider === 'minimax' ? { region: provider.region } : {}) }),
     async handle(request, response) {
       if (!acceptRate(getClientIp(request)))
         return sendError(response, 429, 'TTS_RATE_LIMIT')
@@ -97,6 +101,10 @@ export function createSpeechHandler({
         // Legacy clients mean MiniMax, not "whichever paid provider is current".
         // This only compares identity; it cannot select or override the server.
         if ((speechRequest.expectedProvider ?? 'minimax') !== provider.provider)
+          throw new SpeechProviderError('TTS_PROVIDER_CHANGED')
+        // Legacy MiniMax consent covers the original mainland region only. A
+        // new region needs new client confirmation, never a guessed endpoint.
+        if (provider.provider === 'minimax' && (speechRequest.expectedRegion ?? 'cn') !== provider.region)
           throw new SpeechProviderError('TTS_PROVIDER_CHANGED')
         // Provider-specific local estimates are NOT the actual account balance.
         // Eleven's estimate includes the trusted delivery prefix it will send.

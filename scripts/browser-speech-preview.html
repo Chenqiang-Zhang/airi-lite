@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>轻量语音暂停回归 · 仅本机</title>
+<style>
+  body{font:16px/1.65 system-ui;background:#f5f1f8;color:#332f3c;max-width:850px;margin:32px auto;padding:24px}
+  button{font:inherit;padding:10px 14px;margin:5px;border:1px solid #c7b9d6;border-radius:8px;background:white;cursor:pointer}
+  pre{font:14px/1.7 ui-monospace,monospace;white-space:pre-wrap;background:white;padding:18px;border-radius:12px}
+</style>
+<h1>轻量语音暂停回归</h1>
+<p>仅限本机。使用生产控制器与真实浏览器 SpeechSynthesis，不加载 Kokoro，也不请求项目云端或聊天接口。系统声线可能联网；只朗读下面的公开测试句。此页不能证明声线自然度或中文音素嘴形。</p>
+<p id="text">今天先慢慢来，窗外的天气和桌上的事情都可以暂时放一边，让这段普通的测试文字读完。这里没有秘密，也没有真实的私人聊天，只是在检查暂停和继续时，角色会不会跟着停下来。</p>
+<label>仅诊断页指定中文声线：<select id="voice" aria-label="诊断系统声线"><option value="">系统自动选择</option></select></label>
+<button id="start" disabled>开始轻量语音</button>
+<button id="pause" disabled>暂停系统语音</button>
+<button id="resume" disabled>继续系统语音</button>
+<button id="stop" disabled>取消当前语音</button>
+<pre id="status" role="status">检查本机地址……</pre>
+<pre id="trace">尚未开始。</pre>
+<script type="module">
+const status = document.querySelector('#status'), trace = document.querySelector('#trace')
+if (!['127.0.0.1','localhost','[::1]'].includes(location.hostname)) {
+  status.textContent = '拒绝运行：仅允许 loopback。'
+}
+else if (!('speechSynthesis' in window)) {
+  status.textContent = '当前浏览器没有 SpeechSynthesis。'
+}
+else {
+  const { createSpeechController } = await import('../src/speech.ts')
+  const audio = new Audio()
+  let voiceState = 'idle', playing = false, preparing = false, delivery = 'neutral'
+  let opening = 0, form = 0, problem = '', starts = 0, modelCalls = 0, cloudCalls = 0
+  let utterances = 0
+  const history = []
+  const render = () => {
+    status.textContent = [
+      `状态: ${voiceState} · playing: ${playing} · preparing: ${preparing}`,
+      `系统 speaking: ${speechSynthesis.speaking} · paused: ${speechSynthesis.paused} · pending: ${speechSynthesis.pending}`,
+      `系统可用声线: ${speechSynthesis.getVoices().length} · 中文声线: ${speechSynthesis.getVoices().filter(voice=>/^zh/i.test(voice.lang)).length}`,
+      `嘴形开口: ${opening === null ? '时钟近似（无波形）' : opening.toFixed(3)} · form: ${form.toFixed(3)} · delivery: ${delivery}`,
+      `显式开始次数: ${starts} · 本地模型调用: ${modelCalls} · 项目云端调用: ${cloudCalls}`,
+      `提示: ${problem || '无'}`,
+    ].join('\n')
+    Object.assign(status.dataset, { playing:String(playing), preparing:String(preparing),
+      paused:String(speechSynthesis.paused), speaking:String(speechSynthesis.speaking),
+      opening:String(opening), delivery, modelCalls:String(modelCalls), cloudCalls:String(cloudCalls) })
+  }
+  const note = message => {
+    history.push(`${performance.now().toFixed(0)}ms ${message}`)
+    if (history.length > 32) history.shift()
+    trace.textContent = history.join('\n')
+    render()
+  }
+  // Observe native events without changing text, rate, controller handlers or
+  // event delivery. Explicit voice selection affects only this diagnostic's
+  // utterances, not production settings. No fabricated event is dispatched.
+  const NativeUtterance = window.SpeechSynthesisUtterance
+  const voiceSelect = document.querySelector('#voice')
+  const refreshVoices = () => {
+    const selected = voiceSelect.value
+    voiceSelect.replaceChildren(new Option('系统自动选择',''))
+    for (const voice of speechSynthesis.getVoices().filter(voice=>/^zh/i.test(voice.lang)))
+      voiceSelect.add(new Option(`${voice.name} · ${voice.lang} · ${voice.localService ? '本机' : '联网'}`,voice.voiceURI))
+    if ([...voiceSelect.options].some(option=>option.value===selected)) voiceSelect.value=selected
+  }
+  refreshVoices()
+  speechSynthesis.addEventListener('voiceschanged',refreshVoices)
+  window.SpeechSynthesisUtterance = class extends NativeUtterance {
+    constructor(text) {
+      super(text)
+      const voice = speechSynthesis.getVoices().find(voice=>voice.voiceURI===voiceSelect.value)
+      if (voice) this.voice=voice
+      const id = ++utterances
+      for (const type of ['start','pause','resume','end','error'])
+        this.addEventListener(type,event=>note(`原生 utterance ${id} ${type} · elapsed=${event.elapsedTime} · error=${event.error ?? '无'}`))
+    }
+  }
+  const controller = createSpeechController(audio, {
+    onState(value){voiceState=value;render()},
+    onPlaying(value){playing=value;note(`控制器 playing=${value}`)},
+    onPreparing(value){preparing=value;render()},
+    onDelivery(value){delivery=value;note(`实际语气 ${value}`)},
+    onMouth(value, colour){opening=value;form=colour;render()},
+    onProblem(value){problem=value;render()},
+    onAudioReady(){render()},
+  }, {
+    async loadModel(){modelCalls++;throw new Error('诊断页禁止下载模型')},
+    async synthesizeCloud(){cloudCalls++;throw new Error('诊断页禁止项目云端请求')},
+  })
+  document.querySelector('#start').addEventListener('click',()=>{
+    starts++
+    note('用户点击开始：使用生产 browser 路径，不强行修改系统暂停状态。')
+    void controller.speak(document.querySelector('#text').textContent, 'bright', undefined, [], 'browser')
+  })
+  document.querySelector('#pause').addEventListener('click',()=>{
+    note('用户调用系统 pause()。')
+    speechSynthesis.pause()
+    render()
+  })
+  document.querySelector('#resume').addEventListener('click',()=>{
+    note('用户调用系统 resume()。')
+    speechSynthesis.resume()
+    render()
+  })
+  document.querySelector('#stop').addEventListener('click',()=>{
+    note('用户取消当前生产控制器 run。')
+    controller.cancel()
+    render()
+  })
+  for (const button of document.querySelectorAll('button')) button.disabled=false
+  const ticker=setInterval(render,100)
+  render()
+  addEventListener('pagehide',()=>{clearInterval(ticker);controller.dispose();speechSynthesis.removeEventListener('voiceschanged',refreshVoices);window.SpeechSynthesisUtterance=NativeUtterance}, {once:true})
+}
+</script>
+</html>

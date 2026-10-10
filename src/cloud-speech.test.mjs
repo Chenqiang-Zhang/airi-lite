@@ -155,6 +155,68 @@ test('MiniMax clips remain compatible with missing or explicitly empty character
   }
 })
 
+test('explicit MiniMax regions travel only as expectation guards and cannot choose the upstream host', async () => {
+  for (const expectedRegion of ['cn', 'global']) {
+    let url
+    let body
+    await fetchCloudSpeech(options({ expectedRegion }), { fetch: async (target, init) => {
+      url = target
+      body = JSON.parse(init.body)
+      return response()
+    } })
+    assert.equal(url, ENDPOINT)
+    assert.equal(body.expectedProvider, 'minimax')
+    assert.equal(body.expectedRegion, expectedRegion)
+    assert.ok(!('endpoint' in body) && !('region' in body))
+  }
+})
+
+test('unknown regions and a region attached to another provider fail before any request', async () => {
+  const inputs = [null, '', 'international', 'global ', 'https://evil.invalid', 123, {}, ['global']]
+    .map(expectedRegion => options({ expectedRegion }))
+  inputs.push(options({ expectedProvider: 'elevenlabs', expectedRegion: 'cn' }))
+  inputs.push(options({ expectedProvider: 'elevenlabs', expectedRegion: 'global' }))
+  for (const input of inputs) {
+    let calls = 0
+    await assert.rejects(fetchCloudSpeech(input, { fetch: async () => { calls++; return response() } }), apiFailure('invalid_request'))
+    assert.equal(calls, 0)
+  }
+})
+
+test('provider accounting counts are preserved without guessing a Chinese character multiplier', async () => {
+  for (const usage of [
+    { billableCharacters: 0 },
+    { billableCharacters: 1, textCharacters: 2 },
+    { billableCharacters: 200, textCharacters: 100 },
+    { billableCharacters: 1_000_000, textCharacters: 1_000_000 },
+  ]) {
+    const result = await fetchCloudSpeech(options({ text: '你好。' }), { fetch: async () => response(payload({ usage })) })
+    assert.deepEqual(result.usage, usage)
+    assert.ok(!('cost' in result.usage) && !('balance' in result.usage))
+  }
+  const absent = await fetchCloudSpeech(options(), { fetch: async () => response() })
+  assert.ok(!('usage' in absent), 'missing accounting metadata is not zero billable usage')
+})
+
+test('invalid accounting metadata fails with a fixed error before codec allocation', async () => {
+  for (const usage of [
+    null, [], '', 100, {}, { textCharacters: 10 },
+    { billableCharacters: -1 }, { billableCharacters: 0.1 },
+    { billableCharacters: '200' }, { billableCharacters: null },
+    { billableCharacters: 1_000_001 }, { billableCharacters: Number.MAX_SAFE_INTEGER + 1 },
+    { billableCharacters: 20, textCharacters: -1 },
+    { billableCharacters: 20, textCharacters: '10' },
+    { billableCharacters: 20, balance: 'secret-value' },
+  ]) {
+    let decodes = 0
+    await assert.rejects(fetchCloudSpeech(options(), {
+      fetch: async () => response(payload({ usage })),
+      decodeAudio: async () => { decodes++; return decoded() },
+    }), error => apiFailure('invalid_response')(error) && !error.message.includes('secret-value'))
+    assert.equal(decodes, 0)
+  }
+})
+
 test('non-ASCII, whitespace, invisible or too-long access codes fail before fetch', async () => {
   for (const accessCode of ['体验码', 'Ｄｅｍｏ', ' Demo', 'Demo ', 'Demo\n', 'Demo\u200b', '\u007f', 'a'.repeat(257), null, 123]) {
     let calls = 0

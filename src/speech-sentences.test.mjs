@@ -25,7 +25,7 @@ test('cancel wakes an empty consumer both before the first sentence and between 
     const stream = new SpeechSentenceStream()
     const consumer = stream[Symbol.asyncIterator]()
     if (betweenSentences) {
-      stream.push('第一句。')
+      stream.push('第一句。下一')
       assert.equal((await consumer.next()).value.text, '第一句。')
     }
     const waiting = consumer.next()
@@ -236,4 +236,188 @@ test('streaming and replay agree when a cue falls after a real digit or inside a
     assert.deepEqual(await collect(stream), await collect(replySentenceStream(text, undefined, cues)))
     assert.equal(stream.text, text)
   }
+})
+
+test('compound endings and closing quotes survive speech filtering in fragmented and saved replies', async () => {
+  for (const [text, expected] of [
+    ['真的吗？！先试试。', ['真的吗？！', '先试试。']],
+    ['(真的好吗？)先试试。', ['(真的好吗？)', '先试试。']],
+    ['“真的吗?!”先试试。', ['“真的吗?!”', '先试试。']],
+    ['"真的吗?!"先试试。', ['"真的吗?!"', '先试试。']],
+  ]) {
+    const replay = await collect(replySentenceStream(text, 'curious'))
+    assert.deepEqual(replay, expected.map(text => ({ text, delivery: 'curious' })))
+    for (const size of [1, 2, 7, text.length]) {
+      const stream = new SpeechSentenceStream('', 'curious')
+      for (let index = 0; index < text.length; index += size)
+        stream.push(text.slice(index, index + size))
+      stream.finish()
+      assert.deepEqual(await collect(stream), replay)
+      assert.equal(stream.text, text)
+    }
+  }
+})
+
+test('the first complete ending is available when new prose arrives, before finish', async () => {
+  const stream = new SpeechSentenceStream('', 'curious')
+  const consumer = stream[Symbol.asyncIterator]()
+  let delivered = false
+  const waiting = consumer.next().then(value => { delivered = true; return value })
+  stream.push('（真的？')
+  stream.push('！）')
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(delivered, false, 'an ending still at the available tail is observed, not prematurely submitted')
+  stream.push('下一')
+  assert.deepEqual((await waiting).value, { text: '（真的？！）', delivery: 'curious' })
+  const next = consumer.next()
+  stream.cancel()
+  assert.equal((await next).done, true)
+})
+
+test('a tone boundary commits the whole ending under its original tone without moving later prose', async () => {
+  for (const ending of ['真的吗？！', '“真的吗？！”', '真的吗?!', '真的吗?!）']) {
+    const text = ending + '今天先休息。'
+    const stream = new SpeechSentenceStream('', 'curious')
+    for (const char of ending) stream.push(char)
+    stream.setDelivery('soft')
+    for (const char of '今天先休息。') stream.push(char)
+    stream.finish()
+    const expected = [
+      { text: ending, delivery: 'curious' },
+      { text: '今天先休息。', delivery: 'soft' },
+    ]
+    assert.deepEqual(await collect(stream), expected)
+    assert.deepEqual(await collect(replySentenceStream(text, 'curious', [{ start: ending.length, delivery: 'soft' }])), expected)
+  }
+})
+
+test('a pending ASCII ending uses the newest tone request only for later words', async () => {
+  for (const prefix of ['真的吗?!', '实际是42!']) {
+    const stream = new SpeechSentenceStream('', 'curious')
+    stream.push(prefix)
+    stream.setDelivery('soft')
+    stream.setDelivery('bright')
+    stream.push('下一句。')
+    stream.finish()
+    assert.deepEqual(await collect(stream), [
+      { text: prefix, delivery: 'curious' },
+      { text: '下一句。', delivery: 'bright' },
+    ])
+  }
+})
+
+test('reverting a deferred ASCII ending cue does not cut the original tone or add a silent sentence', async () => {
+  for (const prefix of ['真的吗?!', '实际是42!']) {
+    const stream = new SpeechSentenceStream('', 'curious')
+    stream.push(prefix)
+    stream.setDelivery('soft')
+    stream.setDelivery('soft')
+    stream.setDelivery('curious')
+    stream.setDelivery('curious')
+    stream.push('下一句。')
+    stream.finish()
+    assert.deepEqual(await collect(stream), [
+      { text: prefix, delivery: 'curious' },
+      { text: '下一句。', delivery: 'curious' },
+    ])
+  }
+})
+
+test('an image after a held exclamation remains silent across the tone boundary', async () => {
+  const stream = new SpeechSentenceStream('', 'curious')
+  stream.push('真的好吗?!')
+  stream.setDelivery('soft')
+  stream.push('[不朗读图片？](https://private.invalid/image.png)先休息。')
+  stream.finish()
+  assert.deepEqual(await collect(stream), [
+    { text: '真的好吗?', delivery: 'curious' },
+    { text: '先休息。', delivery: 'soft' },
+  ])
+})
+
+test('a simultaneous digit and image candidate retains the real digit under its original tone', async () => {
+  const prefix = '实际有42!'
+  const suffix = '[不读图片?!](https://private.invalid/secret)下一句。'
+  const text = prefix + suffix
+  const expected = [
+    { text: '实际有42', delivery: 'curious' },
+    { text: '下一句。', delivery: 'soft' },
+  ]
+  for (const size of [1, 2, text.length]) {
+    const stream = new SpeechSentenceStream('', 'curious')
+    for (let index = 0; index < prefix.length; index += size)
+      stream.push(prefix.slice(index, index + size))
+    stream.setDelivery('soft')
+    for (let index = 0; index < suffix.length; index += size)
+      stream.push(suffix.slice(index, index + size))
+    stream.finish()
+    assert.deepEqual(await collect(stream), expected)
+    assert.equal(stream.text, text)
+  }
+  assert.deepEqual(await collect(replySentenceStream(text, 'curious', [{ start: prefix.length, delivery: 'soft' }])), expected)
+})
+
+test('finish commits a held compound ending and cancel discards it with its deferred tone', async () => {
+  for (const ending of ['真的吗？！', '真的吗?!', '实际是42!']) {
+    const stream = new SpeechSentenceStream('', 'curious')
+    stream.push(ending)
+    stream.setDelivery('soft')
+    stream.finish()
+    assert.deepEqual(await collect(stream), [{ text: ending, delivery: 'curious' }])
+
+    const canceled = new SpeechSentenceStream('', 'curious')
+    canceled.push(ending)
+    canceled.setDelivery('soft')
+    canceled.cancel()
+    await canceled.finished
+    assert.equal((await canceled[Symbol.asyncIterator]().next()).done, true)
+    canceled.finish()
+    canceled.push('不该朗读。')
+    assert.deepEqual(await collect(canceled), [])
+  }
+})
+
+test('a line break releases speech before a long silent fenced body at every relevant fragment split', async () => {
+  const prefix = '第一句？！\n'
+  const fence = '```js\n' + 'secret();'.repeat(12_000)
+  const suffix = '\n```\n下一句。'
+  const text = prefix + fence + suffix
+  const expected = [
+    { text: '第一句？！', delivery: 'curious' },
+    { text: '下一句。', delivery: 'soft' },
+  ]
+  for (const size of [1, 2, 7, prefix.length]) {
+    const stream = new SpeechSentenceStream('', 'curious')
+    const consumer = stream[Symbol.asyncIterator]()
+    const first = consumer.next()
+    for (let index = 0; index < prefix.length; index += size)
+      stream.push(prefix.slice(index, index + size))
+    assert.deepEqual((await first).value, expected[0], 'the spoken sentence is ready before any fence body arrives')
+    stream.setDelivery('soft')
+    stream.push(fence)
+    const waiting = consumer.next()
+    stream.push(suffix)
+    stream.finish()
+    assert.deepEqual((await waiting).value, expected[1])
+    assert.equal((await consumer.next()).done, true)
+    assert.equal(stream.text, text)
+  }
+  assert.deepEqual(await collect(replySentenceStream(text, 'curious', [{ start: prefix.length, delivery: 'soft' }])), expected)
+})
+
+test('cancel releases a consumer during a silent fenced continuation after an already delivered line', async () => {
+  const stream = new SpeechSentenceStream('', 'curious')
+  const consumer = stream[Symbol.asyncIterator]()
+  stream.push('第一句？！\n')
+  assert.deepEqual((await consumer.next()).value, { text: '第一句？！', delivery: 'curious' })
+  stream.setDelivery('soft')
+  stream.push('```js\n' + 'secret();'.repeat(12_000))
+  const waiting = consumer.next()
+  stream.cancel()
+  assert.equal((await waiting).done, true)
+  await stream.finished
+  stream.push('\n```\n不能再念。')
+  stream.finish()
+  assert.deepEqual(await collect(stream), [])
 })
