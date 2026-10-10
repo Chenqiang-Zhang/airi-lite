@@ -237,6 +237,51 @@ test('reduced motion skips and clears acknowledgement without changing audio mou
 })
 
 const sampleMotions = ['hiyori_m02', 'hiyori_m05'].map(motion => new URL(`../public/models/hiyori/motion/${motion}.motion3.json`, import.meta.url))
+test('aligned beat intensity directly controls bounded Y-only pitch at both render frame rates', () => {
+  for (const milliseconds of [1000 / 30, 1000 / 60]) {
+    const { actor, frame } = fixture()
+    actor.setActivity('speaking')
+    actor.setMouth(.6, 0, 0)
+    for (let index = 0; index < 12; index++) assert.equal(frame(milliseconds).ParamAngleY, 0,
+      'aligned zero suppresses render-frame mouth onset fallback')
+    for (const intensity of [0, .2, .7, 1, .4, 0]) {
+      actor.setMouth(.6, 0, intensity)
+      const pose = frame(milliseconds)
+      assert.equal(pose.ParamAngleY, intensity ? -intensity * .9 : 0)
+      assert.equal(pose.ParamAngleX, 0)
+      assert.equal(pose.ParamAngleZ, 0)
+    }
+  }
+})
+
+test('aligned mode obeys pause, low-opening, reduced-motion, invalid values and pitch bounds', () => {
+  const { actor, frame, setReducedMotion } = fixture()
+  actor.setActivity('speaking')
+  actor.setMouth(.6, 0, 1)
+  assert.equal(frame().ParamAngleY, -.9)
+  actor.setMouth(.01, 0, 1)
+  assert.equal(frame().ParamAngleY, 0)
+  actor.setMouth(.6, 0, 1)
+  actor.setActivity('idle')
+  assert.equal(frame().ParamAngleY, 0)
+  actor.setActivity('speaking')
+  setReducedMotion(true)
+  assert.equal(frame().ParamAngleY, undefined)
+  setReducedMotion(false)
+  assert.equal(frame().ParamAngleY, 0)
+  assert.equal(frame().ParamAngleY, -.9)
+  assert.equal(frame(500).ParamAngleY, 0, 'a long render gap must not replay a held beat')
+  for (const baseline of [-30, 0, 30]) {
+    const pose = frame(16, 0, 0, baseline)
+    assert.ok(pose.ParamAngleY >= -30 && pose.ParamAngleY <= 30)
+    assert.ok(Math.abs(pose.ParamAngleY - baseline) <= .9)
+  }
+  actor.setMouth(.6, 0, NaN)
+  assert.equal(frame().ParamAngleY, 0)
+  actor.setMouth(null, 0, 1)
+  assert.equal(frame().ParamAngleY, 0)
+})
+
 test('acknowledgement stays within real m02/m05 pitch ranges and restores their baseline', {
   skip: sampleMotions.every(path => existsSync(path)) ? false : 'Live2D sample assets are installed separately',
 }, () => {

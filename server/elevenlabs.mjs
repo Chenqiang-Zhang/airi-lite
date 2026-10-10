@@ -101,10 +101,11 @@ export async function synthesiseElevenLabs(config, request, { fetchImpl = fetch,
   const raw = validateAlignment(response.alignment, duration)
   const normalized = validateAlignment(response.normalized_alignment, duration)
   const characters = response.normalized_alignment != null ? normalized : raw
+  const hasAlignment = response.normalized_alignment != null || response.alignment != null
   // Ignore voice_segments and all upstream URLs; this adapter never fetches a
   // provider-supplied resource or exposes provider error bodies/identifiers.
   return { audio: audio.toString('base64'), format: 'mp3', sampleRate: SAMPLE_RATE,
-    words: [], characters }
+    words: [], ...(hasAlignment ? { characters } : {}) }
 }
 
 function cancelBody(body) {

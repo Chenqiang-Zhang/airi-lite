@@ -25,6 +25,7 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
   let delivery: Delivery = 'neutral'
   let mouthOpen: number | null = 0
   let mouthForm = 0
+  let alignedBeat: number | null = null
   let previousAudioOpen = 0
   let emphasisStartedAt: number | null = null
   let emphasisStrength = 0
@@ -49,10 +50,11 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
     const core = model.coreModel
     const speaking = activity === 'speaking'
     const reducedMotion = options.reducedMotion?.() ?? false
+    const alignedMotionAllowed = !reducedMotion && !previouslyReduced && gap <= 250 && gap >= 0
     const audioOpen = speaking && mouthOpen !== null ? mouthOpen : null
     // Numeric mouth opening comes from the current audio envelope; browser
     // speech has no measured envelope. Do not invent prosodic beats for it.
-    if (audioOpen === null || reducedMotion || previouslyReduced || gap > 250 || gap < 0) {
+    if (alignedBeat !== null || audioOpen === null || reducedMotion || previouslyReduced || gap > 250 || gap < 0) {
       emphasisStartedAt = null
       emphasisStrength = 0
       previousAudioOpen = audioOpen ?? 0
@@ -99,6 +101,11 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
       core.addParameterValueById('ParamAngleZ', -weights.attentive * 1.2 + weights.thinking * 2.2)
       core.addParameterValueById('ParamEyeBallX', -weights.thinking * 0.12)
       core.addParameterValueById('ParamEyeBallY', weights.attentive * 0.06 + weights.thinking * 0.1)
+      if (speaking && alignedBeat !== null && audioOpen !== null && audioOpen >= 0.06 && alignedMotionAllowed) {
+        const baseline = core.getParameterValueById('ParamAngleY')
+        const pitch = Math.max(-30, Math.min(30, baseline - alignedBeat * 0.9))
+        core.addParameterValueById('ParamAngleY', pitch - baseline)
+      }
       if (emphasisStartedAt !== null) {
         const age = time - emphasisStartedAt
         if (age >= 360) emphasisStartedAt = null
@@ -136,7 +143,8 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
       activity = value
     },
     setDelivery(value: Delivery) { delivery = value },
-    setMouth(open: number | null, form: number) {
+    setMouth(open: number | null, form: number, beat: number | null = null) {
+      alignedBeat = beat === null ? null : Number.isFinite(beat) ? Math.max(0, Math.min(1, beat)) : 0
       mouthOpen = open === null ? null : Number.isFinite(open) ? Math.max(0, Math.min(1, open)) : 0
       mouthForm = Number.isFinite(form) ? Math.max(-0.32, Math.min(0.32, form)) : 0
       if (mouthOpen === null || mouthOpen < 0.06) {

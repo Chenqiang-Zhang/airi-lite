@@ -2,7 +2,9 @@ import type { KokoroTTS } from '@uzen/kokoro-js'
 import type { Delivery } from './delivery'
 import type { VoiceId } from './voice'
 import type { SpeechEngine } from './speech-mode'
-import type { CloudSpeechClip } from './cloud-speech'
+import type { CloudSpeechClip, SpeechWord, SpeechCharacter } from './cloud-speech'
+import { speechBeats, speechBeatAtTime } from './speech-beats.ts'
+import type { SpeechBeatSegment } from './speech-beats'
 
 import { SpeechApiError } from './cloud-speech.ts'
 import { createPcm16Blob, createWavBlob, createWavHeader } from './audio-wav.ts'
@@ -24,6 +26,9 @@ interface AudioClip {
   samples: Float32Array
   sampleRate: number
   delivery: Delivery
+  words?: readonly SpeechWord[]
+  wordAlignmentAvailable?: true
+  characters?: readonly SpeechCharacter[]
 }
 
 interface PreparedAudioClip {
@@ -32,6 +37,7 @@ interface PreparedAudioClip {
   sampleRate: number
   delivery: Delivery
   mouth: MouthSegment
+  beats: SpeechBeatSegment
 }
 
 interface PlaybackRun {
@@ -47,6 +53,8 @@ interface PlaybackRun {
   resumeLocalGeneration: (() => void) | null
   timeline: PlaybackCue[]
   mouthTimeline: MouthSegment[]
+  beatTimeline: SpeechBeatSegment[]
+  lastBeatPeak: number
 }
 
 const MODEL_ID = 'onnx-community/Kokoro-82M-v1.1-zh-ONNX'
@@ -86,7 +94,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   onPlaying: (playing: boolean) => void
   onPreparing: (preparing: boolean) => void
   onDelivery: (delivery: Delivery) => void
-  onMouth: (opening: number | null, form: number) => void
+  onMouth: (opening: number | null, form: number, beat: number | null) => void
   onAudioReady: (ready: boolean) => void
   onProblem: (message: string) => void
 }, dependencies: {
@@ -102,6 +110,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   let unavailable = false
   let objectUrl: string | null = null
   let playbackMouth: readonly MouthSegment[] = []
+  let playbackBeats: readonly SpeechBeatSegment[] = []
   let frame = 0
   let run = 0
   let activeRun: PlaybackRun | null = null
@@ -149,7 +158,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     const source = objectUrl
     const revision = mouthFrameRevision
     const owns = () => token === run && source === objectUrl && revision === mouthFrameRevision
-    callbacks.onMouth(0, 0)
+    callbacks.onMouth(0, 0, null)
     if (!owns()) return
     callbacks.onPlaying(false)
     if (!owns()) return
@@ -175,7 +184,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       // Keep observing this source, but don't animate a stationary waveform
       // or give a producer permission to compute/buy more unplayed speech.
       playbackClockStalled = true
-      callbacks.onMouth(0, 0)
+      callbacks.onMouth(0, 0, null)
       if (!owns()) return
       callbacks.onPlaying(false)
       if (!owns()) return
@@ -203,7 +212,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       if (!owns()) return
     }
     const mouth = mouthAtTime(playbackMouth, audio.currentTime)
-    callbacks.onMouth(mouth.open, mouth.form)
+    callbacks.onMouth(mouth.open, mouth.form, speechBeatAtTime(playbackBeats, audio.currentTime))
     if (owns()) scheduleMouthFrame()
   }
   const onPlaying = () => {
@@ -285,7 +294,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   audio.addEventListener('seeking', onSeeking)
   audio.addEventListener('seeked', onSeeked)
 
-  function replaceAudioSource(parts: readonly Blob[], sampleRate: number, timeline: PlaybackCue[], mouthTimeline: readonly MouthSegment[]) {
+  function replaceAudioSource(parts: readonly Blob[], sampleRate: number, timeline: PlaybackCue[], mouthTimeline: readonly MouthSegment[], beatTimeline: readonly SpeechBeatSegment[]) {
     const source = createWavBlob(parts, sampleRate)
     // Loading the full reply is preparation, not a request to replay it.
     // Explicitly leave the previous source paused before any replacement;
@@ -301,6 +310,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     // Keep each clip's own calibrated track. Re-analyzing the concatenated
     // reply would let a loud later sentence change a quiet earlier mouth.
     playbackMouth = mouthTimeline
+    playbackBeats = beatTimeline
     playbackTimeline = timeline
     reportedDelivery = null
     audio.src = objectUrl
@@ -331,14 +341,16 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         total += candidate.sampleCount
       }
       const mouth: MouthSegment[] = []
+      const beats: SpeechBeatSegment[] = []
       let offset = 0
       for (const clip of ready) {
         mouth.push({ ...clip.mouth, time: offset / next.sampleRate })
+        beats.push({ ...clip.beats, time: offset / next.sampleRate })
         offset += clip.sampleCount
       }
       session.playingChunk = true
       session.chunkStarted = false
-      replaceAudioSource(ready.map(clip => clip.pcm), next.sampleRate, [{ time: 0, delivery: next.delivery }], mouth)
+      replaceAudioSource(ready.map(clip => clip.pcm), next.sampleRate, [{ time: 0, delivery: next.delivery }], mouth, beats)
       callbacks.onPreparing(false)
       void audio.play().catch((error) => {
         if (session !== activeRun)
@@ -356,7 +368,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
 
     activeRun = null
     callbacks.onPreparing(false)
-    replaceAudioSource(session.pcmParts, session.sampleRate, session.timeline, session.mouthTimeline)
+    replaceAudioSource(session.pcmParts, session.sampleRate, session.timeline, session.mouthTimeline, session.beatTimeline)
   }
 
   function wakeGeneration(session: PlaybackRun) {
@@ -466,10 +478,11 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       URL.revokeObjectURL(objectUrl)
     objectUrl = null
     playbackMouth = []
+    playbackBeats = []
     playbackTimeline = []
     reportedDelivery = null
     callbacks.onAudioReady(false)
-    callbacks.onMouth(0, 0)
+    callbacks.onMouth(0, 0, null)
     callbacks.onPlaying(false)
     callbacks.onPreparing(false)
     window.speechSynthesis?.cancel()
@@ -517,12 +530,12 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
           retireStartDeadline()
           callbacks.onPreparing(false)
           callbacks.onDelivery(sentence.delivery)
-          callbacks.onMouth(null, 0)
+          callbacks.onMouth(null, 0, null)
           callbacks.onPlaying(true)
         }
         utterance.onpause = () => {
           if (!started || completed || token !== run || releaseUtterance !== cancelUtterance) return
-          callbacks.onMouth(0, 0)
+          callbacks.onMouth(0, 0, null)
           callbacks.onPlaying(false)
           callbacks.onPreparing(false)
         }
@@ -530,12 +543,12 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
           if (!started || completed || token !== run || releaseUtterance !== cancelUtterance) return
           callbacks.onPreparing(false)
           callbacks.onDelivery(sentence.delivery)
-          callbacks.onMouth(null, 0)
+          callbacks.onMouth(null, 0, null)
           callbacks.onPlaying(true)
         }
         utterance.onend = () => {
           if (token === run && releaseUtterance === cancelUtterance) {
-            callbacks.onMouth(0, 0)
+            callbacks.onMouth(0, 0, null)
             callbacks.onPlaying(false)
             if (!started) {
               // Some native engines finish without ever confirming playback.
@@ -550,7 +563,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
           if (token === run && releaseUtterance === cancelUtterance) {
             callbacks.onPreparing(false)
             callbacks.onPlaying(false)
-            callbacks.onMouth(0, 0)
+            callbacks.onMouth(0, 0, null)
             callbacks.onProblem('浏览器语音播放失败。请检查网站静音、系统输出设备或改用 Chrome。')
           }
           complete(false)
@@ -567,7 +580,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
           // A native listener or any UI callback may synchronously replace us.
           if (token === run) callbacks.onPreparing(false)
           if (token === run) callbacks.onPlaying(false)
-          if (token === run) callbacks.onMouth(0, 0)
+          if (token === run) callbacks.onMouth(0, 0, null)
           if (token === run)
             callbacks.onProblem('系统语音迟迟未确认开始，已停止等待本次朗读。请检查系统声线或更换语音模式。')
         }
@@ -705,6 +718,8 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       resumeLocalGeneration: null,
       timeline: [],
       mouthTimeline: [],
+      beatTimeline: [],
+      lastBeatPeak: -Infinity,
     }
     activeRun = session
     try {
@@ -737,17 +752,20 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         // later in an ended callback while installing the completed replay.
         createWavHeader(sampleRate, session.total + data.length)
         const frames = mouthFrames(data, sampleRate)
-        const pcm = createPcm16Blob(data)
         const start = session.total / sampleRate
+        const events = speechBeats(segment, frames, duration, session.lastBeatPeak - start)
+        if (events?.length) session.lastBeatPeak = start + events.at(-1)!.peak
+        const pcm = createPcm16Blob(data)
         session.sampleRate = sampleRate
         session.timeline.push({ time: start, delivery: segment.delivery })
         session.mouthTimeline.push({ time: start, duration, frames })
+        session.beatTimeline.push({ time: start, duration, events })
         session.pcmParts.push(pcm)
         session.total += data.length
         // Construct explicitly: spreading segment would retain historical
         // Float32 PCM even though both playback paths need only encoded parts.
         session.queue.push({ pcm, sampleCount: data.length, sampleRate, delivery: segment.delivery,
-          mouth: { time: 0, duration, frames } })
+          mouth: { time: 0, duration, frames }, beats: { time: 0, duration, events } })
         advance(session)
       }
       if (token !== run)

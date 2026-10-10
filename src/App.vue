@@ -104,7 +104,7 @@ let live2d: Awaited<ReturnType<typeof import('./live2d')['mountHiyori']>> | null
 const avatarContext = createAvatarContext({ onChange: delivery => live2d?.setDelivery(delivery) })
 const avatarMountController = new AbortController()
 let viewDisposed = false
-let latestMouth: { opening: number | null, form: number } = { opening: 0, form: 0 }
+let latestMouth: { opening: number | null, form: number, beat: number | null } = { opening: 0, form: 0, beat: null }
 let speech: ReturnType<typeof createSpeechController> | null = null
 let activeCloudProvider: 'minimax' | 'elevenlabs' = 'minimax'
 let activeCloudRegion: 'cn' | 'global' = 'cn'
@@ -159,9 +159,9 @@ onMounted(async () => {
     onPlaying: playing => (isSpeaking.value = playing),
     onPreparing: preparing => (isPreparingSpeech.value = preparing),
     onDelivery: delivery => (activeDelivery.value = delivery),
-    onMouth: (opening, form) => {
-      latestMouth = { opening, form }
-      live2d?.setMouth(opening, form)
+    onMouth: (opening, form, beat) => {
+      latestMouth = { opening, form, beat }
+      live2d?.setMouth(opening, form, beat)
     },
     onAudioReady: ready => (audioAvailable.value = ready),
     onProblem: message => (voiceProblem.value = message),
@@ -198,7 +198,7 @@ onMounted(async () => {
     live2d = avatar
     // A user may have changed the preference while model assets were loading.
     activeRenderBudget.value = live2d.setRenderProfile(selectedRenderProfile.value)
-    live2d.setMouth(latestMouth.opening, latestMouth.form)
+    live2d.setMouth(latestMouth.opening, latestMouth.form, latestMouth.beat)
     syncAvatarActivity()
     modelStatus.value = ''
   }

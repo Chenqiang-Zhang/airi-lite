@@ -110,6 +110,7 @@ test('collects bounded MP3 once, replaces cumulative same-segment words, and use
   assert.equal(result.audio, mp3.toString('base64'))
   assert.equal(result.format, 'mp3')
   assert.equal(result.sampleRate, 32_000)
+  assert.equal(result.wordAlignmentAvailable, true)
   assert.deepEqual(result.words, [{ text: '你', start: 0, end: 0.2 },
     { text: '好', start: 0.2, end: 0.5 }, { text: '！', start: 0.6, end: 0.9 }])
   assert.equal(Object.hasOwn(result, 'usage'), false)
@@ -151,8 +152,21 @@ test('zero-duration words are omitted without expanding timestamps; backward wor
   frames[1].data.subtitle.timestamped_words[1].time_end = 200
   const result = await collectMinimaxStream(stream(frames), { textLength: 3 })
   assert.deepEqual(result.words, [{ text: '你', start: 0, end: 0.2 }, { text: '！', start: 0.6, end: 0.9 }])
+  assert.equal(result.wordAlignmentAvailable, true)
   frames[1].data.subtitle.timestamped_words[1].time_begin = 250
   await assert.rejects(collectMinimaxStream(stream(frames), { textLength: 3 }))
+})
+
+test('word alignment availability distinguishes accepted empty/all-zero arrays from absent metadata', async () => {
+  for (const timestampedWords of [undefined, null, [], [word('你', 0, 1, 200, 200)]]) {
+    const subtitle = { text: '你', text_begin: 0, text_end: 1, time_begin: 0, time_end: 500,
+      ...(timestampedWords === undefined ? {} : { timestamped_words: timestampedWords }) }
+    const result = await collectMinimaxStream(stream([{ ...chunk(mp3.toString('hex'), 2, { subtitle }),
+      extra_info: finalInfo }]), { textLength: 1 })
+    assert.deepEqual(result.words, [], 'zero intervals remain omitted; none are expanded or guessed')
+    assert.equal(Object.hasOwn(result, 'wordAlignmentAvailable'), Array.isArray(timestampedWords))
+    assert.equal(result.wordAlignmentAvailable, Array.isArray(timestampedWords) ? true : undefined)
+  }
 })
 
 test('accepts bounded optional ID3 tags and odd-byte MP3; rejects changed frame contract and truncated audio', async () => {
@@ -194,6 +208,7 @@ test('no subtitle produces empty words and unsafe subtitle_file is never fetched
   })
   assert.equal(calls, 1)
   assert.deepEqual(result.words, [])
+  assert.equal(Object.hasOwn(result, 'wordAlignmentAvailable'), false)
 })
 
 test('international requests use only the pinned endpoint and reject config host/region overrides', async () => {

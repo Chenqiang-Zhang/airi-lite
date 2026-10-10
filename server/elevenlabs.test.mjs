@@ -120,12 +120,15 @@ test('never sends to a mutated endpoint or unsupported model/configuration', asy
 })
 
 test('accepts absent alignment, prefers normalized, preserves punctuation/scalars and zero-duration intervals', async () => {
-  assert.deepEqual((await synth({ audio_base64: mp3.toString('base64') })).characters, [])
-  assert.deepEqual((await synth({ ...fixture(), alignment: null, normalized_alignment: null })).characters, [])
+  const absent = await synth({ audio_base64: mp3.toString('base64') })
+  assert.equal(absent.characters, undefined)
+  assert.equal(Object.hasOwn(absent, 'characters'), false)
+  assert.equal((await synth({ ...fixture(), alignment: null, normalized_alignment: null })).characters, undefined)
   const normalized = alignment(['😀', ' ', '！'], [0, 0.2, 0.4], [0.2, 0.2, 0.7])
   assert.deepEqual((await synth({ ...fixture(), normalized_alignment: normalized })).characters,
     [{ text: '😀', start: 0, end: 0.2 }, { text: ' ', start: 0.2, end: 0.2 }, { text: '！', start: 0.4, end: 0.7 }])
   assert.deepEqual((await synth({ ...fixture(), normalized_alignment: alignment([], [], []) })).characters, [])
+  assert.deepEqual((await synth({ audio_base64: mp3.toString('base64'), alignment: alignment([], [], []) })).characters, [])
 })
 
 test('validates every supplied alignment: bounded equal arrays, scalar characters, finite ordered times within audio', async () => {

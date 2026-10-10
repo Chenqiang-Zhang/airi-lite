@@ -254,12 +254,16 @@ export async function collectMinimaxStream(body, { textLength, signal } = {}) {
     validateMp3(audio)
 
     const words = []
+    let wordAlignmentAvailable = false
     let previousStart = -1
     let previousTextEnd = -1
     for (const segment of [...segments.values()].sort((a, b) => a.text_begin - b.text_begin)) {
       if (segment.time_end / 1_000 > duration || segment.text_begin < previousTextEnd)
         throw new MinimaxSpeechError()
       previousTextEnd = segment.text_end
+      // Only accepted provider arrays prove availability, including [] or
+      // all-zero intervals. A legacy words:[] without this fact stays missing.
+      if (Array.isArray(segment.timestamped_words)) wordAlignmentAvailable = true
       for (const word of segment.timestamped_words ?? []) {
         const start = word.time_begin / 1_000
         const end = word.time_end / 1_000
@@ -274,6 +278,7 @@ export async function collectMinimaxStream(body, { textLength, signal } = {}) {
       }
     }
     return { audio: audio.toString('base64'), format: 'mp3', sampleRate: SPEECH_SAMPLE_RATE, words,
+      ...(wordAlignmentAvailable ? { wordAlignmentAvailable: true } : {}),
       ...(usage ? { usage } : {}) }
   }
   catch (error) {

@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { SpeechApiError } from './cloud-speech.ts'
+import { SpeechApiError, fetchCloudSpeech } from './cloud-speech.ts'
 import { mouthAtTime, mouthFrames } from './mouth.ts'
+import { speechBeats, speechBeatAtTime } from './speech-beats.ts'
 import { BROWSER_SPEECH_START_DEADLINE_MS, createSpeechController } from './speech.ts'
+import { collectMinimaxStream } from '../server/minimax.mjs'
 
 class AudioStub extends EventTarget {
   paused = true
@@ -88,7 +90,7 @@ function fixture(loadModel, dependencies = {}, callbackOverrides = {}) {
   globalThis.requestAnimationFrame = callback => { frames.set(++nextFrame, callback); return nextFrame }
   globalThis.cancelAnimationFrame = id => frames.delete(id)
   const audio = new AudioStub()
-  const events = { delivery: [], problem: [], playing: [], preparing: [], mouth: [], ready: [], state: [] }
+  const events = { delivery: [], problem: [], playing: [], preparing: [], mouth: [], beats: [], ready: [], state: [] }
   const controller = createSpeechController(audio, {
     onState: value => events.state.push(value),
     onAudioReady: value => events.ready.push(value),
@@ -96,7 +98,7 @@ function fixture(loadModel, dependencies = {}, callbackOverrides = {}) {
     onProblem: value => events.problem.push(value),
     onPlaying: value => events.playing.push(value),
     onPreparing: value => events.preparing.push(value),
-    onMouth: (open, form) => events.mouth.push([open, form]),
+    onMouth: (open, form, beat) => { events.mouth.push([open, form]); events.beats.push(beat) },
     ...callbackOverrides,
   }, { loadModel, ...dependencies })
   return {
@@ -123,6 +125,144 @@ function stallAt(f, time = 0.12, baseline = 100_000) {
   for (const elapsed of [0, 500, 1000, 1500]) f.tick(time, baseline + elapsed)
   return baseline + 1500
 }
+
+test('cloud alignment survives segment two, full cache, backward seek and playback interruption', async () => {
+  const sampleRate = 24000, duration = 1.317
+  const clips = [.09, .012].map(amplitude => ({ sampleRate,
+    samples: Float32Array.from({ length: sampleRate * duration }, (_, index) => {
+      const time = index / sampleRate
+      const envelope = Math.max(0, 1 - Math.abs(time - .25) / .08, 1 - Math.abs(time - .95) / .09)
+      return amplitude * envelope * Math.sin(time * Math.PI * 2 * 230)
+    }), words: [], characters: [{ text: '你', start: .12, end: .42 },
+      { text: '，', start: .42, end: .6 }, { text: '好', start: .8, end: 1.17 }] }))
+  let previousPeak = -Infinity
+  const tracks = clips.map((clip, index) => {
+    const events = speechBeats(clip, mouthFrames(clip.samples, sampleRate), duration, previousPeak - index * duration)
+    if (events?.length) previousPeak = index * duration + events.at(-1).peak
+    return { time: 0, duration, events }
+  })
+  assert.ok(tracks.every(track => track.events.length > 0), 'fixture has measured audible peaks')
+  let calls = 0
+  const f = fixture(async () => { throw new Error('local model must not load') }, {
+    async synthesizeCloud() { return clips[calls++] },
+  })
+  const snapshots = []
+  const times = [...tracks[0].events.map(event => event.peak), .55, .72]
+  try {
+    const speaking = f.controller.speak('第一句。第二句。', 'bright', undefined, [{ start: 4, delivery: 'soft' }], 'cloud')
+    await settle()
+    assert.equal(calls, 2)
+    for (const track of tracks) {
+      const values = []
+      for (const time of times) {
+        f.tick(time)
+        values.push(f.events.beats.at(-1))
+        assert.ok(Math.abs(values.at(-1) - speechBeatAtTime([track], time)) < 1e-12)
+      }
+      snapshots.push(values)
+      f.audio.end()
+      await settle()
+    }
+    await speaking
+    assert.equal(f.audio.paused, true)
+    assert.equal(f.events.beats.at(-1), null)
+    await f.audio.play()
+    for (const clipIndex of [1, 0, 1, 0]) {
+      for (const [index, time] of times.entries()) {
+        f.tick(clipIndex * duration + time)
+        assert.ok(Math.abs(f.events.beats.at(-1) - snapshots[clipIndex][index]) < 1e-12,
+          'full-cache second-clip offset and backward seek preserve the measured envelope')
+      }
+    }
+    f.audio.pause()
+    assert.equal(f.events.beats.at(-1), null)
+    await f.audio.play()
+    f.tick(tracks[0].events[0].peak)
+    assert.ok(f.events.beats.at(-1) > .1)
+    stallAt(f, tracks[0].events[0].peak)
+    assert.equal(f.events.beats.at(-1), null, 'stalled media cannot hold an aligned beat')
+    f.controller.cancel()
+    assert.equal(f.events.beats.at(-1), null)
+    assert.equal(calls, 2, 'no provider calls for replay, seek or recovery')
+  }
+  finally { f.close() }
+})
+
+test('wire-missing character alignment retains fallback, while explicit empty or punctuation suppresses it', async () => {
+  for (const characters of [undefined, [], [{ text: '，', start: 0, end: 1 }]]) {
+    let calls = 0
+    const f = fixture(async () => { throw new Error('must not load local model') }, {
+      synthesizeCloud: () => fetchCloudSpeech({ text: '你好。', delivery: 'neutral', endpoint: '/api/speech' }, {
+        fetch: async () => {
+          calls++
+          return new Response(JSON.stringify({ audio: Buffer.from('ID3-fake-mp3').toString('base64'),
+            format: 'mp3', sampleRate: 32000, words: [], ...(characters === undefined ? {} : { characters }) }))
+        }, decodeAudio: async () => shapedClip(.02, 32000, 32000),
+      }),
+    })
+    try {
+      await f.controller.speak('你好。', 'neutral', undefined, [], 'cloud')
+      f.tick(.1)
+      assert.ok(f.events.mouth.at(-1)[0] > .1)
+      assert.equal(f.events.beats.at(-1), characters === undefined ? null : 0)
+      f.audio.end()
+      await f.audio.play()
+      f.tick(.1)
+      assert.equal(f.events.beats.at(-1), characters === undefined ? null : 0,
+        'full replay preserves wire missing-versus-empty distinction')
+      assert.equal(calls, 1)
+    }
+    finally { f.close() }
+  }
+})
+
+test('accepted MiniMax empty/all-zero metadata suppresses strong-mouth fallback through parse, decode and cache', async () => {
+  // Structural fake MPEG frames and injected PCM, not provider/codec evidence.
+  const mp3 = Buffer.alloc(576 * 28)
+  for (let offset = 0; offset < mp3.length; offset += 576)
+    Buffer.from([0xff, 0xfb, 0x98, 0xc0]).copy(mp3, offset)
+  const providerWord = end => ({ word: '你', word_begin: 0, word_end: 1, time_begin: 0, time_end: end })
+  for (const timestampedWords of [undefined, [], [providerWord(0)], [providerWord(900)]]) {
+    let calls = 0
+    const pcm = { sampleRate: 32000, samples: Float32Array.from({ length: 32000 }, (_, index) => {
+      const time = index / 32000, pulse = Math.max(0, 1 - Math.abs(time - .25) / .1)
+      return .12 * pulse * Math.sin(time * Math.PI * 2 * 230)
+    }) }
+    const f = fixture(async () => { throw new Error('must not load local model') }, {
+      synthesizeCloud: async () => {
+        const subtitle = { text: '你', text_begin: 0, text_end: 1, time_begin: 0, time_end: 900,
+          ...(timestampedWords === undefined ? {} : { timestamped_words: timestampedWords }) }
+        const event = { base_resp: { status_code: 0 }, data: { audio: mp3.toString('hex'), status: 2, subtitle },
+          extra_info: { audio_format: 'mp3', audio_sample_rate: 32000, audio_channel: 1, audio_size: mp3.length, audio_length: 1000 } }
+        const source = new ReadableStream({ start(controller) {
+          controller.enqueue(Buffer.from(`data: ${JSON.stringify(event)}\n\n`)); controller.close()
+        } })
+        const parsed = await collectMinimaxStream(source, { textLength: 1 })
+        assert.equal(Object.hasOwn(parsed, 'wordAlignmentAvailable'), timestampedWords !== undefined)
+        return fetchCloudSpeech({ text: '你。', delivery: 'neutral', endpoint: '/api/speech' }, {
+          fetch: async () => { calls++; return new Response(JSON.stringify(parsed)) }, decodeAudio: async () => pcm,
+        })
+      },
+    })
+    try {
+      await f.controller.speak('你。', 'neutral', undefined, [], 'cloud')
+      f.tick(.25)
+      assert.ok(f.events.mouth.at(-1)[0] > .3, 'known empty alignment cannot be hidden by a closed mouth')
+      const original = f.events.beats.at(-1)
+      if (timestampedWords === undefined) assert.equal(original, null)
+      else if (timestampedWords.length === 0 || timestampedWords[0].time_end === 0) assert.equal(original, 0)
+      else assert.ok(original > .1, 'nonempty accepted word intervals retain measured beats')
+      f.audio.end()
+      await f.audio.play()
+      f.tick(.25)
+      assert.equal(f.events.beats.at(-1), original, 'full cache preserves provider availability fact')
+      f.tick(.72); f.tick(.25)
+      assert.equal(f.events.beats.at(-1), original, 'backward seek does not reinterpret alignment presence')
+      assert.equal(calls, 1)
+    }
+    finally { f.close() }
+  }
+})
 
 test('sentence rates and expressions follow actual chunks, full replay and seeking', async () => {
   const calls = []

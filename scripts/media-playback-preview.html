@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>原生音频暂停与拖动回归 · 仅本机</title>
+  <title>对齐点头与原生音频回归 · 仅本机</title>
   <style>
     :root { font: 15px/1.55 system-ui; color: #332f3c; background: #f5f1f8; }
     body { margin: 0; }
@@ -29,12 +29,13 @@
 </head>
 <body>
 <main>
-  <h1>原生音频暂停与拖动回归</h1>
-  <p class="warning">仅限 loopback。音源是本页生成的两段调制音调（各 6 秒，bright / soft），不是人声，也不能证明语音自然度或音素对应。使用项目真实 createSpeechController 和原生 HTMLAudioElement；没有 Key、TTS 网络请求或大模型下载。</p>
+  <h1>对齐点头与原生音频回归</h1>
+  <p class="warning">仅限 loopback。音源是本页生成的两段调制 PCM 音调（各 6 秒，bright / soft）与手写非均匀字符区间，不是供应商音频或人声，不能证明语音自然度、真实供应商对齐或音素对应。使用项目真实 createSpeechController 和原生 HTMLAudioElement；没有 Key、TTS 网络请求或大模型下载。</p>
   <div class="panels">
     <section class="card">
       <h2>1. 建立完整缓存</h2>
       <p>点击开始，等两段播完；播放器将自动装入 12 秒完整缓存并暂停。随后回放、暂停和拖动均不应重新合成。系统音量可先调低。</p>
+      <label><input id="aligned" type="checkbox" checked> 下一轮注入合成字符区间（取消勾选可比较无对齐回退）</label>
       <div class="controls">
         <button id="start" disabled>开始两段诊断音调</button>
         <button id="replay" disabled>播放完整缓存</button>
@@ -48,9 +49,12 @@
       <div class="controls">
         <button id="seek-bright" disabled>拖到 2 秒 · bright</button>
         <button id="seek-soft" disabled>拖到 8 秒 · soft</button>
+        <button id="seek-beat" disabled>拖到第二段点头峰值</button>
       </div>
       <div id="mouth-track" aria-label="生产控制器嘴形开口"><div id="mouth-bar"></div></div>
       <pre id="status" aria-live="polite">检查本机地址……</pre>
+      <h2>预计算点头事件（峰值秒数与原始覆盖）</h2>
+      <pre id="beats">等待本轮 PCM。</pre>
       <p id="problem" aria-live="polite"></p>
       <h2>运行断言</h2>
       <pre id="assertions" aria-live="polite">尚未操作。PASS 只代表本次原生媒体状态与缓存检查。</pre>
@@ -63,7 +67,9 @@
       <button id="avatar" disabled>加载真实 Live2D</button>
       <p id="avatar-status">未加载（不会自动访问官方 Core）。</p>
       <label>真实角色渲染档：<select id="render-profile" aria-label="诊断角色渲染档" disabled><option value="auto">自动</option><option value="economy">节能</option></select></label>
+      <p><label><input id="reduced-motion" type="checkbox" disabled> 夹具减少动态（额外抑制；不改变系统偏好）</label></p>
       <p id="render-budget">载入角色后可原地切档；不改变音频或保存用户设置。</p>
+      <pre id="pitch-diagnostic" aria-live="polite">等待真实 Cubism；用同帧零音频 shadow 隔离点头增量，并比较旧开口回退 shadow。不是动作自然度评分。</pre>
       <div id="stage"></div>
       <p>This content uses sample data owned and copyrighted by Live2D Inc.<br>Hiyori Momose · Illustration: Kani Biimu</p>
       <p class="warning">嘴形使用真实 PCM 能量轨迹，而非中文音素标注。原生事件数量与是否真的听到音调是不同证据；仍需检查系统输出与听感。</p>
@@ -80,6 +86,8 @@
   }
   else {
     const { createSpeechController } = await import('../src/speech.ts')
+    const { speechBeats, speechBeatAtTime } = await import('../src/speech-beats.ts')
+    const { mouthFrames } = await import('../src/mouth.ts')
     const audio = byId('audio')
     const SAMPLE_RATE = 24000
     const SEGMENT_SECONDS = 6
@@ -89,6 +97,14 @@
     let playing = false, preparing = false, audioReady = false, voiceState = 'idle'
     let delivery = 'neutral', mouth = 0, maxMouth = 0, form = 0, problem = '', failureCount = 0
     let synthesisCount = 0, sourceLoads = 0, completeCache = false
+    let aligned = true, beat = null, maxBeat = 0, lastFixturePeak = -Infinity, alignmentChecks = 0
+    const fixtureTracks = [], fixtureAlignments = []
+    const characters = [
+      { text: '你', start: .15, end: .68 }, { text: '好', start: .95, end: 1.18 },
+      { text: '，', start: 1.18, end: 1.3 }, { text: '呀', start: 1.9, end: 2.3 },
+      { text: '？', start: 3.2, end: 3.5 }, { text: '再', start: 3.75, end: 4.7 },
+      { text: '见', start: 5.1, end: 5.85 },
+    ]
     const nativeCounts = { playing: 0, seeking: 0, seeked: 0, waiting: 0, play: 0, pause: 0 }
     const history = [], checks = [], sourceIds = new Map()
     let nextSourceId = 1, observedSeek = null
@@ -130,6 +146,7 @@
         `原生 paused: ${audio.paused} · seeking: ${audio.seeking} · ended: ${audio.ended}`,
         `readyState: ${audio.readyState} · currentTime: ${audio.currentTime.toFixed(3)} / ${duration().toFixed(3)} 秒`,
         `mouth: ${mouth.toFixed(4)} · 最大开口: ${maxMouth.toFixed(4)} · form: ${form.toFixed(4)} · delivery: ${delivery}`,
+        `对齐点头: ${beat === null ? 'null · 缺失/停止回退' : beat.toFixed(4)} · 本轮最大强度: ${maxBeat.toFixed(4)} · 逐帧匹配检查: ${alignmentChecks}`,
         `合成段次数: ${synthesisCount} · 音源 loadedmetadata 次数: ${sourceLoads} · 当前: ${sourceId()}`,
         `完整缓存: ${isFullCache()} · 实际 playing / seeking / seeked: ${nativeCounts.playing} / ${nativeCounts.seeking} / ${nativeCounts.seeked}`,
         `实际 play / pause / waiting: ${nativeCounts.play} / ${nativeCounts.pause} / ${nativeCounts.waiting}`,
@@ -143,18 +160,32 @@
         synthesisCount: String(synthesisCount), sourceLoads: String(sourceLoads),
         playingEvents: String(nativeCounts.playing), seekingEvents: String(nativeCounts.seeking),
         seekedEvents: String(nativeCounts.seeked), completeCache: String(isFullCache()),
+        beat: beat === null ? 'null' : String(beat), maxBeat: String(maxBeat), alignmentChecks: String(alignmentChecks),
       })
       byId('mouth-bar').style.width = `${Math.min(1, Math.max(0, mouth)) * 100}%`
       byId('problem').textContent = problem
       byId('replay').disabled = !isFullCache()
       byId('seek-bright').disabled = !isFullCache()
       byId('seek-soft').disabled = !isFullCache()
+      byId('seek-beat').disabled = !isFullCache() || !fixtureTracks[1]?.events?.length
       byId('pause').disabled = !audioReady
       byId('resume').disabled = !audioReady
       syncActor()
       if (actor) {
         const budget = actor.renderBudget, canvas = byId('stage').querySelector('canvas')
         byId('render-budget').textContent = `帧率上限 ${budget.maxFPS} fps · 绘制倍率 ${budget.resolution.toFixed(2)}x · 创建时抗锯齿 ${budget.antialias} · 画布 ${canvas?.width} × ${canvas?.height}`
+        const metric = actor.diagnostics()
+        const pitchOutput = byId('pitch-diagnostic')
+        pitchOutput.textContent = [
+          `真实 Cubism 帧: ${metric.frames} · 对齐 speaking 帧: ${metric.alignedFrames}`,
+          `Y: Idle 输入 ${metric.beforePitch.toFixed(3)}° · 当前 ${metric.currentPitch.toFixed(3)}°`,
+          `同帧零输入 ${metric.zeroInputPitch.toFixed(3)}° · 旧回退 shadow ${metric.fallbackPitch.toFixed(3)}°`,
+          `当前/旧回退点头增量: ${metric.currentOffset.toFixed(3)}° / ${metric.fallbackOffset.toFixed(3)}°`,
+          `累计最大增量: 当前 ${metric.maxCurrentOffset.toFixed(3)}° / 旧回退 ${metric.maxFallbackOffset.toFixed(3)}°（上限 0.9°）`,
+          `静默/低开口帧 ${metric.silentFrames} · 减少动态帧 ${metric.reducedFrames} · 系统偏好 ${metric.systemReduced} · 夹具 ${metric.fixtureReduced}`,
+          `累计 errors: bounds ${metric.boundsErrors} / silence ${metric.silentErrors} / reduced ${metric.reducedErrors} / closed mouth ${metric.mouthErrors}`,
+        ].join('\n')
+        for (const [key, value] of Object.entries(metric)) pitchOutput.dataset[key] = String(value)
       }
     }
 
@@ -183,10 +214,24 @@
         note(`生产控制器语气 ${value} @ ${audio.currentTime.toFixed(3)}s`)
         render()
       },
-      onMouth(opening, value) {
+      onMouth(opening, value, intensity) {
         mouth = opening ?? 0; form = value
+        beat = intensity; maxBeat = Math.max(maxBeat, beat ?? 0)
+        if (intensity !== null && !audio.paused && !audio.seeking && audio.readyState >= 3) {
+          const full = Math.abs(duration() - FULL_SECONDS) < .03
+          const clipIndex = full ? Math.min(1, Math.floor(audio.currentTime / SEGMENT_SECONDS)) : delivery === 'soft' ? 1 : 0
+          const local = audio.currentTime - (full ? clipIndex * SEGMENT_SECONDS : 0)
+          const expected = speechBeatAtTime(fixtureTracks[clipIndex] ? [{ ...fixtureTracks[clipIndex], time: 0 }] : [], local)
+          alignmentChecks++
+          if (expected === null || Math.abs(expected - intensity) > 1e-7)
+            check(false, `点头轨迹不匹配 @ ${audio.currentTime.toFixed(3)} 秒。`)
+          if (intensity > 0) {
+            const covered = fixtureAlignments[clipIndex]?.some(interval => /[\p{L}\p{N}]/u.test(interval.text) && local > interval.start && local < interval.end)
+            if (!covered) check(false, '有点头落在不可读字符或未覆盖间隙。')
+          }
+        }
         maxMouth = Math.max(maxMouth, mouth)
-        actor?.setMouth(opening, value)
+        actor?.setMouth(opening, value, intensity)
         render()
       },
     }, {
@@ -195,7 +240,16 @@
         synthesisCount++
         note(`本机 PCM 合成段 ${synthesisCount} · ${sentence.delivery}（无网络）`)
         render()
-        return { samples: diagnosticTone(sentence.delivery), sampleRate: SAMPLE_RATE }
+        const samples = diagnosticTone(sentence.delivery)
+        const metadata = aligned ? { words: [], characters } : { words: [] }
+        const events = speechBeats(metadata, mouthFrames(samples, SAMPLE_RATE), SEGMENT_SECONDS,
+          lastFixturePeak - (synthesisCount - 1) * SEGMENT_SECONDS)
+        if (events?.length) lastFixturePeak = (synthesisCount - 1) * SEGMENT_SECONDS + events.at(-1).peak
+        fixtureTracks.push({ time: 0, duration: SEGMENT_SECONDS, events })
+        fixtureAlignments.push(aligned ? characters : [])
+        byId('beats').textContent = fixtureTracks.map((track, index) => `段 ${index + 1}: ${track.events === null ? '缺失对齐 · 旧回退' : track.events.map(event => `${event.peak.toFixed(3)}s (${event.start.toFixed(3)}–${event.end.toFixed(3)})`).join(', ') || '有对齐但无合格点头'}`).join('\n')
+        check(events === null ? !aligned : events.every((event, index) => index === 0 || event.peak - events[index - 1].peak >= .65), '本轮合成区间得到稀疏点头轨迹；无等分字符或假音素。')
+        return { samples, sampleRate: SAMPLE_RATE, ...metadata }
       },
     })
 
@@ -242,7 +296,9 @@
           }, 160)
         }
         if (type === 'pause' && audio.paused)
-          check(!playing && mouth === 0 && form === 0, '原生 pause 后嘴形归零。')
+          check(!playing && mouth === 0 && form === 0 && beat === null, '原生 pause 后嘴形与点头归零。')
+        if (type === 'ended' && aligned && alignmentChecks)
+          check(failureCount === 0, `截至本次结束，${alignmentChecks} 次生产回调匹配预计算点头；间隙不点头。`)
         render()
       }
       audio.addEventListener(type, listener)
@@ -264,6 +320,8 @@
       epoch++
       controller.cancel()
       synthesisCount = 0; sourceLoads = 0; completeCache = false; observedSeek = null
+      aligned = byId('aligned').checked; beat = null; maxBeat = 0; lastFixturePeak = -Infinity; alignmentChecks = 0
+      fixtureTracks.length = 0; fixtureAlignments.length = 0; byId('beats').textContent = '等待本轮 PCM。'
       maxMouth = 0; failureCount = 0; byId('assertions').dataset.failures = '0'
       for (const type in nativeCounts) nativeCounts[type] = 0
       history.length = 0; checks.length = 0; sourceIds.clear(); nextSourceId = 1
@@ -305,6 +363,13 @@
         render()
       })
     }
+    byId('seek-beat').addEventListener('click', () => {
+      if (!isFullCache() || !fixtureTracks[1]?.events?.length) return
+      const target = SEGMENT_SECONDS + fixtureTracks[1].events[0].peak
+      note(`用户操作：原生 currentTime=${target.toFixed(3)}；第二段预计算峰值，不调用 play()。`)
+      audio.currentTime = target
+      render()
+    })
     byId('stop').addEventListener('click', () => {
       epoch++
       controller.cancel()
@@ -327,6 +392,11 @@
         '真实画布 backing buffer 按当前绘制倍率更新。')
       note(`用户原地切角色渲染档：${byId('render-profile').value}，帧率上限 ${budget.maxFPS}。`)
       verifyCachedOperation(operation, '切角色渲染档')
+      render()
+    })
+    byId('reduced-motion').addEventListener('change', () => {
+      actor?.setReducedMotion(byId('reduced-motion').checked)
+      note(`夹具减少动态 ${byId('reduced-motion').checked}；不更改 OS。`)
       render()
     })
 
@@ -354,15 +424,17 @@
             document.head.appendChild(script)
           })
         }
-        const { mountHiyori } = await import('../src/live2d.ts')
-        const mounted = await mountHiyori(byId('stage'), { signal: avatarAbort.signal })
+        const { mountSpeechBeatDiagnostic } = await import('./speech-beats-avatar.mjs')
+        const mounted = await mountSpeechBeatDiagnostic(byId('stage'), { signal: avatarAbort.signal })
         if (disposed) { mounted.destroy(); return }
         actor = mounted
         creationAntialias = actor.renderBudget.antialias
         byId('render-profile').disabled = false
-        actor.setMouth(mouth, form)
+        byId('reduced-motion').disabled = false
+        actor.setReducedMotion(byId('reduced-motion').checked)
+        actor.setMouth(mouth, form, beat)
         syncActor()
-        output.textContent = '真实 Hiyori 已挂载，嘴形与语气来自生产控制器回调。'
+        output.textContent = '真实 Hiyori 已挂载（dev-only 诊断 mount，生产 actor/render loop）；嘴形与点头来自生产控制器回调。'
         render()
       }
       catch (error) {

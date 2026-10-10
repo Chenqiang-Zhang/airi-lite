@@ -20,6 +20,9 @@ export interface CloudSpeechClip {
   samples: Float32Array
   sampleRate: number
   words: SpeechWord[]
+  // Accepted provider word metadata existed, even if all intervals were empty.
+  // true-only: omit this optional fact when availability is unknown.
+  wordAlignmentAvailable?: true
   characters?: SpeechCharacter[]
   usage?: SpeechUsage
 }
@@ -305,9 +308,9 @@ function decodeWords(value: unknown, duration: number): SpeechWord[] {
   return words
 }
 
-function decodeCharacters(value: unknown, duration: number): SpeechCharacter[] {
+function decodeCharacters(value: unknown, duration: number): SpeechCharacter[] | undefined {
   if (value === undefined)
-    return []
+    return undefined
   if (!Array.isArray(value) || value.length > MAX_CHARACTERS)
     throw new SpeechApiError('invalid_response')
 
@@ -428,6 +431,9 @@ export async function fetchCloudSpeech(
     // Validate structure and global time bounds before asking a browser codec
     // to allocate audio buffers, then check against the actual decoded clip.
     const words = decodeWords(payload.words, MAX_DURATION_SECONDS)
+    if (Object.hasOwn(payload, 'wordAlignmentAvailable') && payload.wordAlignmentAvailable !== true)
+      throw new SpeechApiError('invalid_response')
+    const wordAlignmentAvailable = payload.wordAlignmentAvailable === true
     const characters = decodeCharacters(payload.characters, MAX_DURATION_SECONDS)
     const usage = decodeUsage(payload.usage)
     throwIfAborted(options.signal)
@@ -439,7 +445,9 @@ export async function fetchCloudSpeech(
     decodeWords(words, samples.length / sampleRate)
     decodeCharacters(characters, samples.length / sampleRate)
     throwIfAborted(options.signal)
-    return { samples, sampleRate, words, characters, ...(usage ? { usage } : {}) }
+    // Preserve missing versus explicitly empty alignment through preparation.
+    return { samples, sampleRate, words, ...(wordAlignmentAvailable ? { wordAlignmentAvailable: true } : {}),
+      ...(characters === undefined ? {} : { characters }), ...(usage ? { usage } : {}) }
   }
   catch (error) {
     if (options.signal?.aborted || isAbortError(error))

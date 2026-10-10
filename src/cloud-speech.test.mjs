@@ -67,7 +67,7 @@ test('same-origin request preserves original Chinese/English text, delivery, acc
   assert.equal(result.samples.length, 3200)
   assert.equal(result.sampleRate, 32000)
   assert.deepEqual(result.words, payload().words)
-  assert.deepEqual(result.characters, [])
+  assert.equal(result.characters, undefined)
 })
 
 test('default route works without Vite env in Node, and optional access header is omitted', async () => {
@@ -151,7 +151,29 @@ test('MiniMax clips remain compatible with missing or explicitly empty character
   for (const characters of [undefined, []]) {
     const result = await fetchCloudSpeech(options(), { fetch: async () => response(payload({ characters })) })
     assert.deepEqual(result.words, payload().words)
-    assert.deepEqual(result.characters, [])
+    assert.deepEqual(result.characters, characters)
+    assert.equal(Object.hasOwn(result, 'characters'), characters !== undefined)
+  }
+})
+
+test('word alignment availability survives decode; legacy empty words do not claim availability', async () => {
+  for (const known of [false, true]) {
+    const result = await fetchCloudSpeech(options(), { fetch: async () => response(payload({ words: [],
+      ...(known ? { wordAlignmentAvailable: true } : {}) })) })
+    assert.deepEqual(result.words, [])
+    assert.equal(result.wordAlignmentAvailable, known ? true : undefined)
+    assert.equal(Object.hasOwn(result, 'wordAlignmentAvailable'), known)
+  }
+})
+
+test('malformed word availability is rejected before invoking the audio decoder', async () => {
+  for (const wordAlignmentAvailable of [false, null, 0, 1, '', 'true', [], {}, { available: true }]) {
+    let decodes = 0
+    await assert.rejects(fetchCloudSpeech(options(), {
+      fetch: async () => response(payload({ words: [], wordAlignmentAvailable })),
+      decodeAudio: async () => { decodes++; return decoded() },
+    }), apiFailure('invalid_response'))
+    assert.equal(decodes, 0)
   }
 })
 
