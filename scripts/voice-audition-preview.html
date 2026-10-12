@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>本机 Kokoro 声线试听 · 人工选择</title>
+  <style>
+    :root { font: 15px/1.6 system-ui; color: #332e3c; background: #f7f4fa; }
+    body { margin: 0; } main { max-width: 1060px; padding: 24px; margin: auto; }
+    h1 { font-size: 26px; } h2 { font-size: 19px; } h3 { font-size: 17px; }
+    section, article { background: white; border: 1px solid #dcd1e5; border-radius: 12px; padding: 18px; margin: 16px 0; }
+    button, select { font: inherit; padding: 8px 12px; margin: 5px 5px 5px 0; border: 1px solid #bcadca; border-radius: 8px; background: #faf7fd; }
+    button:disabled { opacity: .45; } a { color: #694681; } audio { display: block; width: 100%; margin: 10px 0; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 ui-monospace, monospace; }
+    .warning { color: #875061; } .reviews { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    textarea { display: block; width: 100%; box-sizing: border-box; min-height: 58px; font: inherit; }
+    label { display: block; } #current { position: sticky; top: 0; border-color: #b094c4; z-index: 1; }
+    @media(max-width:650px) { main { padding: 12px; } .reviews { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body><main>
+  <h1>本机 Kokoro 声线试听</h1>
+  <p>先听 3 个固定样本 × 4 句 neutral，共 12 个试听项。顺序固定、声线 ID 暂时隐藏；源码和下载清单保留真实映射，因此不是严格盲测。</p>
+  <p>上限是 12 个 neutral + 所选声线的 3 个新增 delivery = 15 个试听项，不是 15 次模型推理。生产分句保持不变：四句通常需要 2 / 1 / 1 / 2 次推理，基线至少 18 次，可选新增至少 4 次；实际次数另行记录。</p>
+  <p class="warning">只在 loopback 运行。没有聊天、云端 TTS、Key 或付费请求；不保存默认声线。缓存不足时停止，不自动下载约 339 MB 的 fp32 模型。自然度、手机体验和音素嘴形都需要另外验证。</p>
+  <section>
+    <h2>1. 缓存与本机资源检查</h2>
+    <button id="check">仅检查缓存 / 已安装资源</button>
+    <pre id="cache" role="status">尚未检查；不会在打开页面时加载模型或生成音频。</pre>
+  </section>
+  <section id="current">
+    <h2>2. 手动开始试听</h2>
+    <button id="neutral" disabled>生成并顺序播放 12 段 neutral</button>
+    <button id="stop" disabled>停止当前轮</button>
+    <audio id="current-audio" controls preload="auto" aria-label="生产控制器真实音频"></audio>
+    <p>请让当前段自然播放结束，才会继续下一段；原生播放器可暂停和继续。每个矩阵项只尝试一次，失败不自动重试。回放和下载复用已完成 WAV。</p>
+    <pre id="status" role="status">未开始 · 模型调用 0 · 外部下载 0</pre>
+    <p id="problem" class="warning" aria-live="polite"></p>
+  </section>
+  <section>
+    <h2>3. 可选 delivery 对照</h2>
+    <p>听完 neutral 后由你选一个样本；只对这个样本按四句顺序比较 curious / bright / soft / neutral。当前生产 delivery 只改变语速，不是情绪指令。第四句 neutral 直接复用基线，最多新增 3 段，不自动选择赢家。</p>
+    <label>你的试听选择 <select id="selected" disabled><option value="">尚未选择</option><option>样本 A</option><option>样本 B</option><option>样本 C</option></select></label>
+    <button id="delivery" disabled>生成所选样本的 delivery 对照</button>
+    <p id="selection">没有选择，也不会改变应用默认值。</p>
+  </section>
+  <section>
+    <h2>试听结果与人工笔记</h2>
+    <a id="manifest" download="local-kokoro-audition-manifest.json">下载真实映射、失败记录与笔记清单</a>
+    <p>WAV 下载到本机后才是持久文件；刷新会丢失本页临时 WAV 和笔记。请保存清单及所需音频，不要提交生成音频到 Git。笔记为空就是未评价，不会产生自动分数。</p>
+    <div id="results"></div>
+  </section>
+</main>
+<script type="module">
+const byId = id => document.getElementById(id)
+const allowed = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname) && ['http:', 'https:'].includes(location.protocol)
+if (!allowed) {
+  byId('check').disabled = true
+  byId('cache').textContent = '拒绝运行：此开发页只允许 http(s) loopback 地址。'
+}
+else {
+  const { MODEL_ID, RUNTIME_BASE, RUNTIME_FILES, VOICES, neutralMatrix, deliveryMatrix, createLedger, inspectCache, cacheOnlyFetch, inspectWav } = await import('./voice-audition.mjs')
+  const ledger = createLedger(), audio = byId('current-audio')
+  const counters = { blocked: 0, externalCacheReads: 0, localRequests: 0, externalDownloads: 0, inferenceCalls: 0, controllerCalls: 0, modelLoadAttempts: 0 }
+  const originalFetch = window.fetch.bind(window), defaultBefore = localStorage.getItem('airi-lite:voice:v1')
+  let proof = null, controller = null, busy = false, cancelled = false, active = null, backend = null
+  let preparing = false, playing = false, state = 'idle', problem = '', neutralFinished = false, deliveryUsed = false, manifestUrl = null
+  const responses = new Map()
+  // Install before Transformers imports: its env.fetch captures global fetch.
+  // External fetch returns only exact pre-verified cached responses. Runtime
+  // dynamic imports use explicitly verified local installed mjs/wasm paths.
+  window.fetch = cacheOnlyFetch(originalFetch, { origin: location.origin, responses, counters })
+  const manifest = () => {
+    if (manifestUrl) URL.revokeObjectURL(manifestUrl)
+    const value = ledger.manifest({ counters: { ...counters, auditionItemsAttempted: ledger.records.size }, cache: proof ? { ...proof, responses: undefined } : null,
+      runtimeOverride: 'installed ORT asyncify mjs/wasm instead of default CDN; same runtime version',
+      executionDeviceEvidence: 'requested provider recorded; physical GPU execution not observed',
+      defaultStorageUnchanged: localStorage.getItem('airi-lite:voice:v1') === defaultBefore,
+      timingDefinitions: { firstAudioReadyMs: 'controller first playable source, not confirmed audible sound',
+        firstPlayingMs: 'first native HTMLAudio playing event; not hardware audibility', controllerCompletionMs: 'speak Promise wall time, may include playback',
+        fullWavReadyMs: 'completed WAV after actual native endings; includes playback and synthesis', inferenceMs: 'sum measured generate_from_ids wall times, not end-to-end latency' },
+    })
+    manifestUrl = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' }))
+    byId('manifest').href = manifestUrl
+  }
+  const render = () => {
+    byId('status').textContent = `${active ? `${active.label} · 第 ${active.line + 1} 句 · ${active.delivery}` : '未进行合成'}\nstate=${state} · Kokoro 请求执行设备=${backend ?? '未加载'}（不等于已观测物理 GPU） · preparing=${preparing} · playing=${playing}\n实际模型调用=${counters.inferenceCalls} · 控制器调用=${counters.controllerCalls} · 外部下载=${counters.externalDownloads} · 阻止请求=${counters.blocked}\n成功完整 WAV=${[...ledger.records.values()].filter(record => record.status === 'success').length} · 失败=${[...ledger.records.values()].filter(record => record.status === 'failed').length}`
+    Object.assign(byId('status').dataset, { state, engine: backend ?? '', preparing: String(preparing), playing: String(playing), busy: String(busy),
+      inferenceCalls: String(counters.inferenceCalls), controllerCalls: String(counters.controllerCalls), externalDownloads: '0', blockedRequests: String(counters.blocked),
+      successCount: String([...ledger.records.values()].filter(record => record.status === 'success').length),
+      failedCount: String([...ledger.records.values()].filter(record => record.status === 'failed').length), defaultStorageUnchanged: String(localStorage.getItem('airi-lite:voice:v1') === defaultBefore) })
+    byId('problem').textContent = problem
+    byId('check').disabled = busy
+    byId('neutral').disabled = busy || !proof?.ready || neutralFinished
+    byId('stop').disabled = !busy
+    byId('selected').disabled = busy || !neutralFinished || deliveryUsed
+    byId('delivery').disabled = busy || !neutralFinished || !byId('selected').value || deliveryUsed
+    manifest()
+  }
+  byId('check').addEventListener('click', async () => {
+    byId('check').disabled = true
+    byId('cache').textContent = '读取精确缓存键与完整缓存体；仅向 loopback HEAD 检查已安装 runtime / voice……'
+    try {
+      if (!window.caches) throw new Error('当前浏览器没有 Cache API，不能证明模型准备完成')
+      proof = await inspectCache({ cacheStorage: caches, fetchLocal: window.fetch, origin: location.origin, base: import.meta.env.BASE_URL })
+      responses.clear()
+      if (proof.ready) for (const entry of proof.responses) responses.set(...entry)
+      byId('cache').textContent = `${proof.ready ? '资源条件齐备：仍须真实生成验证' : '停止：没有模型下载授权，禁止开始生成'}\n${proof.modelDownloadEstimate}\n${proof.assets.map(asset => `${asset.ready ? 'READY' : 'MISSING/INVALID'} ${asset.file}\n  ${asset.url ?? ''}\n  ${asset.bytes ?? 0} bytes · ${asset.reason}`).join('\n')}`
+      Object.assign(byId('cache').dataset, { ready: String(proof.ready), missingCount: String(proof.assets.filter(asset => !asset.ready).length), checkedAt: proof.checkedAt, externalDownloads: '0' })
+    }
+    catch (error) { proof = null; byId('cache').textContent = `停止：${error.message}`; byId('cache').dataset.ready = 'false' }
+    render()
+  })
+  async function ensureController() {
+    if (controller) return
+    if (!proof?.ready) throw new Error('缓存预检未通过')
+    const { createSpeechController } = await import('../src/speech.ts')
+    controller = createSpeechController(audio, {
+      onState(value) {
+        state = value
+        if (active) active.states.push(value)
+        if (['fallback', 'browser', 'cloud'].includes(value)) {
+          // Cancel synchronously before production fallback consumes its first
+          // sentence. Never silently audition a system voice as Kokoro.
+          if (active) active.problem = `生产控制器进入 ${value}，试听停止；不列入 Kokoro 成功结果`
+          controller?.cancel()
+        }
+        render()
+      },
+      onPreparing(value) { preparing = value; render() }, onPlaying(value) { playing = value; render() },
+      onAudioReady(value) { if (value && active && active.firstAudioReadyMs === undefined) active.firstAudioReadyMs = performance.now() - active.started; render() },
+      onMouth() {}, onDelivery() {},
+      onProblem(value) {
+        problem = value
+        if (active && value && !value.startsWith('正在生成语音') && !value.includes('自动播放被浏览器拦截')) active.problem = value
+        render()
+      },
+    }, {
+      async loadModel() {
+        if (!proof?.ready) throw new Error('缓存预检未通过')
+        const { KokoroTTS, env } = await import('@uzen/kokoro-js')
+        env.wasmPaths = { mjs: new URL(RUNTIME_BASE + RUNTIME_FILES[0], location.origin).href, wasm: new URL(RUNTIME_BASE + RUNTIME_FILES[1], location.origin).href }
+        const voicePath = `${import.meta.env.BASE_URL}kokoro/voices`
+        let model
+        for (const device of 'gpu' in navigator ? ['webgpu', 'wasm'] : ['wasm']) {
+          counters.modelLoadAttempts++
+          try { model = await KokoroTTS.from_pretrained(MODEL_ID, { device, dtype: 'fp32', voicePath }); backend = `kokoro-${device}`; break }
+          catch (error) { if (active) (active.modelLoadFailures ??= []).push({ device, error: error.message }); if (device === 'wasm') throw error }
+        }
+        // Instrument the actual installed model invocation, no fixture PCM.
+        const generate = model.generate_from_ids.bind(model)
+        model.generate_from_ids = async (...args) => {
+          counters.inferenceCalls++
+          const record = active, started = performance.now()
+          if (record) record.inferenceCalls++
+          try { return await generate(...args) }
+          finally { if (record) record.inferenceMs = (record.inferenceMs ?? 0) + performance.now() - started }
+        }
+        return model
+      },
+      async synthesizeCloud() { throw new Error('本地试听禁止云端合成') },
+    })
+    audio.addEventListener('playing', () => { if (active && active.firstPlayingMs === undefined) active.firstPlayingMs = performance.now() - active.started })
+    audio.addEventListener('ended', () => { if (active) active.nativeEndedEvents = (active.nativeEndedEvents ?? 0) + 1 })
+  }
+  async function audition(item) {
+    const existing = ledger.records.get(item.key)
+    if (existing) return existing // replay/download/neutral reuse never synthesize
+    const record = ledger.reserve(item)
+    active = record; record.startedAt = new Date().toISOString(); record.started = performance.now()
+    problem = ''; counters.controllerCalls++; render()
+    try {
+      await controller.speak(item.text, item.delivery, item.voice, [], 'local')
+      record.controllerCompletionMs = performance.now() - record.started
+      // Production speak may return while its final clip is still playing.
+      // Only its owned COMPLETE replay Blob proves the whole reply is ready;
+      // paused/currentTime/ended-count alone can describe a blocked later clip.
+      const until = performance.now() + 300_000
+      while (!cancelled && !record.problem && !(controller.getCompletedAudioBlob() && record.nativeEndedEvents > 0
+        && Number.isFinite(record.firstPlayingMs) && audio.currentSrc === audio.src && audio.readyState >= 1
+        && !audio.error && audio.paused && !audio.ended && audio.currentTime === 0 && !preparing)) {
+        if (performance.now() > until) throw new Error('等待真实播放完成超过 5 分钟；请先解决暂停/播放限制，不自动重试')
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      if (cancelled || record.problem) throw new Error(record.problem ?? '用户取消：不算成功')
+      const wav = controller.getCompletedAudioBlob()
+      if (!wav) throw new Error('完整回放 Blob 的来源所有权已失效')
+      const dimensions = await inspectWav(wav)
+      // The user can stop while the Blob body is being inspected. A late
+      // inspection cannot resurrect a canceled or replaced audition result.
+      if (cancelled || record.problem || controller.getCompletedAudioBlob() !== wav)
+        throw new Error(record.problem ?? '试听已取消或完整音频来源已被替换；不算成功')
+      ledger.complete(record, { ...dimensions, wav, url: URL.createObjectURL(wav), engine: backend, states: record.states,
+        requestedDevice: backend?.replace('kokoro-', ''), physicalExecutionDeviceObserved: false,
+        fullWavReadyMs: performance.now() - record.started, filename: `kokoro-${item.label.at(-1)}-line${item.line + 1}-${item.delivery}.wav`, problem: record.problem })
+    }
+    catch (error) {
+      controller.cancel()
+      ledger.complete(record, { engine: backend, states: record.states, problem: error.message })
+      problem = error.message
+    }
+    delete record.started
+    active = null
+    showRecord(record); render()
+    return record
+  }
+  function showRecord(record) {
+    const article = document.createElement('article'); article.dataset.key = record.key; article.dataset.status = record.status
+    const title = document.createElement('h3'); title.textContent = `${record.label} · 第 ${record.line + 1} 句 · ${record.delivery} · ${record.status === 'success' ? '完整 Kokoro WAV' : '失败，不计入成功试听'}`
+    const text = document.createElement('p'); text.textContent = record.text
+    article.append(title, text)
+    if (record.status === 'success') {
+      const player = document.createElement('audio'); player.controls = true; player.src = record.url; player.preload = 'metadata'; player.setAttribute('aria-label', title.textContent)
+      const download = document.createElement('a'); download.href = record.url; download.download = record.filename; download.textContent = `下载 ${record.filename}`
+      const details = document.createElement('p'); details.textContent = `${record.engine}（请求执行设备，未观测物理 GPU） · ${record.sampleRate} Hz · ${record.duration.toFixed(3)} 秒 · 实际模型调用 ${record.inferenceCalls}`
+      article.append(player, download, details)
+      const reviews = document.createElement('div'); reviews.className = 'reviews'
+      for (const [key, prompt] of [['fit', '角色声线适合吗？'], ['mandarin', '普通话发音 / 清晰度'], ['restraint', '韵律与情绪克制度'], ['consistency', '跨句一致性'], ['awkwardWords', '精确记下别扭的字词 / 停顿'], ['decision', '你的选择理由（可空）']]) {
+        const label = document.createElement('label'); label.textContent = prompt
+        const input = document.createElement('textarea'); input.setAttribute('aria-label', `${record.label} 第${record.line + 1}句 ${prompt}`)
+        input.addEventListener('input', () => { record.review[key] = input.value; manifest() })
+        label.append(input); reviews.append(label)
+      }
+      article.append(reviews)
+    }
+    else { const error = document.createElement('p'); error.className = 'warning'; error.textContent = record.problem; article.append(error) }
+    byId('results').append(article)
+  }
+  async function run(items, phase) {
+    if (busy || !proof?.ready) return
+    busy = true; cancelled = false; render()
+    try {
+      await ensureController()
+      for (const item of items) {
+        if (cancelled) break
+        const record = await audition(item)
+        if (record.status !== 'success') break // no repeated broken-loader lane
+      }
+    }
+    catch (error) { problem = error.message }
+    finally {
+      if (phase === 'neutral') neutralFinished = true
+      busy = false; active = null; render()
+    }
+  }
+  byId('neutral').addEventListener('click', () => void run(neutralMatrix(), 'neutral'))
+  byId('stop').addEventListener('click', () => { cancelled = true; controller?.cancel(); problem = '用户停止；已完成 WAV 保留，当前尝试不算成功'; render() })
+  byId('selected').addEventListener('change', render)
+  byId('delivery').addEventListener('click', () => {
+    const label = byId('selected').value
+    if (!label || busy || deliveryUsed) return
+    const neutral = neutralMatrix().filter(item => item.label === label)
+    if (!neutral.every(item => ledger.records.get(item.key)?.status === 'success')) { problem = '所选样本的 4 句 neutral 尚未全部成功，不允许 delivery 阶段'; render(); return }
+    ledger.select(label); deliveryUsed = true
+    byId('selection').textContent = `本轮由你选择 ${label}；第四句 neutral 复用上方基线。应用默认值保持不变。`
+    void run(deliveryMatrix(label), 'delivery')
+  })
+  window.addEventListener('beforeunload', () => { controller?.dispose(); window.fetch = originalFetch })
+  render()
+}
+</script>
+</body></html>

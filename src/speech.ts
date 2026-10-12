@@ -47,6 +47,7 @@ interface PlaybackRun {
   sampleRate: number | null
   total: number
   synthesisFinished: boolean
+  synthesisSucceeded: boolean
   playingChunk: boolean
   chunkStarted: boolean
   resumeCloudGeneration: (() => void) | null
@@ -109,6 +110,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   let modelPromise: Promise<SpeechModel> | null = null
   let unavailable = false
   let objectUrl: string | null = null
+  let completedAudio: { blob: Blob, token: number, source: string } | null = null
   let playbackMouth: readonly MouthSegment[] = []
   let playbackBeats: readonly SpeechBeatSegment[] = []
   let frame = 0
@@ -294,12 +296,18 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   audio.addEventListener('seeking', onSeeking)
   audio.addEventListener('seeked', onSeeked)
 
-  function replaceAudioSource(parts: readonly Blob[], sampleRate: number, timeline: PlaybackCue[], mouthTimeline: readonly MouthSegment[], beatTimeline: readonly SpeechBeatSegment[]) {
+  function replaceAudioSource(parts: readonly Blob[], sampleRate: number, timeline: PlaybackCue[], mouthTimeline: readonly MouthSegment[], beatTimeline: readonly SpeechBeatSegment[], token: number, completed = false): boolean {
+    if (token !== run) return false
+    const previousSource = objectUrl
     const source = createWavBlob(parts, sampleRate)
+    completedAudio = null
     // Loading the full reply is preparation, not a request to replay it.
     // Explicitly leave the previous source paused before any replacement;
     // advance() alone requests playback for a new current clip.
     audio.pause()
+    // A native pause callback may cancel or begin another run. Never install
+    // an old source (or expose its snapshot) after that reentrant transition.
+    if (token !== run || objectUrl !== previousSource) return false
     playbackStarted = false
     seekingSource = null
     retireMouthFrame()
@@ -314,8 +322,14 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     playbackTimeline = timeline
     reportedDelivery = null
     audio.src = objectUrl
+    const installedSource = objectUrl
     audio.load()
+    if (token !== run || objectUrl !== installedSource) return false
+    // The exact immutable Blob backing this source, not another PCM copy.
+    // Only advance's drained, successfully synthesized full-replay path sets it.
+    if (completed) completedAudio = { blob: source, token, source: installedSource }
     callbacks.onAudioReady(true)
+    return token === run && objectUrl === installedSource
   }
 
   function advance(session: PlaybackRun) {
@@ -350,10 +364,12 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       }
       session.playingChunk = true
       session.chunkStarted = false
-      replaceAudioSource(ready.map(clip => clip.pcm), next.sampleRate, [{ time: 0, delivery: next.delivery }], mouth, beats)
+      if (!replaceAudioSource(ready.map(clip => clip.pcm), next.sampleRate, [{ time: 0, delivery: next.delivery }], mouth, beats, session.token)) return
+      const source = objectUrl
       callbacks.onPreparing(false)
+      if (session !== activeRun || session.token !== run || source !== objectUrl) return
       void audio.play().catch((error) => {
-        if (session !== activeRun)
+        if (session !== activeRun || session.token !== run || source !== objectUrl)
           return
         console.warn('Automatic audio playback was blocked', error)
         callbacks.onProblem('语音已生成，但自动播放被浏览器拦截。请点击下方播放器的播放键。')
@@ -367,8 +383,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     }
 
     activeRun = null
+    const source = objectUrl
     callbacks.onPreparing(false)
-    replaceAudioSource(session.pcmParts, session.sampleRate, session.timeline, session.mouthTimeline, session.beatTimeline)
+    if (session.token !== run || activeRun !== null || source !== objectUrl) return
+    replaceAudioSource(session.pcmParts, session.sampleRate, session.timeline, session.mouthTimeline, session.beatTimeline, session.token, session.synthesisSucceeded)
   }
 
   function wakeGeneration(session: PlaybackRun) {
@@ -458,6 +476,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
 
   function cancel() {
     run++
+    completedAudio = null
     playbackStarted = false
     seekingSource = null
     retireMouthFrame()
@@ -712,6 +731,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       sampleRate: null,
       total: 0,
       synthesisFinished: false,
+      synthesisSucceeded: false,
       playingChunk: false,
       chunkStarted: false,
       resumeCloudGeneration: null,
@@ -773,12 +793,14 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       if (!session.total)
         throw new Error('Speech returned silent audio')
       session.synthesisFinished = true
+      session.synthesisSucceeded = true
       callbacks.onState(state)
       advance(session)
     }
     catch (error) {
       if (token !== run)
         return
+      session.synthesisSucceeded = false
       if (session.total) {
         console.warn('Speech synthesis stopped after partial audio', error)
         session.synthesisFinished = true
@@ -881,5 +903,9 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     audio.removeEventListener('seeking', onSeeking)
     audio.removeEventListener('seeked', onSeeked)
   }
-  return { prepare, speak, beginStream, cancel, dispose }
+  function getCompletedAudioBlob(): Blob | null {
+    return completedAudio?.token === run && completedAudio.source === objectUrl && audio.src === completedAudio.source
+      ? completedAudio.blob : null
+  }
+  return { prepare, speak, beginStream, cancel, dispose, getCompletedAudioBlob }
 }

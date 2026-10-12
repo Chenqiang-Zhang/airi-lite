@@ -2806,3 +2806,103 @@ test('a silent initial cloud clip cannot trigger paid attempts for later sentenc
   }
   finally { f.close() }
 })
+
+test('completed immutable WAV snapshot stays null for a blocked second clip, then covers both clips after playback', async () => {
+  // Deliberately injected PCM/audio events are offline state-machine evidence,
+  // not real Kokoro or native-browser audition evidence.
+  let calls = 0
+  const f = fixture(async () => ({ async *stream() { calls++; yield clip() } }))
+  try {
+    assert.equal(f.controller.getCompletedAudioBlob(), null)
+    const speaking = f.controller.speak('第一句。第二句。', 'neutral')
+    await settle()
+    await speaking
+    assert.equal(calls, 2)
+    assert.equal(f.controller.getCompletedAudioBlob(), null, 'synthesis completion alone is not full replay completion')
+    const manualPlay = f.audio.play.bind(f.audio)
+    f.audio.play = async () => { throw new DOMException('blocked second clip', 'NotAllowedError') }
+    f.audio.end()
+    await settle()
+    assert.ok(f.audio.paused && !f.audio.ended && f.audio.currentTime === 0 && !f.events.preparing.at(-1),
+      'the previous page heuristic would have accepted the blocked second source')
+    const secondOnly = await (await fetch(f.audio.src)).arrayBuffer()
+    assert.equal(new DataView(secondOnly).getUint32(40, true), 2400 * 2)
+    assert.equal(f.controller.getCompletedAudioBlob(), null, 'a chunk source is never a completed snapshot')
+    f.audio.play = manualPlay
+    await f.audio.play()
+    f.audio.end()
+    await settle()
+    const complete = f.controller.getCompletedAudioBlob()
+    assert.ok(complete instanceof Blob)
+    assert.equal(complete.type, 'audio/wav')
+    assert.equal(complete.size, 44 + 4800 * 2)
+    assert.equal(f.controller.getCompletedAudioBlob(), complete, 'getter exposes the same immutable snapshot, not a copy')
+    const bytes = await complete.arrayBuffer()
+    assert.deepEqual(await (await fetch(f.audio.src)).arrayBuffer(), bytes, 'snapshot exactly backs the full replay source')
+    await f.audio.play()
+    f.audio.pause()
+    f.audio.currentTime = .05
+    await f.audio.play()
+    f.audio.end()
+    assert.equal(f.controller.getCompletedAudioBlob(), complete)
+    assert.equal(calls, 2, 'full replay, seek, pause and snapshot reads never regenerate')
+
+    const next = f.controller.speak('新句。', 'neutral')
+    assert.equal(f.controller.getCompletedAudioBlob(), null, 'new run immediately retires the old snapshot')
+    await settle(); await next; f.audio.end(); await settle()
+    assert.ok(f.controller.getCompletedAudioBlob())
+    f.controller.cancel()
+    assert.equal(f.controller.getCompletedAudioBlob(), null)
+    assert.deepEqual(await complete.arrayBuffer(), bytes, 'previously returned immutable Blob remains usable after cancellation')
+  }
+  finally { f.close() }
+})
+
+test('partial synthesis replay and browser fallback cannot expose a completed audio snapshot', async () => {
+  const partial = fixture(async () => ({ async *stream() { yield clip(); throw new Error('partial fixture') } }))
+  try {
+    await partial.controller.speak('部分。', 'neutral')
+    partial.audio.end(); await settle()
+    assert.ok(partial.audio.src, 'existing partial replay remains available to ordinary playback')
+    assert.equal(partial.controller.getCompletedAudioBlob(), null)
+    assert.match(partial.events.problem.at(-1), /后续语音生成中断/)
+  }
+  finally { partial.close() }
+  const fallback = fixture(async () => { throw new Error('fixture loader unavailable') })
+  try {
+    const speaking = fallback.controller.speak('退回。', 'neutral')
+    await settle()
+    assert.equal(fallback.controller.getCompletedAudioBlob(), null)
+    assert.equal(fallback.events.state.at(-1), 'fallback')
+    fallback.utterances[0].onend()
+    await speaking
+    assert.equal(fallback.controller.getCompletedAudioBlob(), null)
+  }
+  finally { fallback.close() }
+})
+
+test('reentrant completion callbacks cannot retain or install an old completed snapshot', async () => {
+  for (const callback of ['preparing', 'ready']) {
+    let f, retired = false
+    f = fixture(async () => ({ async *stream() { yield clip() } }), {}, {
+      onPreparing(value) {
+        if (callback === 'preparing' && !value && f?.audio.ended && !retired) {
+          retired = true; f.controller.cancel()
+        }
+      },
+      onAudioReady(value) {
+        if (callback === 'ready' && value && f?.controller.getCompletedAudioBlob() && !retired) {
+          retired = true; f.controller.cancel()
+        }
+      },
+    })
+    try {
+      await f.controller.speak('一次。', 'neutral')
+      f.audio.end(); await settle()
+      assert.equal(retired, true)
+      assert.equal(f.controller.getCompletedAudioBlob(), null)
+      assert.equal(f.audio.src, '', 'canceled full cache cannot be installed by an older callback frame')
+    }
+    finally { f.close() }
+  }
+})
