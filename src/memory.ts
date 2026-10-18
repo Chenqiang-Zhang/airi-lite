@@ -11,9 +11,11 @@ function browserStorage(): StorageLike {
   return window.localStorage
 }
 
-export function loadUserMemory(storage: StorageLike = browserStorage()): string {
+// Resolve storage inside try: a blocked localStorage throws from the getter itself.
+export function loadUserMemory(storage?: StorageLike): string {
   try {
-    return (storage.getItem(USER_MEMORY_STORAGE_KEY) ?? '').trim().slice(0, USER_MEMORY_LIMIT)
+    const source = storage ?? browserStorage()
+    return (source.getItem(USER_MEMORY_STORAGE_KEY) ?? '').trim().slice(0, USER_MEMORY_LIMIT)
   }
   catch {
     return ''

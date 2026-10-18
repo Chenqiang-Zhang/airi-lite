@@ -6,6 +6,11 @@ import ts from 'typescript'
 import * as vue from 'vue'
 import * as chatTurn from './chat-turn.ts'
 import * as accessCode from './access-code.ts'
+import * as api from './api.ts'
+import * as conversation from './conversation.ts'
+import * as memory from './memory.ts'
+import * as personaModule from './persona.ts'
+import * as voice from './voice.ts'
 import * as cloudProvider from './cloud-provider.ts'
 import * as speechMode from './speech-mode.ts'
 import * as delivery from './delivery.ts'
@@ -21,7 +26,7 @@ const commonjs = ts.transpileModule(compiled.content, {
   compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS },
 }).outputText
 
-function createAppProbe() {
+function createAppProbe({ streamChat, modules: overrides = {} } = {}) {
   let clock = 1000
   const requests = []
   let release
@@ -31,7 +36,7 @@ function createAppProbe() {
     name: 'Test', personality: '', preferences: '', scenario: '', speakingStyle: '',
     behaviorGuidelines: '', dialogueExamples: '', greeting: '固定测试问候。',
   }
-  const sessionStorage = { getItem: () => null, setItem: noEffect, removeItem: noEffect }
+  const saved = []
   const modules = {
     vue: { ...vue, onMounted: noEffect, onUnmounted: noEffect },
     '../shared/chat-request.mjs': chatRequest,
@@ -40,18 +45,18 @@ function createAppProbe() {
     './delivery': delivery,
     './cloud-provider': cloudProvider,
     './api': {
-      ChatApiError: class ChatApiError extends Error {},
+      ChatApiError: api.ChatApiError,
       fetchProviderStatus: () => { throw new Error('Unexpected network boundary') },
-      streamChat: async (options) => {
+      streamChat: streamChat ?? (async (options) => {
         requests.push(options)
         await gate
         options.onDelivery('bright')
         options.onDelta('不应写入的迟到内容。')
-        return '不应写入的迟到内容。'
-      },
+        return { text: '不应写入的迟到内容。', truncated: false }
+      }),
     },
     './cloud-speech': { fetchCloudSpeech: () => { throw new Error('Unexpected TTS boundary') } },
-    './conversation': { loadConversation: () => [], saveConversation: noEffect, clearConversation: noEffect },
+    './conversation': { loadConversation: () => [], saveConversation: messages => saved.push(JSON.parse(JSON.stringify(messages))), clearConversation: noEffect },
     './chat-scroll': { createChatScrollController: () => { throw new Error('Unexpected DOM mount') } },
     './avatar-context': { createAvatarContext: () => ({ current: 'neutral', sync: noEffect, beginTurn: noEffect, clear: noEffect, destroy: noEffect }) },
     './avatar-startup': { loadAvatarModule: () => { throw new Error('Unexpected avatar mount') } },
@@ -61,17 +66,18 @@ function createAppProbe() {
     './speech': { createSpeechController: () => { throw new Error('Unexpected audio mount') } },
     './speech-mode': { ...speechMode, loadSpeechMode: () => 'browser', readDeviceHints: () => ({}) },
     './voice': { loadVoice: () => 'zf_001', saveVoice: noEffect, VOICE_OPTIONS: [{ id: 'zf_001', label: 'test' }] },
+    ...overrides,
   }
   const module = { exports: {} }
-  new Function('require', 'module', 'exports', 'sessionStorage', 'Date', commonjs)(
+  new Function('require', 'module', 'exports', 'Date', commonjs)(
     (name) => {
       assert.ok(Object.hasOwn(modules, name), `Unexpected import: ${name}`)
       return modules[name]
-    }, module, module.exports, sessionStorage, { now: () => clock },
+    }, module, module.exports, { now: () => clock },
   )
   const scope = vue.effectScope()
   const app = scope.run(() => module.exports.default.setup({}, { expose: noEffect }))
-  return { app, requests, release, setClock: value => (clock = value), dispose: () => scope.stop() }
+  return { app, requests, saved, release, setClock: value => (clock = value), dispose: () => scope.stop() }
 }
 
 for (const greetingAction of ['resetConversation', 'applyPersona']) {
@@ -118,3 +124,121 @@ for (const greetingAction of ['resetConversation', 'applyPersona']) {
     })
   }
 }
+
+test('actual App keeps a reply that errors mid-stream but marks and saves it as interrupted', async () => {
+  const probe = createAppProbe({
+    streamChat: async (options) => {
+      options.onDelta('故事讲到一半')
+      throw new api.ChatApiError('DeepSeek 流式响应中断')
+    },
+  })
+  try {
+    const { app } = probe
+    app.input.value = '讲个长故事。'
+    await app.sendMessage()
+    const reply = app.messages.value.at(-1)
+    assert.equal(reply.role, 'assistant')
+    assert.equal(reply.text, '故事讲到一半')
+    assert.equal(reply.interrupted, true)
+    assert.equal(app.lastError.value, 'DeepSeek 流式响应中断')
+    assert.equal(app.isGenerating.value, false)
+    assert.equal(probe.saved.at(-1).at(-1).interrupted, true)
+  }
+  finally { probe.dispose() }
+})
+
+for (const providerMode of ['checking', 'fallback', 'deepseek']) {
+  test(`actual App never presents a busy server as a local demo reply (provider ${providerMode})`, async () => {
+    const probe = createAppProbe({
+      streamChat: async () => { throw new api.ChatApiError('当前体验人数较多，请稍后再试。', 503, 'CHAT_BUSY') },
+    })
+    try {
+      const { app } = probe
+      app.providerMode.value = providerMode
+      app.input.value = '在吗？'
+      await app.sendMessage()
+      assert.deepEqual(app.messages.value.map(message => message.role), ['assistant', 'user'])
+      assert.equal(app.messages.value.some(message => message.source === 'fallback'), false)
+      assert.equal(app.lastError.value, '当前体验人数较多，请稍后再试。')
+      assert.equal(app.providerMode.value, providerMode)
+    }
+    finally { probe.dispose() }
+  })
+}
+
+test('actual App uses a labelled demo reply only when the server reports DeepSeek is unconfigured', async () => {
+  const probe = createAppProbe({
+    streamChat: async () => {
+      throw new api.ChatApiError('DeepSeek API Key 尚未配置，当前使用本地演示回复。', 503, 'DEEPSEEK_NOT_CONFIGURED')
+    },
+  })
+  try {
+    const { app } = probe
+    assert.equal(app.providerMode.value, 'checking')
+    app.input.value = '在吗？'
+    await app.sendMessage()
+    const reply = app.messages.value.at(-1)
+    assert.equal(reply.role, 'assistant')
+    assert.equal(reply.source, 'fallback')
+    assert.ok(reply.text)
+    assert.equal(app.providerMode.value, 'fallback')
+  }
+  finally { probe.dispose() }
+})
+
+for (const truncated of [true, false]) {
+  test(`actual App ${truncated ? 'notes a length-capped reply' : 'adds no note to a complete reply'} without marking it interrupted`, async () => {
+    const probe = createAppProbe({
+      streamChat: async (options) => {
+        options.onDelta('这段回复写到')
+        return { text: '这段回复写到', truncated }
+      },
+    })
+    try {
+      const { app } = probe
+      app.input.value = '多讲一点。'
+      await app.sendMessage()
+      const reply = app.messages.value.at(-1)
+      assert.equal(reply.text, '这段回复写到')
+      assert.equal(reply.interrupted, undefined)
+      assert.equal(app.lastError.value, '')
+      assert.equal(app.interactionNotice.value, truncated ? '这条回复达到长度上限，结尾被截断了。' : '')
+    }
+    finally { probe.dispose() }
+  })
+}
+
+test('actual App setup, unlock and persona edits survive browser storage whose getters throw', () => {
+  const previousWindow = globalThis.window
+  const blocked = () => { throw new DOMException('The operation is insecure.', 'SecurityError') }
+  globalThis.window = Object.defineProperties({}, {
+    localStorage: { get: blocked, configurable: true },
+    sessionStorage: { get: blocked, configurable: true },
+  })
+  let probe
+  try {
+    probe = createAppProbe({
+      modules: { './conversation': conversation, './memory': memory, './persona': personaModule, './voice': voice },
+    })
+    const { app } = probe
+    assert.deepEqual(app.messages.value.map(message => message.text), [personaModule.DEFAULT_PERSONA.greeting])
+    assert.equal(app.userMemory.value, '')
+    assert.equal(app.selectedVoice.value, voice.DEFAULT_VOICE)
+    assert.equal(app.accessCode.value, '')
+
+    app.accessDraft.value = 'demo-code-123'
+    app.saveAccessCode()
+    assert.equal(app.accessCode.value, 'demo-code-123')
+    assert.equal(app.lastError.value, '')
+
+    app.draftPersona.value.name = '临时名字'
+    app.applyPersona()
+    assert.equal(app.persona.value.name, '临时名字')
+    assert.equal(app.personaOpen.value, false)
+    assert.match(app.lastError.value, /未能保存/)
+  }
+  finally {
+    probe?.dispose()
+    globalThis.window = previousWindow
+  }
+})

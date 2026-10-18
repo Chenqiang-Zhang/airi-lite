@@ -131,3 +131,18 @@ test('a message-count cutoff never restores an orphan assistant reply', () => {
   assert.equal(loaded[0].text, '用户1')
   assert.equal(loaded.at(-1).text, '最后一句')
 })
+
+test('a blocked sessionStorage getter cannot break loading, saving or clearing', () => {
+  const previousWindow = globalThis.window
+  globalThis.window = Object.defineProperty({}, 'sessionStorage', {
+    get: () => { throw new DOMException('The operation is insecure.', 'SecurityError') },
+  })
+  try {
+    assert.deepEqual(loadConversation(), [])
+    assert.doesNotThrow(() => saveConversation([{ role: 'user', text: '你好' }]))
+    assert.doesNotThrow(() => clearConversation())
+  }
+  finally {
+    globalThis.window = previousWindow
+  }
+})

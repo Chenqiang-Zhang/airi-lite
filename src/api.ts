@@ -1,6 +1,6 @@
 import type { PersonaConfig } from './persona'
 import type { Delivery } from './delivery'
-import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code'
+import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code.ts'
 import { normaliseChatRequest } from '../shared/chat-request.mjs'
 
 export interface ChatMessage {
@@ -26,12 +26,23 @@ interface StreamEvent {
   content?: string
   message?: string
   value?: string
+  truncated?: boolean
+}
+
+export interface ChatResult {
+  text: string
+  truncated: boolean
 }
 
 export class ChatApiError extends Error {
-  constructor(message: string, readonly status?: number) {
+  readonly status?: number
+  readonly code?: string
+
+  constructor(message: string, status?: number, code?: string) {
     super(message)
     this.name = 'ChatApiError'
+    this.status = status
+    this.code = code
   }
 }
 
@@ -51,11 +62,12 @@ export async function streamChat(options: {
   accessCode?: string
   onDelta: (content: string) => void
   onDelivery?: (delivery: Delivery) => void
-}) {
+}): Promise<ChatResult> {
   if (options.accessCode && !isValidAccessCode(options.accessCode))
     throw new ChatApiError(INVALID_ACCESS_CODE_MESSAGE)
 
-  const response = await fetch(`${import.meta.env.BASE_URL}api/chat`, {
+  // Node tests run this without Vite's import.meta.env.
+  const response = await fetch(`${import.meta.env?.BASE_URL ?? '/'}api/chat`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -70,8 +82,8 @@ export async function streamChat(options: {
   })
 
   if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { message?: string } | null
-    throw new ChatApiError(payload?.message ?? 'DeepSeek 请求失败', response.status)
+    const payload = await response.json().catch(() => null) as { code?: string, message?: string } | null
+    throw new ChatApiError(payload?.message ?? 'DeepSeek 请求失败', response.status, payload?.code)
   }
 
   if (!response.body)
@@ -81,6 +93,7 @@ export async function streamChat(options: {
   const decoder = new TextDecoder()
   let buffer = ''
   let completeText = ''
+  let truncated = false
 
   const consumeLine = (line: string) => {
     if (!line.trim())
@@ -89,6 +102,9 @@ export async function streamChat(options: {
     const event = JSON.parse(line) as StreamEvent
     if (event.type === 'error')
       throw new ChatApiError(event.message ?? 'DeepSeek 流式响应中断')
+
+    if (event.type === 'done' && event.truncated === true)
+      truncated = true
 
     if (event.type === 'delivery' && ['neutral', 'soft', 'bright', 'curious'].includes(event.value ?? ''))
       options.onDelivery?.(event.value as Delivery)
@@ -116,5 +132,5 @@ export async function streamChat(options: {
   if (!completeText.trim())
     throw new ChatApiError('DeepSeek 返回了空回复')
 
-  return completeText
+  return { text: completeText, truncated }
 }

@@ -62,27 +62,30 @@ function normaliseMessages(value: unknown): ConversationMessage[] {
   return retained.slice(start)
 }
 
-export function loadConversation(storage: Storage = window.sessionStorage): ConversationMessage[] {
+type SessionStore = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+
+// Resolve storage inside try: a blocked sessionStorage throws from the getter itself.
+export function loadConversation(storage?: SessionStore): ConversationMessage[] {
   try {
-    return normaliseMessages(JSON.parse(storage.getItem(CONVERSATION_STORAGE_KEY) ?? 'null'))
+    return normaliseMessages(JSON.parse((storage ?? window.sessionStorage).getItem(CONVERSATION_STORAGE_KEY) ?? 'null'))
   }
   catch {
     return []
   }
 }
 
-export function saveConversation(messages: ConversationMessage[], storage: Storage = window.sessionStorage): void {
+export function saveConversation(messages: ConversationMessage[], storage?: SessionStore): void {
   try {
-    storage.setItem(CONVERSATION_STORAGE_KEY, JSON.stringify(normaliseMessages(messages)))
+    (storage ?? window.sessionStorage).setItem(CONVERSATION_STORAGE_KEY, JSON.stringify(normaliseMessages(messages)))
   }
   catch {
     // Storage can be disabled or full; chat still works for the current page.
   }
 }
 
-export function clearConversation(storage: Storage = window.sessionStorage): void {
+export function clearConversation(storage?: SessionStore): void {
   try {
-    storage.removeItem(CONVERSATION_STORAGE_KEY)
+    (storage ?? window.sessionStorage).removeItem(CONVERSATION_STORAGE_KEY)
   }
   catch {
     // Private browsing may deny session storage; clearing the visible chat still works.
