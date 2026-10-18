@@ -219,7 +219,16 @@ export function createRequestHandler({
 
   async function serveProductionFile(pathname, response) {
     const distDirectory = join(root, 'dist')
-    const requested = resolve(distDirectory, `.${decodeURIComponent(pathname)}`)
+    let decoded
+    try {
+      decoded = decodeURIComponent(pathname)
+    }
+    catch {
+      // Malformed percent-encoding (scanner noise such as `/%E0%A4%A`) is a
+      // client error, not a server fault worth logging with a stack trace.
+      return sendJson(response, 400, { message: '请求路径无效' })
+    }
+    const requested = resolve(distDirectory, `.${decoded}`)
     const safePath = requested.startsWith(`${distDirectory}${sep}`) ? requested : join(distDirectory, 'index.html')
 
     let filePath = safePath

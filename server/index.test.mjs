@@ -508,17 +508,18 @@ test('production static serving keeps path traversal attempts inside dist/', asy
   }
 })
 
-test('production static serving: malformed percent-encoding is currently a logged 500', async (context) => {
+test('production static serving answers malformed percent-encoding with 400, not a logged 500', async (context) => {
   const logged = context.mock.method(console, 'error', () => {})
   const { port } = await start(context, { env: productionEnv, root: await staticRoot(context) })
-  for (const path of ['/airi/%E0%A4%A', '/airi/%', '/airi/%zz.js']) {
+  for (const path of ['/airi/%E0%A4%A', '/airi/%', '/airi/%zz.js', '/airi/..%2f%E0%A4%A']) {
     const response = await rawGet(port, path)
-    assert.equal(response.status, 500, path)
-    assert.deepEqual(JSON.parse(response.body), { message: '本地服务发生了意外错误' })
+    assert.equal(response.status, 400, path)
+    assert.equal(response.headers['cache-control'], 'no-store')
+    assert.deepEqual(JSON.parse(response.body), { message: '请求路径无效' })
   }
-  // decodeURIComponent throws a URIError, logged with its stack by the catch-all.
-  assert.equal(logged.mock.callCount(), 3)
-  assert.ok(logged.mock.calls.every(entry => entry.arguments[0] instanceof URIError))
+  assert.equal(logged.mock.callCount(), 0)
+  // Well-formed encodings still decode normally.
+  assert.equal((await rawGet(port, '/airi/assets/%61pp.js')).body, 'console.log("app")')
 })
 
 async function freePort() {
