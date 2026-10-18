@@ -228,7 +228,8 @@ test('/api/chat answers 503 while 4 chats are in flight and frees slots when the
 
   const busy = await chat(base)
   assert.equal(busy.status, 503)
-  assert.deepEqual(await busy.json(), { message: '当前体验人数较多，请稍后再试。' })
+  // A distinct code keeps a busy server from being shown as the unconfigured local fallback.
+  assert.deepEqual(await busy.json(), { code: 'CHAT_BUSY', message: '当前体验人数较多，请稍后再试。' })
   assert.equal((await chat(base, { code: 'wrong' })).status, 401, 'the access code is checked before capacity')
   assert.equal(fetchImpl.mock.callCount(), 4)
 
@@ -325,6 +326,14 @@ test('/api/chat sends one bounded streaming request to the configured DeepSeek U
   assert.equal(defaultBody.model, 'deepseek-flash')
   assert.equal(defaultBody.max_tokens, 320)
   assert.equal(defaultBody.temperature, 0.8)
+
+  // Number('') is 0: an empty env assignment must keep the default, not clamp to the minimum.
+  const empty = await start(context, { env: { ...env, DEEPSEEK_MAX_TOKENS: '', DEEPSEEK_TEMPERATURE: ' ' }, fetchImpl })
+  await (await chat(empty.base)).text()
+  const emptyBody = JSON.parse(fetchImpl.mock.calls[2].arguments[1].body)
+  assert.equal(emptyBody.max_tokens, 320)
+  assert.equal(emptyBody.temperature, 0.8)
+  assert.equal(readServerConfig({ PORT: '' }).port, 5173)
 })
 
 test('upstream non-OK responses become 502 with a provider message truncated to 240 characters', async (context) => {
@@ -384,6 +393,23 @@ test('upstream SSE is relayed as NDJSON delta / delivery / done events across ar
     choices: [{ delta: { content: '一句' } }] })}`) })
   assert.deepEqual(await events(await chat(base)),
     [{ type: 'delta', content: '最后' }, { type: 'delta', content: '一句' }, { type: 'done' }])
+})
+
+test('a length-capped DeepSeek reply ends with a truncated done event', async (context) => {
+  const finish = reason => `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: reason }] })}\n\n`
+  const reply = reason => [
+    `data: ${JSON.stringify({ choices: [{ delta: { content: '写到一半' }, finish_reason: null }] })}\n\n`,
+    finish(reason),
+    'data: {"choices":[],"usage":{"completion_tokens":320}}\n\n',
+    'data: [DONE]\n\n',
+  ].join('')
+
+  const capped = await start(context, { fetchImpl: async () => sse(reply('length'), 5) })
+  assert.deepEqual(await events(await chat(capped.base)),
+    [{ type: 'delta', content: '写到一半' }, { type: 'done', truncated: true }])
+
+  const complete = await start(context, { fetchImpl: async () => sse(reply('stop')) })
+  assert.deepEqual((await events(await chat(complete.base))).at(-1), { type: 'done' })
 })
 
 test('a mid-stream upstream failure ends the NDJSON stream with an error event instead of done', async (context) => {

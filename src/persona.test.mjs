@@ -145,7 +145,7 @@ test('custom and deliberately empty preferences survive save and reload', () => 
     withStoredPersona(JSON.stringify(customised), getStored => {
       const loaded = loadPersona()
       assert.deepEqual(loaded, customised)
-      savePersona(loaded)
+      assert.equal(savePersona(loaded), true)
       assert.equal(JSON.parse(getStored()).preferences, preferences)
       assert.equal(loadPersona().preferences, preferences)
     })
@@ -172,4 +172,19 @@ test('default persona leaves ordinary sharing out of consequence and advice fram
   assert.match(DEFAULT_PERSONA.behaviorGuidelines, /提问也不能偷带这些未经说明的前提/)
   assert.match(DEFAULT_PERSONA.behaviorGuidelines, /未经用户确认不升级成用户事实/)
   assert.match(DEFAULT_PERSONA.speakingStyle, /一句普通的回应也可以成立/)
+})
+
+test('blocked or full localStorage reports a failed persona save instead of throwing', () => {
+  const previousWindow = globalThis.window
+  const denied = () => { throw new DOMException('The quota has been exceeded.', 'QuotaExceededError') }
+  try {
+    globalThis.window = Object.defineProperty({}, 'localStorage', { get: denied })
+    assert.equal(savePersona({ ...DEFAULT_PERSONA }), false)
+    assert.deepEqual(loadPersona(), DEFAULT_PERSONA)
+    globalThis.window = { localStorage: { getItem: () => null, setItem: denied } }
+    assert.equal(savePersona({ ...DEFAULT_PERSONA }), false)
+  }
+  finally {
+    globalThis.window = previousWindow
+  }
 })

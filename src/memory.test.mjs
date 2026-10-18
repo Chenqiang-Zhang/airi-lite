@@ -42,3 +42,16 @@ test('a proposed message is not silently truncated when memory is full', () => {
   const existing = 'a'.repeat(USER_MEMORY_LIMIT - 2)
   assert.equal(proposeUserMemory(existing, '我喜欢柠檬茶。'), existing)
 })
+
+test('a blocked localStorage getter loads no memory instead of throwing', () => {
+  const previousWindow = globalThis.window
+  globalThis.window = Object.defineProperty({}, 'localStorage', {
+    get: () => { throw new DOMException('The operation is insecure.', 'SecurityError') },
+  })
+  try {
+    assert.equal(loadUserMemory(), '')
+  }
+  finally {
+    globalThis.window = previousWindow
+  }
+})

@@ -26,3 +26,16 @@ test('invalid stored or requested voices cannot load arbitrary files', () => {
   assert.throws(() => saveVoice('../private', local), /未知声线/)
   assert.deepEqual(VOICE_OPTIONS.map(option => option.id), ['zf_001', 'zf_002', 'zf_003'])
 })
+
+test('a blocked localStorage getter falls back to the default voice', () => {
+  const previousWindow = globalThis.window
+  globalThis.window = Object.defineProperty({}, 'localStorage', {
+    get: () => { throw new DOMException('The operation is insecure.', 'SecurityError') },
+  })
+  try {
+    assert.equal(loadVoice(), DEFAULT_VOICE)
+  }
+  finally {
+    globalThis.window = previousWindow
+  }
+})

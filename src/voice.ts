@@ -22,9 +22,10 @@ export function isVoiceId(value: unknown): value is VoiceId {
   return VOICE_OPTIONS.some(option => option.id === value)
 }
 
-export function loadVoice(storage: StorageLike = browserStorage()): VoiceId {
+// Resolve storage inside try: a blocked localStorage throws from the getter itself.
+export function loadVoice(storage?: StorageLike): VoiceId {
   try {
-    const saved = storage.getItem(VOICE_STORAGE_KEY)
+    const saved = (storage ?? browserStorage()).getItem(VOICE_STORAGE_KEY)
     return isVoiceId(saved) ? saved : DEFAULT_VOICE
   }
   catch {

@@ -99,7 +99,7 @@ export function createRequestHandler({
       return sendJson(response, 401, { message: '体验码不正确，请重新输入。' })
 
     if (activeChats >= 4)
-      return sendJson(response, 503, { message: '当前体验人数较多，请稍后再试。' })
+      return sendJson(response, 503, { code: 'CHAT_BUSY', message: '当前体验人数较多，请稍后再试。' })
 
     activeChats++
     try {
@@ -201,8 +201,8 @@ export function createRequestHandler({
     })
 
     try {
-      await relayDeepSeekStream(upstream.body, response)
-      writeEvent(response, { type: 'done' })
+      const { truncated } = await relayDeepSeekStream(upstream.body, response)
+      writeEvent(response, truncated ? { type: 'done', truncated: true } : { type: 'done' })
     }
     catch (error) {
       if (!abortController.signal.aborted) {
@@ -260,6 +260,7 @@ async function relayDeepSeekStream(body, response) {
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let truncated = false
   const deliveryCue = createDeliveryCueParser()
 
   const consumeLine = (line) => {
@@ -271,6 +272,9 @@ async function relayDeepSeekStream(body, response) {
       return
 
     const chunk = JSON.parse(data)
+    // max_tokens stops the reply mid-thought; tell the browser it was cut off.
+    if (chunk.choices?.[0]?.finish_reason === 'length')
+      truncated = true
     const content = chunk.choices?.[0]?.delta?.content
     if (typeof content === 'string' && content) {
       for (const event of deliveryCue.push(content))
@@ -292,6 +296,7 @@ async function relayDeepSeekStream(body, response) {
   consumeLine(buffer.trimEnd())
   for (const event of deliveryCue.finish())
     writeEvent(response, event)
+  return { truncated }
 }
 
 async function readJson(request) {
@@ -323,7 +328,8 @@ function ensureTrailingSlash(value) {
 }
 
 function safeNumber(value, fallback, minimum, maximum) {
-  const number = Number(value)
+  // Number('') is 0, so an empty env assignment must mean "unset", not the minimum.
+  const number = typeof value === 'string' && value.trim() ? Number(value) : Number.NaN
   return Number.isFinite(number)
     ? Math.min(maximum, Math.max(minimum, number))
     : fallback

@@ -4,7 +4,7 @@ import { MAX_MESSAGE_CHARS } from '../shared/chat-request.mjs'
 
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
-import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code'
+import { forgetStoredAccessCode, INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode, loadStoredAccessCode, storeAccessCode } from './access-code'
 import { ChatApiError, fetchProviderStatus, streamChat } from './api'
 import { fetchCloudSpeech } from './cloud-speech'
 import type { SpeechUsage } from './cloud-speech'
@@ -93,11 +93,11 @@ const interactionNotice = ref('')
 const modelStage = ref<HTMLElement | null>(null)
 const modelStatus = ref('正在载入 Live2D 角色…')
 const accessProtected = ref(false)
-const savedAccessCode = sessionStorage.getItem('airi-demo-access-code') ?? ''
+const savedAccessCode = loadStoredAccessCode()
 const accessCode = ref(isValidAccessCode(savedAccessCode) ? savedAccessCode : '')
 const accessDraft = ref(savedAccessCode)
 if (savedAccessCode && !accessCode.value) {
-  sessionStorage.removeItem('airi-demo-access-code')
+  forgetStoredAccessCode()
   lastError.value = INVALID_ACCESS_CODE_MESSAGE
 }
 let live2d: Awaited<ReturnType<typeof import('./live2d')['mountHiyori']>> | null = null
@@ -317,7 +317,7 @@ async function sendMessage() {
   try {
     await nextTick()
     if (!isCurrent()) return
-    await streamChat({
+    const result = await streamChat({
       messages: chatRequest.messages,
       persona: chatRequest.persona,
       userMemory: chatRequest.userMemory,
@@ -350,6 +350,8 @@ async function sendMessage() {
     speechStream.current?.finish()
     assistantMessage.delivery ??= chooseDelivery(text, assistantMessage.text)
     providerMode.value = 'deepseek'
+    if (result.truncated)
+      interactionNotice.value = '这条回复达到长度上限，结尾被截断了。'
   }
   catch (error) {
     if (!isCurrent())
@@ -360,15 +362,21 @@ async function sendMessage() {
       messages.value = messages.value.filter(message => message.id !== assistantMessage.id)
       if (error instanceof ChatApiError && error.status === 401) {
         accessCode.value = ''
-        sessionStorage.removeItem('airi-demo-access-code')
+        forgetStoredAccessCode()
         messages.value = messages.value.filter(message => message.id !== userMessage.id)
         input.value = text
       }
-      else if (error instanceof ChatApiError && error.status === 503 && providerMode.value === 'fallback') {
+      // Only an unconfigured server gets a demo reply; a busy one is just an error.
+      else if (error instanceof ChatApiError && error.code === 'DEEPSEEK_NOT_CONFIGURED') {
+        providerMode.value = 'fallback'
         assistantMessage.text = fallbackReplies[messages.value.length % fallbackReplies.length]
         assistantMessage.source = 'fallback'
         messages.value.push(assistantMessage)
       }
+    }
+    else {
+      // Keep what was shown, but mark it unfinished like a typed barge-in.
+      messages.value = interruptAssistantMessage(messages.value, assistantMessage.id)
     }
   }
   finally {
@@ -400,7 +408,8 @@ function applyPersona() {
     ...draftPersona.value,
     name: draftPersona.value.name.trim() || 'Hiyori',
   }
-  savePersona(persona.value)
+  if (!savePersona(persona.value))
+    lastError.value = '人格已在本页生效，但浏览器未能保存；刷新后会恢复之前的设置。'
   if (messages.value.length === 1 && messages.value[0].role === 'assistant') {
     messages.value = [{ id: nextMessageId(), role: 'assistant', text: persona.value.greeting }]
     clearConversation()
@@ -588,7 +597,7 @@ function saveAccessCode() {
     return
   }
   accessCode.value = code
-  sessionStorage.setItem('airi-demo-access-code', code)
+  storeAccessCode(code)
   lastError.value = ''
 }
 </script>

@@ -99,6 +99,13 @@ export function loadPersona(): PersonaConfig {
   }
 }
 
-export function savePersona(persona: PersonaConfig) {
-  window.localStorage.setItem(PERSONA_STORAGE_KEY, JSON.stringify(persona))
+// Blocked or full storage must not stop the edited persona applying to this page.
+export function savePersona(persona: PersonaConfig): boolean {
+  try {
+    window.localStorage.setItem(PERSONA_STORAGE_KEY, JSON.stringify(persona))
+    return true
+  }
+  catch {
+    return false
+  }
 }
