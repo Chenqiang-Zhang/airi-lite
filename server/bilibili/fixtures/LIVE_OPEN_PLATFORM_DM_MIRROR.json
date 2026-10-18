@@ -1,0 +1,11 @@
+{
+  "cmd": "LIVE_OPEN_PLATFORM_DM_MIRROR",
+  "data": {
+    "room_id": 4242,
+    "msg": "来自另一个直播间的弹幕",
+    "msg_id": "8a2f1c40-0d3e-4c55-9d7e-0b1f4e7a0002",
+    "timestamp": 1760875201,
+    "dm_type": 0,
+    "emoji_img_url": ""
+  }
+}

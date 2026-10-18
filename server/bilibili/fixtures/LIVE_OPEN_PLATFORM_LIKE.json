@@ -1,0 +1,19 @@
+{
+  "cmd": "LIVE_OPEN_PLATFORM_LIKE",
+  "data": {
+    "uname": "测试观众甲",
+    "uid": 0,
+    "open_id": "39b8fedb-60a5-4e29-ac75-b16955f7e632",
+    "union_id": "",
+    "uface": "https://i0.hdslb.test/bfs/face/viewer-a.jpg",
+    "timestamp": 1760875205,
+    "room_id": 4242,
+    "like_text": "为主播点赞了",
+    "like_count": 5,
+    "fans_medal_wearing_status": true,
+    "fans_medal_name": "小测",
+    "fans_medal_level": 12,
+    "guard_level": 3,
+    "msg_id": "8a2f1c40-0d3e-4c55-9d7e-0b1f4e7a0007"
+  }
+}

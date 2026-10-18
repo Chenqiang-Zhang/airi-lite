@@ -1,0 +1,41 @@
+{
+  "cmd": "LIVE_OPEN_PLATFORM_SEND_GIFT",
+  "data": {
+    "room_id": 4242,
+    "uid": 0,
+    "open_id": "5c0e7a1d-2b43-4f6e-8d21-3a9c7e5b0b02",
+    "union_id": "",
+    "uname": "测试观众乙",
+    "uface": "https://i0.hdslb.test/bfs/face/viewer-b.jpg",
+    "gift_id": 31036,
+    "gift_name": "小花花",
+    "gift_num": 3,
+    "price": 100,
+    "r_price": 100,
+    "paid": true,
+    "fans_medal_level": 3,
+    "fans_medal_name": "小测",
+    "fans_medal_wearing_status": false,
+    "guard_level": 0,
+    "timestamp": 1760875202,
+    "anchor_info": {
+      "uid": 0,
+      "open_id": "anchor-open-id",
+      "uname": "主播本人",
+      "uface": "https://i0.hdslb.test/bfs/face/anchor.jpg"
+    },
+    "msg_id": "8a2f1c40-0d3e-4c55-9d7e-0b1f4e7a0003",
+    "gift_icon": "https://i0.hdslb.test/bfs/live/gift-flower.png",
+    "combo_gift": true,
+    "combo_info": {
+      "combo_base_num": 1,
+      "combo_count": 3,
+      "combo_id": "combo-7f2a",
+      "combo_timeout": 3
+    },
+    "blind_gift": {
+      "blind_gift_id": 0,
+      "status": false
+    }
+  }
+}
