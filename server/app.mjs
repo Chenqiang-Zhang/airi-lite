@@ -1,7 +1,9 @@
+import { once } from 'node:events'
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { timingSafeEqual } from 'node:crypto'
 import { extname, join, resolve, sep } from 'node:path'
+import { pipeline } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 
 import { buildSystemPrompt, normaliseChatRequest } from './persona.mjs'
@@ -241,11 +243,21 @@ export function createRequestHandler({
       filePath = join(distDirectory, 'index.html')
     }
 
+    // Open before writing headers: a missing build (no dist/index.html) then
+    // rejects into the handler's logged 500 instead of an unhandled stream
+    // 'error' that exits the process.
+    const file = createReadStream(filePath)
+    await once(file, 'ready')
     response.writeHead(200, {
       'Content-Type': mimeType(filePath),
       'Cache-Control': filePath.endsWith('index.html') ? 'no-cache' : 'public, max-age=31536000, immutable',
     })
-    createReadStream(filePath).pipe(response)
+    // pipeline() destroys both ends on a read error or a client disconnect,
+    // so a failure mid-file drops this one connection.
+    pipeline(file, response, (error) => {
+      if (error && error.code !== 'ERR_STREAM_PREMATURE_CLOSE')
+        console.error(error)
+    })
   }
 }
 

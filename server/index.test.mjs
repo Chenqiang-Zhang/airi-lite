@@ -328,12 +328,15 @@ test('/api/chat sends one bounded streaming request to the configured DeepSeek U
   assert.equal(defaultBody.temperature, 0.8)
 
   // Number('') is 0: an empty env assignment must keep the default, not clamp to the minimum.
-  const empty = await start(context, { env: { ...env, DEEPSEEK_MAX_TOKENS: '', DEEPSEEK_TEMPERATURE: ' ' }, fetchImpl })
-  await (await chat(empty.base)).text()
-  const emptyBody = JSON.parse(fetchImpl.mock.calls[2].arguments[1].body)
-  assert.equal(emptyBody.max_tokens, 320)
-  assert.equal(emptyBody.temperature, 0.8)
-  assert.equal(readServerConfig({ PORT: '' }).port, 5173)
+  for (const [maxTokens, temperature] of [['', ' '], [' \t', '']]) {
+    const empty = await start(context, { env: { ...env, DEEPSEEK_MAX_TOKENS: maxTokens, DEEPSEEK_TEMPERATURE: temperature }, fetchImpl })
+    await (await chat(empty.base)).text()
+    const emptyBody = JSON.parse(fetchImpl.mock.calls.at(-1).arguments[1].body)
+    assert.equal(emptyBody.max_tokens, 320, JSON.stringify(maxTokens))
+    assert.equal(emptyBody.temperature, 0.8, JSON.stringify(temperature))
+  }
+  for (const port of ['', '   ', '\t\n'])
+    assert.equal(readServerConfig({ PORT: port }).port, 5173, JSON.stringify(port))
 })
 
 test('upstream non-OK responses become 502 with a provider message truncated to 240 characters', async (context) => {
@@ -546,6 +549,35 @@ test('production static serving answers malformed percent-encoding with 400, not
   assert.equal(logged.mock.callCount(), 0)
   // Well-formed encodings still decode normally.
   assert.equal((await rawGet(port, '/airi/assets/%61pp.js')).body, 'console.log("app")')
+})
+
+test('production static serving survives a missing dist/ build instead of crashing the process', async (context) => {
+  const logged = context.mock.method(console, 'error', () => {})
+  const root = await mkdtemp(join(tmpdir(), 'airi-static-test-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  const { base, port } = await start(context, { env: productionEnv, root })
+  for (const path of ['/airi/', '/airi/assets/app.js', '/airi/']) {
+    const response = await rawGet(port, path)
+    assert.equal(response.status, 500, path)
+    assert.deepEqual(JSON.parse(response.body), { message: '本地服务发生了意外错误' })
+  }
+  assert.equal(logged.mock.callCount(), 3)
+  assert.equal(logged.mock.calls[0].arguments[0].code, 'ENOENT')
+  assert.equal((await fetch(`${base}/airi/api/health`)).status, 200)
+})
+
+test('a static file that fails after its headers drops only that connection', async (context) => {
+  const logged = context.mock.method(console, 'error', () => {})
+  const root = await mkdtemp(join(tmpdir(), 'airi-static-test-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  // A directory opens like a file but fails on the first read (EISDIR).
+  await mkdir(join(root, 'dist', 'index.html'), { recursive: true })
+  const { base, port } = await start(context, { env: productionEnv, root })
+  for (let attempt = 0; attempt < 2; attempt++)
+    await assert.rejects(rawGet(port, '/airi/'), { code: 'ECONNRESET' })
+  assert.equal(logged.mock.callCount(), 2)
+  assert.equal(logged.mock.calls[0].arguments[0].code, 'EISDIR')
+  assert.equal((await fetch(`${base}/airi/api/health`)).status, 200)
 })
 
 async function freePort() {
