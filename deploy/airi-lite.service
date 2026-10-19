@@ -15,6 +15,7 @@ Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=strict
+ReadWritePaths=/opt/airi-lite/.data
 ProtectHome=true
 PrivateTmp=true
 

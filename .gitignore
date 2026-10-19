@@ -15,3 +15,6 @@ public/models/*
 # Kokoro voice embeddings are installed separately from the source code.
 public/kokoro/voices/*
 !public/kokoro/voices/.gitkeep
+
+# Claude Code local state: side-session worktrees and preview configs.
+.claude/
