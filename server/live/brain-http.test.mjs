@@ -125,11 +125,14 @@ test('viewer danmaku wait in the queue until the host approves them', async (con
   assert.equal((await control(base, { action: 'approve', itemId: pending.id })).status, 200)
   await until(() => said.length === 1, 'approved reply on stage')
   assert.equal(model.requests[0].messages.at(-1).content, '<viewer_message from="甲" kind="danmaku">晚上好</viewer_message>')
+  // The item is answered only after the stage reports the turn played, which
+  // can land after the next steps under load; wait so the queue is settled.
+  await until(async () => (await state(base)).queue.recent.find(item => item.id === pending.id)?.status === 'answered', 'first answered')
 
   runtime.hub.publish('input.danmaku', { type: 'danmaku', msgId: 'm2', user: { name: '乙' }, text: '不回答这条' }, { source: 'test' })
   const second = await until(async () => (await state(base)).queue.open.find(item => item.status === 'pending'), 'second pending')
   assert.equal((await control(base, { action: 'reject', itemId: second.id })).status, 200)
-  assert.equal((await state(base)).queue.recent[0].status, 'rejected')
+  assert.equal((await state(base)).queue.recent.find(item => item.id === second.id)?.status, 'rejected')
 })
 
 test('the host\'s own "say" passes the output gate without counting a strike', async (context) => {
