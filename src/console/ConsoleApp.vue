@@ -27,6 +27,7 @@ const PAUSE_LABELS: Record<string, string> = {
   'upstream-errors': 'DeepSeek 连续出错，自动暂停',
 }
 const PHASE_LABELS: Record<string, string> = { idle: '空闲', generating: '正在想', speaking: '正在说', cooldown: '稍等片刻' }
+const AVATAR_LABELS: Record<string, string> = { loading: '载入中', ready: '已载入', failed: '载入失败（看舞台页的控制台）' }
 const BLOCK_LABELS: Record<string, string> = {
   empty: '空回复', 'too-long': '太长', markup: '泄露了标签', url: '含链接', contact: '含联系方式',
   blocklist: '命中屏蔽词', provider: '云审核不通过', 'provider-timeout': '云审核超时', 'provider-error': '云审核出错',
@@ -169,7 +170,7 @@ onUnmounted(() => {
     <section class="status" aria-label="状态">
       <dl>
         <dt>舞台</dt><dd>{{ stageLabel }}</dd>
-        <dt>形象</dt><dd>{{ primary?.avatar ?? '—' }}</dd>
+        <dt>形象</dt><dd>{{ primary?.avatar ? AVATAR_LABELS[primary.avatar] ?? primary.avatar : '—' }}</dd>
         <dt>OBS</dt><dd>{{ obsLabel }}</dd>
         <dt>其他页面</dt><dd>待命 {{ state?.stage.standby ?? 0 }} · 预览 {{ state?.stage.previews ?? 0 }}</dd>
         <dt>舞台上报</dt><dd>{{ ago(primary?.lastReportAgoMs) }}</dd>
