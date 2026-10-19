@@ -17,4 +17,7 @@ public/kokoro/voices/*
 !public/kokoro/voices/.gitkeep
 
 # Claude Code local state: side-session worktrees and preview configs.
-.claude/
+# The cloud-session startup hook and its settings are shared, so tracked.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
