@@ -27,7 +27,9 @@ const PAUSE_LABELS: Record<string, string> = {
   'upstream-errors': 'DeepSeek 连续出错，自动暂停',
 }
 const PHASE_LABELS: Record<string, string> = { idle: '空闲', generating: '正在想', speaking: '正在说', cooldown: '稍等片刻' }
-const AVATAR_LABELS: Record<string, string> = { loading: '载入中', ready: '已载入', failed: '载入失败（看舞台页的控制台）' }
+const AVATAR_LABELS: Record<string, string> = {
+  unknown: '等待舞台上报', loading: '载入中', ready: '已载入', failed: '载入失败（看舞台页的控制台）',
+}
 const BLOCK_LABELS: Record<string, string> = {
   empty: '空回复', 'too-long': '太长', markup: '泄露了标签', url: '含链接', contact: '含联系方式',
   blocklist: '命中屏蔽词', provider: '云审核不通过', 'provider-timeout': '云审核超时', 'provider-error': '云审核出错',

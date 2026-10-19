@@ -28,9 +28,23 @@ set +u
 if ! nvm which "$NODE_MAJOR" >/dev/null 2>&1; then
   nvm install "$NODE_MAJOR"
 fi
-NODE_BIN="$(dirname "$(nvm which "$NODE_MAJOR")")"
+NODE_PATH_IN_NVM="$(nvm which "$NODE_MAJOR")"
 set -u
+NODE_BIN="$(dirname "$NODE_PATH_IN_NVM")"
+if [ ! -x "$NODE_BIN/node" ]; then
+  echo "session-start: Node $NODE_MAJOR not found after nvm install" >&2
+  exit 1
+fi
 export PATH="$NODE_BIN:$PATH"
+
+# Make Node 24 the default for the rest of the session. Written before the
+# install, so a failed install still leaves later commands on Node 24.
+if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+  {
+    echo "export NVM_DIR=\"$NVM_DIR\""
+    echo "export PATH=\"$NODE_BIN:\$PATH\""
+  } >> "$CLAUDE_ENV_FILE"
+fi
 
 # pnpm runs on whichever `node` is first on PATH, so the container's copy is
 # fine; install one only if the image stops shipping it.
@@ -39,13 +53,5 @@ if ! command -v pnpm >/dev/null 2>&1; then
 fi
 
 pnpm install --frozen-lockfile
-
-# Make Node 24 the default for the rest of the session.
-if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
-  {
-    echo "export NVM_DIR=\"$NVM_DIR\""
-    echo "export PATH=\"$NODE_BIN:\$PATH\""
-  } >> "$CLAUDE_ENV_FILE"
-fi
 
 echo "session-start: node $(node --version), pnpm $(pnpm --version), dependencies installed"

@@ -505,7 +505,7 @@ test('production static serving redirects /airi, serves dist/, gives routes inde
   assert.equal(asset.headers['content-type'], 'text/javascript; charset=utf-8')
   assert.equal(asset.headers['cache-control'], 'public, max-age=31536000, immutable')
 
-  // Client routes and directories get the app shell.
+  // Extensionless paths (client routes, directories) get the app shell.
   for (const path of ['/airi/chat/history', '/airi/assets', '/airi/assets/', '/airi/.well-known/x', '/'])
     assert.equal((await rawGet(port, path)).body, INDEX_HTML, path)
 
