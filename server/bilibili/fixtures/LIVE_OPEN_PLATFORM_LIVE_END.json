@@ -1,0 +1,11 @@
+{
+  "cmd": "LIVE_OPEN_PLATFORM_LIVE_END",
+  "data": {
+    "room_id": 4242,
+    "open_id": "anchor-open-id",
+    "union_id": "",
+    "timestamp": 1760882400,
+    "area_name": "虚拟日常",
+    "title": "AI 主播测试直播"
+  }
+}

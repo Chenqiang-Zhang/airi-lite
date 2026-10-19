@@ -1,0 +1,22 @@
+{
+  "cmd": "LIVE_OPEN_PLATFORM_SUPER_CHAT",
+  "data": {
+    "room_id": 4242,
+    "uid": 0,
+    "open_id": "a1f3c9e2-7d64-4b8a-9e05-6c2d8f1a0c03",
+    "union_id": "",
+    "uname": "测试观众丙",
+    "uface": "https://i0.hdslb.test/bfs/face/viewer-c.jpg",
+    "message_id": 9001234,
+    "message": "第一次看直播，加油！",
+    "msg_id": "8a2f1c40-0d3e-4c55-9d7e-0b1f4e7a0004",
+    "rmb": 30,
+    "timestamp": 1760875203,
+    "start_time": 1760875203,
+    "end_time": 1760875263,
+    "guard_level": 0,
+    "fans_medal_level": 0,
+    "fans_medal_name": "",
+    "fans_medal_wearing_status": false
+  }
+}

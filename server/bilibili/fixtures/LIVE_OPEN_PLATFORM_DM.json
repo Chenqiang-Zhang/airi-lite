@@ -1,0 +1,24 @@
+{
+  "cmd": "LIVE_OPEN_PLATFORM_DM",
+  "data": {
+    "room_id": 4242,
+    "uid": 0,
+    "open_id": "39b8fedb-60a5-4e29-ac75-b16955f7e632",
+    "union_id": "",
+    "uname": "测试观众甲",
+    "msg": "主播晚上好！",
+    "msg_id": "8a2f1c40-0d3e-4c55-9d7e-0b1f4e7a0001",
+    "fans_medal_level": 12,
+    "fans_medal_name": "小测",
+    "fans_medal_wearing_status": true,
+    "guard_level": 3,
+    "timestamp": 1760875200,
+    "uface": "https://i0.hdslb.test/bfs/face/viewer-a.jpg",
+    "emoji_img_url": "",
+    "dm_type": 0,
+    "glory_level": 5,
+    "reply_open_id": "",
+    "reply_uname": "",
+    "is_admin": 0
+  }
+}

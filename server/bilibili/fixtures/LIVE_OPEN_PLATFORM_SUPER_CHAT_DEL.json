@@ -1,0 +1,8 @@
+{
+  "cmd": "LIVE_OPEN_PLATFORM_SUPER_CHAT_DEL",
+  "data": {
+    "room_id": 4242,
+    "message_ids": [9001234, 9001235],
+    "msg_id": "8a2f1c40-0d3e-4c55-9d7e-0b1f4e7a0005"
+  }
+}
