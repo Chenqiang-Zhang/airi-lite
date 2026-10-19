@@ -72,9 +72,47 @@ export function createSpeechHandler({
   })
   const acceptRate = createSpeechRateLimiter({ now })
   let active = 0
+
+  // Provider-specific local estimates are NOT the actual account balance.
+  // Eleven's estimate includes the trusted delivery prefix it will send.
+  // Keep separate durable ledgers; switching providers never resets one.
+  async function reserveAndSynthesise(speechRequest, signal) {
+    await selectedBudget.reserve(provider.estimateReservation(config, speechRequest), signal)
+    signal.throwIfAborted()
+    const result = await provider.synthesise(config, speechRequest, { fetchImpl, signal })
+    signal.throwIfAborted()
+    return result
+  }
+
   return {
     health: () => ({ configured: provider.configured, provider: provider.provider, model: provider.model,
       ...(provider.provider === 'minimax' ? { region: provider.region } : {}) }),
+    // Trusted in-process callers (the live stage route) that have already done
+    // their own authorisation. Shares the concurrency cap and the same ledger.
+    async synthesise({ text, delivery }, { signal } = {}) {
+      if (!provider.configured)
+        throw new SpeechProviderError('TTS_NOT_CONFIGURED')
+      if (active >= 4)
+        throw new SpeechProviderError('TTS_BUSY')
+      const speechRequest = normaliseSpeechRequest({ text, delivery })
+      active++
+      const timeout = new AbortController()
+      const timer = setTimeout(() => timeout.abort(), timeoutMs)
+      timer.unref?.()
+      try {
+        return await reserveAndSynthesise(speechRequest,
+          signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal)
+      }
+      catch (error) {
+        if (timeout.signal.aborted && !signal?.aborted)
+          throw new SpeechProviderError('TTS_TIMEOUT')
+        throw error
+      }
+      finally {
+        clearTimeout(timer)
+        active--
+      }
+    },
     async handle(request, response) {
       if (!acceptRate(getClientIp(request)))
         return sendError(response, 429, 'TTS_RATE_LIMIT')
@@ -106,28 +144,12 @@ export function createSpeechHandler({
         // new region needs new client confirmation, never a guessed endpoint.
         if (provider.provider === 'minimax' && (speechRequest.expectedRegion ?? 'cn') !== provider.region)
           throw new SpeechProviderError('TTS_PROVIDER_CHANGED')
-        // Provider-specific local estimates are NOT the actual account balance.
-        // Eleven's estimate includes the trusted delivery prefix it will send.
-        // Keep separate durable ledgers; switching providers never resets one.
-        await selectedBudget.reserve(provider.estimateReservation(config, speechRequest), signal)
-        signal.throwIfAborted()
-        const result = await provider.synthesise(config, speechRequest, { fetchImpl, signal })
-        signal.throwIfAborted()
-        sendJson(response, 200, result)
+        sendJson(response, 200, await reserveAndSynthesise(speechRequest, signal))
       }
       catch (error) {
         if (cancelled.signal.aborted || response.destroyed || response.writableEnded)
           return
-        // Provider/OS errors may contain credentials or submitted text. Never
-        // relay error.message, upstream error JSON, trace IDs, or console logs.
-        const known = error instanceof SpeechProviderError || error instanceof TtsBudgetError
-        const code = timeout.signal.aborted ? 'TTS_TIMEOUT' : known && Object.hasOwn(MESSAGES, error.code)
-          ? error.code : 'TTS_UPSTREAM_FAILED'
-        const status = code === 'TTS_INVALID_REQUEST' ? 400
-          : code === 'TTS_PROVIDER_CHANGED' ? 409
-          : code === 'TTS_DAILY_LIMIT' ? 429
-            : code === 'TTS_BUDGET_UNAVAILABLE' ? 503
-              : code === 'TTS_TIMEOUT' ? 504 : 502
+        const { status, code } = speechErrorResponse(error, { timedOut: timeout.signal.aborted })
         sendError(response, status, code)
       }
       finally {
@@ -138,6 +160,20 @@ export function createSpeechHandler({
       }
     },
   }
+}
+
+// Provider/OS errors may contain credentials or submitted text. Never relay
+// error.message, upstream error JSON, trace IDs, or console logs.
+export function speechErrorResponse(error, { timedOut = false } = {}) {
+  const known = error instanceof SpeechProviderError || error instanceof TtsBudgetError
+  const code = timedOut ? 'TTS_TIMEOUT' : known && Object.hasOwn(MESSAGES, error.code)
+    ? error.code : 'TTS_UPSTREAM_FAILED'
+  const status = code === 'TTS_INVALID_REQUEST' ? 400
+    : code === 'TTS_PROVIDER_CHANGED' ? 409
+    : code === 'TTS_DAILY_LIMIT' ? 429
+      : code === 'TTS_BUDGET_UNAVAILABLE' ? 503
+        : code === 'TTS_TIMEOUT' ? 504 : 502
+  return { status, code, message: MESSAGES[code] }
 }
 
 function readBoundedJson(request, signal) {

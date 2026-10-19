@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 import { buildSystemPrompt, normaliseChatRequest } from './persona.mjs'
 import { createDeliveryCueParser } from './delivery-cue.mjs'
+import { checkLocalHost } from './live/local-request.mjs'
 import { readSpeechConfig } from './speech-provider.mjs'
 import { createSpeechHandler } from './speech.mjs'
 
@@ -33,11 +34,17 @@ export function createRequestHandler({
   vite = null,
   fetchImpl = fetch,
   now = Date.now,
+  // Optional: an existing speech handler ({health, handle, synthesise}) so the
+  // public route and the live stage share one concurrency cap and ledger.
+  speech: providedSpeech = null,
+  // Optional live-stream subsystem factory: ({speech, config, env}) =>
+  // {handle(request, response, pathname): Promise<boolean>, health(), stop()}.
+  live: createLive = null,
 } = {}) {
   const { production, model, baseUrl, accessCode } = config
   const rateWindows = new Map()
   let activeChats = 0
-  const speech = createSpeechHandler({
+  const speech = providedSpeech ?? createSpeechHandler({
     rootDirectory: root,
     config: readSpeechConfig(env),
     isValidCode: candidate => !accessCode || validCode(candidate),
@@ -47,8 +54,17 @@ export function createRequestHandler({
   if (production && accessCode.length < 16)
     throw new Error('Production requires AIRI_DEMO_ACCESS_CODE with at least 16 characters')
 
-  return async function handleRequest(request, response) {
+  const live = createLive ? createLive({ speech, config, env }) : null
+
+  async function handleRequest(request, response) {
     try {
+      // Live mode runs only on the streaming machine's loopback; a rebinding
+      // page must not reach /api/speech or /api/chat either, since they share
+      // the stage's speech slots and daily ledger.
+      const badHost = live ? checkLocalHost(request) : null
+      if (badHost)
+        return sendJson(response, badHost.status, { code: badHost.code })
+
       const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
       const pathname = url.pathname.startsWith('/airi/') ? url.pathname.slice('/airi'.length) : url.pathname
 
@@ -64,6 +80,7 @@ export function createRequestHandler({
           provider: 'deepseek',
           accessProtected: Boolean(accessCode),
           speech: speech.health(),
+          ...(live ? { live: live.health() } : {}),
         })
       }
 
@@ -72,6 +89,9 @@ export function createRequestHandler({
 
       if (request.method === 'POST' && pathname === '/api/speech')
         return await speech.handle(request, response)
+
+      if (live && pathname.startsWith('/api/live/') && await live.handle(request, response, pathname))
+        return
 
       if (pathname.startsWith('/api/'))
         return sendJson(response, 404, { message: 'API 路径不存在' })
@@ -89,6 +109,10 @@ export function createRequestHandler({
         response.end()
     }
   }
+  // Callers that own the server (server/index.mjs) stop the live subsystem's
+  // timers and open streams before closing it.
+  handleRequest.stop = async () => { await live?.stop() }
+  return handleRequest
 
   async function handleProtectedChat(request, response) {
     const ip = clientIp(request)
@@ -243,7 +267,9 @@ export function createRequestHandler({
 
     response.writeHead(200, {
       'Content-Type': mimeType(filePath),
-      'Cache-Control': filePath.endsWith('index.html') ? 'no-cache' : 'public, max-age=31536000, immutable',
+      // Every page (index, stage, console) must revalidate: a rebuilt page
+      // names new hashed assets, and OBS may otherwise keep a stale stage.
+      'Cache-Control': filePath.endsWith('.html') ? 'no-cache' : 'public, max-age=31536000, immutable',
     })
     createReadStream(filePath).pipe(response)
   }

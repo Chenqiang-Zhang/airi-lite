@@ -382,9 +382,7 @@ export async function fetchCloudSpeech(
     || (options.accessCode !== '' && !isValidAccessCode(options.accessCode))))
     throw new SpeechApiError('invalid_access_code')
   const endpoint = proxyEndpoint(options.endpoint)
-  // Feature detection is read-only: do not create a context before validating
-  // the response, or spend a provider request when this device cannot decode.
-  if (!dependencies.decodeAudio && typeof AudioContext === 'undefined')
+  if (!canDecodeCloudSpeech(dependencies))
     throw new SpeechApiError('invalid_response')
 
   let response: Response
@@ -411,6 +409,22 @@ export async function fetchCloudSpeech(
       throw abortError()
     throw new SpeechApiError('network')
   }
+  return decodeCloudSpeechResponse(response, { signal: options.signal }, dependencies)
+}
+
+// Feature detection is read-only: do not create a context before validating
+// the response, or spend a provider request when this device cannot decode.
+export function canDecodeCloudSpeech(dependencies: CloudSpeechDependencies = {}): boolean {
+  return Boolean(dependencies.decodeAudio) || typeof AudioContext !== 'undefined'
+}
+
+// Validates and decodes a `/api/speech`-shaped response from any same-origin
+// route (the live stage buys sentences through its own server-gated route).
+export async function decodeCloudSpeechResponse(
+  response: Response,
+  options: { signal?: AbortSignal } = {},
+  dependencies: CloudSpeechDependencies = {},
+): Promise<CloudSpeechClip> {
   if (options.signal?.aborted) {
     cancelBody(response)
     throw abortError()

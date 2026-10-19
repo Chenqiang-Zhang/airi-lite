@@ -8,7 +8,10 @@ import type { AvatarRenderProfile } from './avatar-rendering'
 import { readDeviceHints } from './speech-mode'
 import type { DeviceHints } from './speech-mode'
 
-export async function mountHiyori(container: HTMLElement, options: { signal?: AbortSignal, deviceHints?: DeviceHints, renderProfile?: AvatarRenderProfile } = {}) {
+// autoInteract:false is for the OBS stage, which nobody clicks: no pointer
+// tracking and no Tap motion that a stray "Interact" click could trigger.
+export async function mountHiyori(container: HTMLElement, options: { signal?: AbortSignal, deviceHints?: DeviceHints, renderProfile?: AvatarRenderProfile, autoInteract?: boolean } = {}) {
+  const autoInteract = options.autoInteract ?? true
   const scope = createAvatarMountScope(options.signal)
   try {
     scope.assertActive()
@@ -37,7 +40,7 @@ export async function mountHiyori(container: HTMLElement, options: { signal?: Ab
     if (interaction) interaction.useSystemTicker = false
     container.appendChild(app.view)
 
-    const modelOptions = { autoInteract: true, autoUpdate: false }
+    const modelOptions = { autoInteract, autoUpdate: false }
     const model = await loadAvatarResource(scope, () => new Live2DModel(modelOptions),
       model => Live2DFactory.setupLive2DModel(model,
         `${import.meta.env.BASE_URL}models/hiyori/hiyori_free_t08.model3.json`, modelOptions),
@@ -69,9 +72,11 @@ export async function mountHiyori(container: HTMLElement, options: { signal?: Ab
     observer.observe(container)
     layout()
 
-    model.on('hit', () => {
-      if (!scope.disposed) void model.motion('Tap')
-    })
+    if (autoInteract) {
+      model.on('hit', () => {
+        if (!scope.disposed) void model.motion('Tap')
+      })
+    }
 
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
     const actor = attachAvatarPerformance(model.internalModel as Cubism4InternalModel, {

@@ -10,8 +10,9 @@ import test from 'node:test'
 import { readMinimaxConfig } from './minimax.mjs'
 import { buildElevenLabsRequest, readElevenLabsConfig } from './elevenlabs.mjs'
 import { readSpeechConfig } from './speech-provider.mjs'
-import { createSpeechHandler, createSpeechRateLimiter, normaliseSpeechRequest } from './speech.mjs'
+import { createSpeechHandler, createSpeechRateLimiter, normaliseSpeechRequest, speechErrorResponse } from './speech.mjs'
 import { createTtsBudget } from './tts-budget.mjs'
+import { SpeechProviderError } from './speech-error.mjs'
 
 const config = readMinimaxConfig({ MINIMAX_TTS_ENABLED: '1', MINIMAX_API_KEY: 'test-key-do-not-leak',
   MINIMAX_VOICE_ID: 'test-private-voice', MINIMAX_TTS_DAILY_CHAR_LIMIT: '1000' })
@@ -393,4 +394,65 @@ test('provider guard rejects legacy/different-provider requests before spending,
   for (const expectedProvider of ['unknown', null, '', 'eleven_v4', { provider: 'minimax' }])
     assert.equal((await run(eleven, request(JSON.stringify({ ...payload, expectedProvider })))).status, 400)
   assert.equal(calls, 0)
+})
+
+test('trusted synthesise() reserves the same 2x estimate, returns the route contract and shares the four-slot cap', async () => {
+  const order = []
+  const handler = create({
+    budget: { reserve: async characters => { order.push(['reserve', characters]) } },
+    fetchImpl: async () => { order.push(['fetch']); return audioResponse() },
+  })
+  const result = await handler.synthesise({ text: payload.text, delivery: 'soft' })
+  assert.deepEqual(order, [['reserve', 2 * payload.text.length], ['fetch']])
+  assert.deepEqual(Object.keys(result), ['audio', 'format', 'sampleRate', 'words'])
+
+  const signals = []
+  const stalled = create({ fetchImpl: stalledFetch(signal => signals.push(signal)) })
+  const callers = Array.from({ length: 3 }, () => new AbortController())
+  const pending = callers.map(caller => stalled.synthesise(payload, { signal: caller.signal }).catch(error => error))
+  const response = new MockResponse()
+  const routed = stalled.handle(request(), response)
+  while (signals.length < 4)
+    await setImmediate()
+  await assert.rejects(stalled.synthesise(payload), { code: 'TTS_BUSY' }, 'the public route and the stage share one cap')
+  assert.equal((await run(stalled)).status, 503)
+  for (const caller of callers)
+    caller.abort()
+  response.destroyed = true
+  response.emit('close')
+  await Promise.all([...pending, routed])
+  assert.equal(signals.every(signal => signal.aborted), true, 'a caller abort cancels upstream')
+})
+
+test('trusted synthesise() never reserves when disabled or invalid, and maps timeouts to 504', async () => {
+  let reserved = 0
+  const budget = { reserve: async () => { reserved++ } }
+  const disabled = create({ budget, config: readMinimaxConfig({ MINIMAX_TTS_ENABLED: '0' }) })
+  await assert.rejects(disabled.synthesise(payload), { code: 'TTS_NOT_CONFIGURED' })
+  const enabled = create({ budget })
+  for (const invalid of [{ text: '', delivery: 'neutral' }, { text: 'x', delivery: 'angry' }, { text: 'a'.repeat(361), delivery: 'soft' }])
+    await assert.rejects(enabled.synthesise(invalid), { code: 'TTS_INVALID_REQUEST' })
+  assert.equal(reserved, 0)
+
+  const timed = create({ timeoutMs: 10, fetchImpl: stalledFetch() })
+  const error = await timed.synthesise(payload).catch(caught => caught)
+  assert.equal(error.code, 'TTS_TIMEOUT')
+  assert.deepEqual(speechErrorResponse(error), { status: 504, code: 'TTS_TIMEOUT', message: '云端语音合成超时，请稍后再试。' })
+  const caller = new AbortController()
+  const cancelled = create({ fetchImpl: stalledFetch(() => caller.abort()) })
+  const abort = await cancelled.synthesise(payload, { signal: caller.signal }).catch(caught => caught)
+  assert.notEqual(abort.code, 'TTS_TIMEOUT', 'a caller cancellation is not reported as a provider timeout')
+})
+
+test('speechErrorResponse keeps the public status table and never exposes unknown messages', () => {
+  assert.deepEqual(speechErrorResponse(new Error('test-key-do-not-leak')),
+    { status: 502, code: 'TTS_UPSTREAM_FAILED', message: '云端语音服务请求失败。' })
+  assert.equal(speechErrorResponse(new Error('x'), { timedOut: true }).status, 504)
+  const table = { TTS_INVALID_REQUEST: 400, TTS_PROVIDER_CHANGED: 409, TTS_DAILY_LIMIT: 429,
+    TTS_BUDGET_UNAVAILABLE: 503, TTS_UPSTREAM_INVALID: 502, TTS_UPSTREAM_FAILED: 502 }
+  for (const [code, status] of Object.entries(table)) {
+    const error = Object.assign(new Error('secret'), { code })
+    assert.equal(speechErrorResponse(error).code, 'TTS_UPSTREAM_FAILED', 'a plain Error with a code is not trusted')
+    assert.equal(speechErrorResponse(new SpeechProviderError(code)).status, status, code)
+  }
 })

@@ -1,0 +1,101 @@
+/* OBS browser source: everything outside the character must be transparent.
+   No filter/blur/backdrop-filter anywhere: CEF composites them poorly. */
+html,
+body,
+#stage {
+  margin: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: transparent !important;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+#stage {
+  position: relative;
+  font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", ui-sans-serif, sans-serif;
+}
+
+#avatar {
+  position: absolute;
+  inset: 0;
+}
+
+#avatar canvas {
+  display: block;
+}
+
+#caption {
+  position: absolute;
+  left: 50%;
+  bottom: 6vh;
+  width: min(86vw, 1500px);
+  transform: translateX(-50%);
+  margin: 0;
+  color: #fff;
+  font-size: 44px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: center;
+  /* A dark outline keeps captions readable over any game or background. */
+  -webkit-text-stroke: 8px rgb(30 24 28 / 85%);
+  paint-order: stroke fill;
+  /* No line clamp: the whole line (up to 200 characters, about six lines at
+     1080p) stays visible; it is bottom-anchored and grows upward. */
+}
+
+#ai-badge {
+  position: absolute;
+  top: 24px;
+  left: 24px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  color: #fff;
+  background: rgb(30 24 28 / 62%);
+  font-size: 22px;
+  letter-spacing: 0.02em;
+}
+
+#brb {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: rgb(30 24 28 / 72%);
+  font-size: 72px;
+  font-weight: 700;
+}
+
+#brb[hidden],
+#caption[hidden] {
+  display: none;
+}
+
+/* Connection state is only shown on a preview page, never on the stream. */
+#connection {
+  display: none;
+}
+
+body[data-role="preview"] #connection {
+  display: block;
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  color: #fff;
+  background: rgb(30 24 28 / 62%);
+  font: 16px ui-monospace, monospace;
+}
+
+body[data-role="preview"] #connection::after {
+  content: "preview · " attr(data-state);
+}
+
+audio {
+  display: none;
+}

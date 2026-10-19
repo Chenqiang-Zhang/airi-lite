@@ -12,6 +12,7 @@
     "esModuleInterop": true,
     "noEmit": true,
     "strict": true,
+    "erasableSyntaxOnly": true,
     "jsx": "preserve"
   },
   "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts"]

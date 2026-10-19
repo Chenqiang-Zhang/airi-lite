@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="AIRI Lite OBS stage: transparent character, captions and voice.">
+    <title>AIRI Lite Stage</title>
+  </head>
+  <body>
+    <main id="stage">
+      <div id="avatar"></div>
+      <p id="caption" hidden></p>
+      <div id="ai-badge">AI 生成内容 · 回复可能出错</div>
+      <div id="brb" hidden>稍后回来</div>
+      <div id="connection" data-state="connecting"></div>
+      <audio id="voice" preload="auto"></audio>
+    </main>
+    <script type="module" src="/src/stage/main.ts"></script>
+  </body>
+</html>

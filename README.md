@@ -302,6 +302,18 @@ For long-context checks, open `/airi/scripts/continuity-preview.html` in a fresh
 
 For responsive layout checks, `/airi/scripts/layout-preview.html` embeds the actual demo in 390 × 844 and 390 × 520 CSS viewports and reports page, chat and composer dimensions. It does not emulate a phone, touch input or an operating-system keyboard, and is excluded from production builds. The avatar preview also provides a one-shot response and cancellation check under the real m02/m05 Idle motions.
 
+## Live stage for OBS (in development)
+
+The first step towards a streamed AI VTuber: a host console sends a line, and an OBS browser source speaks it with Hiyori, captions and lip sync. There is no LLM or danmaku in this stage yet; see the [stage-1 plan](docs/plans/2026-10-19-ai-vtuber-stage1.md).
+
+- Start with `AIRI_LIVE=1` (loopback `HOST` only; the server refuses otherwise). Stage: `/airi/stage.html?role=obs` as an OBS browser source; host console: `/airi/console.html` in a normal browser on the same machine.
+- Every `/api/live/*` request must come directly from this machine (no proxy headers, a loopback Host on the server's port, same-origin). In live mode the Host check also covers chat and speech, which share the stage's speech slots and ledger.
+- The newest OBS page holds the only speaking lease. The server plans each line's sentences itself, and the stage can buy each planned sentence once, through its own route, only while it is primary. A watchdog ends a turn the stage never reports.
+- **Panic** stops speech and shows a "back soon" screen until **Resume**.
+- Zero-cost rehearsal: `node scripts/mock-live.mjs` (port 4176) uses macOS `say` instead of cloud TTS and reads no `.env.local`.
+
+What has and has not been verified, including the OBS checks that still need a human, is in [the M1 record](docs/verification/2026-10-19-live-stage-m1.md).
+
 ## Deployment
 
 The current VPS uses the sample systemd unit in `deploy/airi-lite.service`: Node listens only on `127.0.0.1:3001`; Nginx forwards `/airi/` and disables proxy buffering for streamed replies. Keep the production `.env` outside Git and readable only by the service account. Check `GET /airi/api/health` for non-secret status, then test a chat with the access code. This route shares a domain with another app, but it runs as an independent service.

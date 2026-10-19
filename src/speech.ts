@@ -18,6 +18,15 @@ import { DEFAULT_VOICE } from './voice.ts'
 
 export type VoiceState = 'idle' | 'loading' | 'ready' | 'fallback' | 'browser' | 'cloud'
 
+// How one speak() run ended, reported once. `played` means every sentence was
+// synthesized and the last clip drained; `partial` means some audio played
+// before synthesis failed. The live stage reports this back to the server.
+export type SpeechRunOutcome = 'played' | 'partial' | 'failed' | 'cancelled' | 'empty'
+
+export interface SpeakOptions {
+  onEnded?: (outcome: SpeechRunOutcome) => void
+}
+
 // Policy deadline for an unconfirmed native start, not a browser guarantee or
 // maximum speaking duration. A real start retires it, including during pause.
 export const BROWSER_SPEECH_START_DEADLINE_MS = 15_000
@@ -102,7 +111,11 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   loadModel?: () => Promise<SpeechModel>
   synthesizeCloud?: (sentence: SpokenSentence, signal: AbortSignal) => Promise<CloudSpeechClip>
   scheduleBrowserStartDeadline?: (expired: () => void, milliseconds: number) => () => void
+  // false: a failed local/cloud run is skipped instead of retried with the
+  // system voice (OBS browser sources may have no audible speechSynthesis).
+  browserFallback?: boolean
 } = {}) {
+  const browserFallback = dependencies.browserFallback ?? true
   const scheduleBrowserStartDeadline = dependencies.scheduleBrowserStartDeadline ?? ((expired, milliseconds) => {
     const timeout = setTimeout(expired, milliseconds)
     return () => clearTimeout(timeout)
@@ -126,6 +139,16 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   const playbackClock = createPlaybackClockGuard()
   let playbackClockStalled = false
   let mouthFrameRevision = 0
+  let pendingEnd: { token: number, fire: (outcome: SpeechRunOutcome) => void } | null = null
+  // Fires at most once per speak() token. Deferred so a callback that starts
+  // another run can never reenter cancel() or advance() mid-transition.
+  const settle = (token: number, outcome: SpeechRunOutcome) => {
+    const pending = pendingEnd
+    if (!pending || pending.token !== token)
+      return
+    pendingEnd = null
+    pending.fire(outcome)
+  }
 
   audio.volume = 1
   audio.muted = false
@@ -285,6 +308,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   const onError = () => {
     if (!currentSource() || !audio.error)
       return
+    settle(run, 'failed')
     cancel()
     callbacks.onProblem('音频文件无法播放。请刷新页面重试，或更换浏览器。')
   }
@@ -387,6 +411,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     callbacks.onPreparing(false)
     if (session.token !== run || activeRun !== null || source !== objectUrl) return
     replaceAudioSource(session.pcmParts, session.sampleRate, session.timeline, session.mouthTimeline, session.beatTimeline, session.token, session.synthesisSucceeded)
+    settle(session.token, session.synthesisSucceeded ? 'played' : 'partial')
   }
 
   function wakeGeneration(session: PlaybackRun) {
@@ -475,6 +500,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   }
 
   function cancel() {
+    settle(run, 'cancelled')
     run++
     completedAudio = null
     playbackStarted = false
@@ -507,19 +533,20 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     window.speechSynthesis?.cancel()
   }
 
-  async function browserSpeech(input: AsyncIterable<SpokenSentence>, token: number, fallbackMessage?: string) {
+  // Resolves true only when every sentence confirmed start and ended.
+  async function browserSpeech(input: AsyncIterable<SpokenSentence>, token: number, fallbackMessage?: string): Promise<boolean> {
     if (token !== run)
-      return
+      return false
     callbacks.onState(fallbackMessage ? 'fallback' : 'browser')
     if (!('speechSynthesis' in window)) {
       callbacks.onPreparing(false)
       callbacks.onProblem('当前浏览器没有可用的语音播放功能。')
-      return
+      return false
     }
     callbacks.onProblem(fallbackMessage ?? '')
     for await (const sentence of input) {
       if (token !== run)
-        return
+        return false
       callbacks.onPreparing(true)
       const succeeded = await new Promise<boolean>((resolve) => {
         let completed = false
@@ -612,10 +639,11 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         catch { utterance.onerror?.(new Event('error') as SpeechSynthesisErrorEvent) }
       })
       if (token !== run || !succeeded)
-        return
+        return false
     }
     if (token === run)
       callbacks.onPreparing(false)
+    return token === run
   }
 
   async function *synthesizeCloudSentences(input: AsyncIterable<SpokenSentence>, token: number): AsyncGenerator<AudioClip> {
@@ -703,13 +731,14 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     if (first.done) {
       callbacks.onPreparing(false)
       callbacks.onProblem('这条回复没有可朗读的正文；代码或符号只在消息里展示。')
+      settle(token, 'empty')
       return
     }
     callbacks.onPreparing(true)
     callbacks.onProblem('正在生成语音…')
     const resumed = resumeSentences(first.value, sentences)
     if (engine === 'browser') {
-      await browserSpeech(resumed, token)
+      settle(token, await browserSpeech(resumed, token) ? 'played' : 'failed')
       return
     }
     if (engine === 'cloud') {
@@ -820,11 +849,22 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       : '本地声线不可用，正在尝试浏览器语音；若仍无声，请检查输出设备。'
   }
 
-  async function speak(text: string, delivery: Delivery = 'neutral', voice: VoiceId = DEFAULT_VOICE, cues: DeliveryCue[] = [], engine: SpeechEngine = 'local') {
+  function skipWithoutFallback(engine: SpeechEngine, error: unknown) {
+    console.warn('Speech synthesis failed; browser fallback is disabled', error)
+    callbacks.onPreparing(false)
+    callbacks.onProblem(engine === 'cloud' ? '云端语音失败，本句已跳过。' : '语音生成失败，本句已跳过。')
+  }
+
+  async function speak(text: string, delivery: Delivery = 'neutral', voice: VoiceId = DEFAULT_VOICE, cues: DeliveryCue[] = [], engine: SpeechEngine = 'local', options: SpeakOptions = {}) {
     cancel()
-    if (!text.trim())
-      return
     const token = run
+    const onEnded = options.onEnded
+    if (onEnded)
+      pendingEnd = { token, fire: outcome => queueMicrotask(() => onEnded(outcome)) }
+    if (!text.trim()) {
+      settle(token, 'empty')
+      return
+    }
     const input = replySentenceStream(text, delivery, cues)
     activeInput = input
     callbacks.onProblem('')
@@ -834,10 +874,15 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     catch (error) {
       if (token !== run)
         return
+      if (!browserFallback) {
+        skipWithoutFallback(engine, error)
+        settle(token, 'failed')
+        return
+      }
       console.warn('Speech synthesis failed; using browser speech', error)
       const fallbackInput = replySentenceStream(text, delivery, cues)
       activeInput = fallbackInput
-      await browserSpeech(fallbackInput, token, fallbackProblem(engine, error))
+      settle(token, await browserSpeech(fallbackInput, token, fallbackProblem(engine, error)) ? 'played' : 'failed')
     }
     finally {
       if (token === run)
@@ -869,6 +914,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         await input.finished
         if (token !== run)
           return
+        if (!browserFallback) {
+          skipWithoutFallback(engine, error)
+          return
+        }
         console.warn('Speech streaming synthesis failed; using browser speech', error)
         const fallbackInput = replySentenceStream(input.text, preferredDelivery, cues, userText)
         activeInput = fallbackInput

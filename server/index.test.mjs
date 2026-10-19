@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -506,6 +506,21 @@ test('production static serving redirects /airi, serves dist/ and falls back to 
     assert.equal((await rawGet(port, path)).body, INDEX_HTML, path)
 })
 
+test('every built page revalidates, so a rebuilt OBS stage never keeps stale asset names', async (context) => {
+  const root = await staticRoot(context)
+  await writeFile(join(root, 'dist', 'stage.html'), '<!doctype html><title>stage</title>')
+  await writeFile(join(root, 'dist', 'console.html'), '<!doctype html><title>console</title>')
+  const { port } = await start(context, { env: productionEnv, root })
+  for (const page of ['stage', 'console']) {
+    const response = await rawGet(port, `/airi/${page}.html`)
+    assert.equal(response.status, 200)
+    assert.match(response.body, new RegExp(`<title>${page}</title>`))
+    assert.equal(response.headers['content-type'], 'text/html; charset=utf-8')
+    assert.equal(response.headers['cache-control'], 'no-cache', page)
+  }
+  assert.equal((await rawGet(port, '/airi/assets/app.js')).headers['cache-control'], 'public, max-age=31536000, immutable')
+})
+
 test('production static serving keeps path traversal attempts inside dist/', async (context) => {
   const { port } = await start(context, { env: productionEnv, root: await staticRoot(context) })
   const attempts = [
@@ -589,4 +604,54 @@ test('server/index.mjs exits at startup in production without a valid access cod
   assert.equal(await exited, 1)
   assert.match(output.stderr, /Production requires AIRI_DEMO_ACCESS_CODE with at least 16 characters/)
   assert.equal(output.stdout.includes('AIRI Lite running at'), false)
+})
+
+test('server/index.mjs refuses live mode on a non-loopback HOST and serves it on loopback', { timeout: 20_000 }, async (context) => {
+  const exposed = runEntry({ PORT: String(await freePort()), AIRI_DEMO_ACCESS_CODE: ACCESS_CODE, AIRI_LIVE: '1', HOST: '0.0.0.0' })
+  assert.equal(await exposed.exited, 1)
+  assert.match(exposed.output.stderr, /AIRI_LIVE=1 requires HOST to be a loopback address/)
+  assert.equal(exposed.output.stdout.includes('AIRI Lite running at'), false)
+
+  const port = await freePort()
+  const { child, output, exited } = runEntry({ PORT: String(port), AIRI_DEMO_ACCESS_CODE: ACCESS_CODE, AIRI_LIVE: '1' })
+  context.after(() => child.kill())
+  await new Promise((resolve, reject) => {
+    child.stdout.on('data', () => output.stdout.includes('Live mode: enabled') && resolve())
+    exited.then(code => reject(new Error(`entry exited early (${code}): ${output.stderr}`)))
+  })
+  const state = await fetch(`http://127.0.0.1:${port}/airi/api/live/state`)
+  assert.equal(state.status, 200)
+  assert.equal((await state.json()).control, 'running')
+  assert.equal((await (await fetch(`http://127.0.0.1:${port}/airi/api/health`)).json()).live.enabled, true)
+  // SIGTERM closes live streams first, then exits cleanly.
+  child.kill('SIGTERM')
+  assert.equal(await exited, 0)
+})
+
+test('the deployed layout (server/, shared/, dist/ without src/) starts when live mode is off', { timeout: 20_000 }, async (context) => {
+  // The VPS release syncs only these directories; nothing on the default
+  // path may import src/*.ts, which only live mode loads.
+  const root = await mkdtemp(join(tmpdir(), 'airi-deploy-layout-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  const repository = fileURLToPath(new URL('..', import.meta.url))
+  for (const directory of ['server', 'shared'])
+    await cp(join(repository, directory), join(root, directory), { recursive: true })
+  await cp(join(repository, 'package.json'), join(root, 'package.json'))
+  await mkdir(join(root, 'dist'))
+  await writeFile(join(root, 'dist', 'index.html'), INDEX_HTML)
+  const port = await freePort()
+  const child = spawn(process.execPath, [join(root, 'server', 'index.mjs')], { stdio: ['ignore', 'pipe', 'pipe'],
+    env: { PATH: process.env.PATH, NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), AIRI_DEMO_ACCESS_CODE: ACCESS_CODE } })
+  context.after(() => child.kill())
+  const output = { stdout: '', stderr: '' }
+  child.stdout.on('data', chunk => output.stdout += chunk)
+  child.stderr.on('data', chunk => output.stderr += chunk)
+  const exited = new Promise(resolve => child.once('exit', resolve))
+  await new Promise((resolve, reject) => {
+    child.stdout.on('data', () => output.stdout.includes('local fallback enabled\n') && resolve())
+    exited.then(code => reject(new Error(`deployed entry exited (${code}): ${output.stderr}`)))
+  })
+  assert.equal((await fetch(`http://127.0.0.1:${port}/airi/`)).status, 200)
+  child.kill()
+  await exited
 })
