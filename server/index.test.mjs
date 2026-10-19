@@ -485,7 +485,7 @@ async function staticRoot(context) {
 }
 const productionEnv = { ...env, NODE_ENV: 'production' }
 
-test('production static serving redirects /airi, serves dist/ and falls back to index.html', async (context) => {
+test('production static serving redirects /airi, serves dist/, gives routes index.html and missing files 404', async (context) => {
   const { port } = await start(context, { env: productionEnv, root: await staticRoot(context) })
 
   for (const path of ['/airi', '/airi?from=bookmark']) {
@@ -505,8 +505,18 @@ test('production static serving redirects /airi, serves dist/ and falls back to 
   assert.equal(asset.headers['content-type'], 'text/javascript; charset=utf-8')
   assert.equal(asset.headers['cache-control'], 'public, max-age=31536000, immutable')
 
-  for (const path of ['/airi/chat/history', '/airi/assets', '/airi/assets/', '/airi/missing.js', '/'])
+  // Client routes and directories get the app shell.
+  for (const path of ['/airi/chat/history', '/airi/assets', '/airi/assets/', '/airi/.well-known/x', '/'])
     assert.equal((await rawGet(port, path)).body, INDEX_HTML, path)
+
+  // A missing file (a stale hashed asset, an uninstalled model, a page that
+  // was not built) is reported, not replaced by the app shell.
+  for (const path of ['/airi/missing.js', '/airi/assets/old-hash.js', '/airi/stage.html', '/airi/models/hiyori/hiyori_free_t08.model3.json']) {
+    const response = await rawGet(port, path)
+    assert.equal(response.status, 404, path)
+    assert.equal(response.headers['cache-control'], 'no-store', path)
+    assert.deepEqual(JSON.parse(response.body), { message: '文件不存在' }, path)
+  }
 })
 
 test('every built page revalidates, so a rebuilt OBS stage never keeps stale asset names', async (context) => {
@@ -544,11 +554,22 @@ test('production static serving keeps path traversal attempts inside dist/', asy
     '/airi/%00',
     '/airi/assets/..%2f..%2f..%2fsecret.txt',
   ]
+  // The URL parser resolves `..` and `%2e%2e` segments before the static
+  // handler sees the path, so these arrive as /secret.txt: a lookup inside
+  // dist/ that is reported missing. On Linux and macOS a backslash is an
+  // ordinary filename character, so `..\secret.txt` is the same case.
+  const missingInsideDist = new Set([
+    '/airi/../secret.txt', '/airi/../../secret.txt', '/airi/%2e%2e/secret.txt', '/airi/%2E%2E/%2e%2e/secret.txt', '/airi/..%5csecret.txt',
+  ])
   for (const path of attempts) {
     const response = await rawGet(port, path)
+    assert.equal(response.body.includes(SECRET), false, path)
+    if (missingInsideDist.has(path)) {
+      assert.equal(response.status, 404, path)
+      continue
+    }
     assert.equal(response.status, 200, path)
     assert.equal(response.body, INDEX_HTML, path)
-    assert.equal(response.body.includes(SECRET), false, path)
   }
 })
 
@@ -571,13 +592,16 @@ test('production static serving survives a missing dist/ build instead of crashi
   const root = await mkdtemp(join(tmpdir(), 'airi-static-test-'))
   context.after(() => rm(root, { recursive: true, force: true }))
   const { base, port } = await start(context, { env: productionEnv, root })
-  for (const path of ['/airi/', '/airi/assets/app.js', '/airi/']) {
+  for (const path of ['/airi/', '/airi/chat/history', '/airi/']) {
     const response = await rawGet(port, path)
     assert.equal(response.status, 500, path)
     assert.deepEqual(JSON.parse(response.body), { message: '本地服务发生了意外错误' })
   }
   assert.equal(logged.mock.callCount(), 3)
   assert.equal(logged.mock.calls[0].arguments[0].code, 'ENOENT')
+  // A missing asset is a plain 404 even without a build, and not logged.
+  assert.equal((await rawGet(port, '/airi/assets/app.js')).status, 404)
+  assert.equal(logged.mock.callCount(), 3)
   assert.equal((await fetch(`${base}/airi/api/health`)).status, 200)
 })
 

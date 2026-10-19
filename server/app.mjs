@@ -241,17 +241,25 @@ export function createRequestHandler({
       return sendJson(response, 400, { message: '请求路径无效' })
     }
     const requested = resolve(distDirectory, `.${decoded}`)
-    const safePath = requested.startsWith(`${distDirectory}${sep}`) ? requested : join(distDirectory, 'index.html')
+    const index = join(distDirectory, 'index.html')
+    // Anything that resolves outside dist/ (traversal) is clamped to the app
+    // shell, never reported as missing.
+    const safePath = requested.startsWith(`${distDirectory}${sep}`) ? requested : index
 
     let filePath = safePath
     try {
       const info = await stat(filePath)
       if (!info.isFile())
-        filePath = join(distDirectory, 'index.html')
+        filePath = index
     }
     catch {
-      filePath = join(distDirectory, 'index.html')
+      filePath = index
     }
+    // A missing file with an extension (a stale hashed asset, an uninstalled
+    // model, a page that was not built) is a 404: serving the app shell in its
+    // place only hides the cause. Extensionless paths are client routes.
+    if (filePath === index && safePath !== index && extname(safePath).length > 1)
+      return sendJson(response, 404, { message: '文件不存在' })
 
     // Open before writing headers: a missing build (no dist/index.html) then
     // rejects into the handler's logged 500 instead of an unhandled stream
