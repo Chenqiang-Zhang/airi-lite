@@ -56,7 +56,8 @@ async function start(context, { speech = fakeSpeech(), timers, live = true } = {
     env: {},
     fetchImpl: unexpectedFetch,
     speech,
-    live: live ? deps => createLiveRuntime({ ...deps, ...(timers ? { timers } : {}), newId: () => `id-${++ids}` }) : null,
+    // root: null keeps ledgers and the audit log out of the repository's .data.
+    live: live ? deps => createLiveRuntime({ ...deps, root: null, ...(timers ? { timers } : {}), newId: () => `id-${++ids}` }) : null,
   })
   const server = createServer(handler)
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -195,11 +196,11 @@ test('say is refused until an OBS stage is ready, then reaches every stage page'
 
   const obs = await openStage(context, base, 'obs')
   const hello = await obs.next('hello')
-  assert.deepEqual(hello, { leaseId: 'id-1', role: 'obs', primary: true, mode: 'live' })
+  assert.deepEqual(hello, { leaseId: 'id-1', role: 'obs', primary: true, mode: 'live', activity: 'idle' })
   assert.equal((await control(base, { action: 'say', text: '你好。' })).status, 409, 'connected is not ready')
 
   const preview = await openStage(context, base, 'preview')
-  assert.deepEqual(await preview.next('hello'), { leaseId: null, role: 'preview', primary: false, mode: 'live' })
+  assert.deepEqual(await preview.next('hello'), { leaseId: null, role: 'preview', primary: false, mode: 'live', activity: 'idle' })
   assert.equal((await post(base, '/api/live/stage/report', { leaseId: null, type: 'ready' })).status, 403,
     'a preview cannot report')
   assert.equal((await post(base, '/api/live/stage/report', { leaseId: hello.leaseId, type: 'ready' })).status, 204)
@@ -376,7 +377,7 @@ test('console input is validated before any turn starts', async (context) => {
     [{ action: 'say', text: '' }, 'LIVE_INVALID_TEXT'],
     [{ action: 'say', text: '长'.repeat(201) }, 'LIVE_INVALID_TEXT'],
     [{ action: 'say', text: '[[tone:bright]]你好' }, 'LIVE_INVALID_TEXT'],
-    [{ action: 'say', text: '‮\u0007' }, 'LIVE_INVALID_TEXT'],
+    [{ action: 'say', text: '\u202e\u0007' }, 'LIVE_INVALID_TEXT'],
     [{ action: 'say', text: '你好', delivery: 'angry' }, 'LIVE_INVALID_DELIVERY'],
     [{ action: 'say', text: '……' }, 'LIVE_EMPTY'],
     [{ action: 'dance' }, 'LIVE_INVALID_ACTION'],
@@ -388,7 +389,7 @@ test('console input is validated before any turn starts', async (context) => {
   }
   assert.equal((await state(base)).turn, null)
 
-  const cleaned = await control(base, { action: 'say', text: ' 你\u0000好‮。 ' })
+  const cleaned = await control(base, { action: 'say', text: ' 你\u0000好\u202e。 ' })
   assert.equal(cleaned.status, 200)
   assert.equal((await state(base)).turn.text, '你好。', 'control and bidi characters never reach captions or TTS')
 

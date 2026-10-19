@@ -10,7 +10,7 @@ const CLIP = { samples: new Float32Array([0.1, -0.1]), sampleRate: 32000, words:
 function fixture({ role = 'obs', postStatus = () => 200 } = {}) {
   const posts = []
   const spoken = []
-  const view = { captions: [], brb: [], connection: [], reloads: 0 }
+  const view = { captions: [], brb: [], connection: [], reloads: 0, thinking: [] }
   const timers = new Map()
   let nextTimer = 0
   const sources = []
@@ -39,6 +39,7 @@ function fixture({ role = 'obs', postStatus = () => 200 } = {}) {
       setBrb: on => view.brb.push(on),
       reload: () => view.reloads++,
       setConnection: state => view.connection.push(state),
+      setThinking: on => view.thinking.push(on),
     },
     timers: {
       setTimeout(callback, ms) { timers.set(++nextTimer, { callback, ms }); return nextTimer },
@@ -191,4 +192,29 @@ test('a lost stream drops the lease immediately and reconnects with backoff for 
   assert.ok([...f.timers.values()].some(timer => timer.ms === 1_000), 'a successful hello resets the backoff')
   f.client.stop()
   assert.equal(f.timers.size, 0)
+})
+
+test('the brain\'s thinking cue shows until a line arrives or the stage goes brb', () => {
+  const f = fixture()
+  f.client.start()
+  f.emit('hello', { leaseId: 'lease-1', primary: true, mode: 'live' })
+  f.emit('activity', { state: 'thinking' })
+  f.emit('activity', { state: 'idle' })
+  f.emit('activity', { state: 'thinking' })
+  f.emit('say', { turnId: 't1', text: '想好了。', delivery: 'neutral', cues: [] })
+  f.emit('activity', { state: 'thinking' })
+  f.emit('mode', { mode: 'brb' })
+  assert.deepEqual(f.view.thinking, [false, true, false, true, false, true, false])
+})
+
+test('a lost event stream drops the thinking pose; the next hello restores the server\'s activity', () => {
+  const f = fixture()
+  f.client.start()
+  f.emit('hello', { leaseId: 'lease-1', primary: true, mode: 'live', activity: 'idle' })
+  f.emit('activity', { state: 'thinking' })
+  f.disconnect()
+  f.fire(1_000)
+  f.emit('hello', { leaseId: 'lease-2', primary: true, mode: 'live', activity: 'thinking' })
+  assert.deepEqual(f.view.thinking, [false, true, false, true])
+  f.client.stop()
 })

@@ -1,46 +1,211 @@
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
 
+import { openDeepSeekStream } from '../deepseek.mjs'
 import { SpeechProviderError } from '../speech-error.mjs'
 import { speechErrorResponse } from '../speech.mjs'
+import { createTtsBudget, TtsBudgetError } from '../tts-budget.mjs'
+import { createAuditLog } from './audit-log.mjs'
+import { createLiveBrain } from './brain.mjs'
+import { createHub } from './hub.mjs'
 import { checkLocalRequest, LiveRequestError, readSmallJson } from './local-request.mjs'
+import { loadRules, parseRules } from './moderation.mjs'
+import { createCandidateQueue } from './queue.mjs'
 import { createSseChannel } from './sse.mjs'
 import { createStageBus, STAGE_ROLES } from './stage-bus.mjs'
-import { createSentenceAllowance, planUtterance } from './utterance.mjs'
+import { HOST_CONTROL } from './text.mjs'
+import { createSentenceAllowance, planUtterance, screenUtterance } from './utterance.mjs'
 
 const DELIVERIES = new Set(['neutral', 'soft', 'bright', 'curious'])
 const OUTCOMES = new Set(['played', 'partial', 'failed', 'cancelled', 'empty'])
 const AVATAR_STATES = new Set(['loading', 'ready', 'failed'])
+const INPUT_KINDS = { 'input.danmaku': 'danmaku', 'input.superchat': 'superchat', 'input.host': 'host' }
 const MAX_SAY_CHARS = 200
 const MAX_PROBLEM_CHARS = 120
-// C0/C1 controls and bidi overrides/isolates: never forwarded to captions/TTS.
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/g
 
-// M1 of the live plan: the host's console says a line, the OBS stage speaks it.
-// Later milestones replace only who decides what to say (the brain).
+// A process-local daily counter for tests and runs without a data directory.
+export function createMemoryReplyBudget({ dailyLimit, now = Date.now }) {
+  let day = ''
+  let used = 0
+  return {
+    async reserve(count, signal) {
+      if (signal?.aborted)
+        throw new TtsBudgetError('TTS_CANCELLED')
+      const today = new Date(now()).toISOString().slice(0, 10)
+      if (today !== day) { day = today; used = 0 }
+      if (used + count > dailyLimit)
+        throw new TtsBudgetError('TTS_DAILY_LIMIT')
+      used += count
+      return { day, reserved: used }
+    },
+    async peek() {
+      const today = new Date(now()).toISOString().slice(0, 10)
+      return { day: today, reserved: today === day ? used : 0 }
+    },
+  }
+}
+
+function boundedInteger(value, fallback, minimum, maximum) {
+  const number = typeof value === 'string' && value.trim() ? Number(value) : Number.NaN
+  return Number.isInteger(number) ? Math.min(maximum, Math.max(minimum, number)) : fallback
+}
+
+// The live subsystem: stage bus and turns (M1), plus the brain that answers
+// approved viewer messages (M2). Sources publish `input.*` events into the
+// hub; the host approves candidates in the console; the brain asks DeepSeek,
+// screens the whole reply and starts a turn the stage then speaks.
 export function createLiveRuntime({
   speech,
+  env = {},
+  config = {},
+  root = null, // repository root: enables .data ledgers, blocklist and audit log
+  fetchImpl = fetch,
   now = Date.now,
   timers = { setTimeout, clearTimeout, setInterval, clearInterval },
   newId = randomUUID,
   heartbeatMs = 15_000,
+  // Own id spaces: event and item ids never shift lease or turn ids.
+  hub = createHub({ now }),
+  replyBudget = null,
+  audit = null,
+  rules = null,
+  moderationProvider = null,
+  sources = [],
 } = {}) {
   if (!speech?.synthesise)
     throw new TypeError('createLiveRuntime requires a speech handler with synthesise()')
 
   let control = 'running' // running | paused | panic
+  let pauseReason = null
   let mode = 'live' // live | brb
   let turn = null
   let lastOutcome = null
   let lastProblem = null
+  let lastHostBlock = null
   let stopped = false
+  let activeRules = rules ?? parseRules('')
+  let rulesProblem = null
 
   const sse = createSseChannel({ heartbeatMs, timers })
-  const bus = createStageBus({ sse, newId, now, getMode: () => mode })
+  let activity = 'idle'
+  const bus = createStageBus({ sse, newId, now, getMode: () => mode, getActivity: () => activity })
+  const queue = createCandidateQueue({ now, newId: randomUUID })
+  const dataDirectory = root ? join(root, '.data') : null
+  const auditLog = audit ?? (dataDirectory ? createAuditLog({ directory: join(dataDirectory, 'live-logs'), now }) : null)
+  const detachAudit = auditLog?.attach(hub)
+  const dailyReplies = boundedInteger(env.LIVE_DAILY_REPLY_LIMIT, 250, 1, 5_000)
+  const budget = replyBudget ?? (dataDirectory
+    // The TTS ledger counts "characters"; here each unit is one model reply.
+    ? createTtsBudget({ path: join(dataDirectory, 'live-reply-budget.json'), dailyLimit: dailyReplies, now })
+    : createMemoryReplyBudget({ dailyLimit: dailyReplies, now }))
+
+  // Caption text and the spoken sentences, for brain replies and host lines.
+  const screen = utterance => screenUtterance(utterance, { rules: activeRules, provider: moderationProvider })
+  // The durable daily count, shown in the console. Refreshed after every
+  // reservation and on start; display only, never used to decide spending.
+  let ledger = null
+  const refreshLedger = async () => {
+    try { ledger = await budget.peek?.() ?? ledger }
+    catch { ledger = null }
+  }
+  const countedBudget = {
+    async reserve(count, signal) {
+      try {
+        const result = await budget.reserve(count, signal)
+        if (result && typeof result.reserved === 'number')
+          ledger = result
+        return result
+      }
+      catch (error) {
+        if (error instanceof TtsBudgetError && error.code === 'TTS_DAILY_LIMIT')
+          await refreshLedger()
+        throw error
+      }
+    },
+  }
+  const rulesReady = Promise.all([
+    rules || !dataDirectory
+      ? null
+      : loadRules(join(dataDirectory, 'moderation', 'blocklist.txt')).then(({ rules: loaded, problem }) => {
+          activeRules = loaded
+          rulesProblem = problem
+        }),
+    refreshLedger(),
+  ])
+  const apiKey = env.DEEPSEEK_API_KEY?.trim() ?? ''
+  const brain = createLiveBrain({
+    hub,
+    queue,
+    turns: {
+      canSpeak,
+      say: startTurn,
+      activity(state) {
+        activity = state
+        bus.publish('activity', { state })
+      },
+    },
+    control: { pause },
+    deepseek: {
+      configured: Boolean(apiKey),
+      open: (messages, signal) => openDeepSeekStream({
+        apiKey,
+        baseUrl: config.baseUrl ?? 'https://api.deepseek.com',
+        model: config.model ?? 'deepseek-flash',
+        messages,
+        maxTokens: boundedInteger(env.LIVE_MAX_TOKENS, 160, 32, 400),
+        temperature: 0.8,
+        signal,
+        fetchImpl,
+      }),
+    },
+    screen,
+    replyBudget: countedBudget,
+    now,
+    timers,
+  })
+
   // A new primary never inherits an old page's half-spoken turn.
   bus.onPrimaryChange(() => {
     if (turn)
       endTurn(turn.turnId, 'cancelled', { notifyStage: true })
+    brain.schedule()
   })
+
+  const detachInputs = hub.subscribe('input', (event) => {
+    const kind = INPUT_KINDS[event.type]
+    if (kind)
+      queue.add({ ...event.data, kind })
+  })
+  const startedSources = sources.map(createSource => createSource({
+    publish: (event, name = 'source') => hub.publish(`input.${event.type}`, event, { source: name }),
+  }))
+  for (const source of startedSources)
+    source.start?.()
+
+  function setControl(next, reason = null) {
+    control = next
+    pauseReason = next === 'running' ? null : reason
+    hub.publish('control.changed', { control, reason: pauseReason, mode })
+  }
+
+  function pause(reason) {
+    brain.abortGeneration()
+    if (control === 'running')
+      setControl('paused', reason)
+  }
+
+  function canSpeak() {
+    if (stopped || control !== 'running')
+      return { ok: false, reason: 'paused' }
+    if (!bus.hasReadyPrimary())
+      return { ok: false, reason: 'no-stage' }
+    if (turn)
+      return { ok: false, reason: 'turn-active' }
+    // OBS reports when the source is not on the programme output.
+    if (bus.summary().primary?.obs?.active === false)
+      return { ok: false, reason: 'obs-inactive' }
+    return { ok: true }
+  }
 
   function endTurn(turnId, outcome, { notifyStage = false } = {}) {
     if (!turn || turn.turnId !== turnId)
@@ -53,27 +218,34 @@ export function createLiveRuntime({
     lastOutcome = { turnId, outcome, at: now(), sentencesBought: ended.bought, sentencesPlanned: ended.planned }
     if (notifyStage)
       bus.publish('stop', { turnId })
+    hub.publish('turn.ended', {
+      turnId, outcome, origin: ended.origin, replyTo: ended.replyTo,
+      planned: ended.planned, bought: ended.bought, spoken: [...ended.spoken],
+    })
     return true
   }
 
-  async function startTurn({ text, delivery }) {
+  // Starts a turn for already-screened text. Returns {ok, turnId} or a
+  // stable refusal code; callers decide how to surface it.
+  async function startTurn({ text, delivery = 'neutral', cues = [], replyTo = null, origin = 'host' }) {
+    const refuse = (status, code) => ({ ok: false, status, code })
     if (control !== 'running')
-      return { status: 409, body: { code: 'LIVE_PAUSED' } }
+      return refuse(409, 'LIVE_PAUSED')
     if (!bus.hasReadyPrimary())
-      return { status: 409, body: { code: 'LIVE_NO_STAGE' } }
+      return refuse(409, 'LIVE_NO_STAGE')
     if (turn)
-      return { status: 409, body: { code: 'LIVE_TURN_ACTIVE' } }
-    const sentences = await planUtterance({ text, delivery })
+      return refuse(409, 'LIVE_TURN_ACTIVE')
+    const sentences = await planUtterance({ text, delivery, cues })
     if (!sentences.length)
-      return { status: 400, body: { code: 'LIVE_EMPTY' } }
+      return refuse(400, 'LIVE_EMPTY')
     // Re-check after the await: a concurrent say may have started a turn,
     // the stage may have gone, or the host may have paused meanwhile.
     if (stopped || control !== 'running')
-      return { status: 409, body: { code: 'LIVE_PAUSED' } }
+      return refuse(409, 'LIVE_PAUSED')
     if (!bus.hasReadyPrimary())
-      return { status: 409, body: { code: 'LIVE_NO_STAGE' } }
+      return refuse(409, 'LIVE_NO_STAGE')
     if (turn)
-      return { status: 409, body: { code: 'LIVE_TURN_ACTIVE' } }
+      return refuse(409, 'LIVE_TURN_ACTIVE')
 
     const turnId = newId()
     const watchdogMs = Math.min(90_000, 15_000 + 350 * text.length)
@@ -81,54 +253,99 @@ export function createLiveRuntime({
       turnId,
       text,
       delivery,
+      origin,
+      replyTo,
       startedAt: now(),
       allowance: createSentenceAllowance(sentences),
       planned: sentences.length,
       bought: 0,
+      spoken: [],
       watchdog: timers.setTimeout(() => endTurn(turnId, 'timeout', { notifyStage: true }), watchdogMs),
     }
     turn.watchdog.unref?.()
-    bus.publish('say', { turnId, text, delivery, cues: [], replyTo: null })
+    activity = 'idle'
+    hub.publish('turn.started', { turnId, text, delivery, cues, origin, replyTo, sentences: sentences.length })
+    bus.publish('say', { turnId, text, delivery, cues, replyTo })
     // Publishing can drop a stalled primary, which cancels this very turn
     // (its lease handover runs one microtask later). Never report success
     // for it, and leave every page's last word "stop".
     await null
     if (turn?.turnId !== turnId) {
       bus.publish('stop', { turnId })
-      return { status: 409, body: { code: 'LIVE_NO_STAGE' } }
+      return refuse(409, 'LIVE_NO_STAGE')
     }
-    return { status: 200, body: { turnId, sentences: sentences.length } }
+    return { ok: true, turnId, sentences: sentences.length }
+  }
+
+  function hostText(value) {
+    const text = typeof value === 'string' ? value.replace(HOST_CONTROL, '').trim() : ''
+    return text && text.length <= MAX_SAY_CHARS && text.isWellFormed() && !text.includes('[[') && !text.includes(']]')
+      ? text : null
   }
 
   async function handleControl(request, response) {
     const body = await readSmallJson(request)
     switch (body.action) {
       case 'say': {
-        const text = typeof body.text === 'string' ? body.text.replace(CONTROL_CHARACTERS, '').trim() : ''
-        if (!text || text.length > MAX_SAY_CHARS || !text.isWellFormed() || text.includes('[[') || text.includes(']]'))
+        const text = hostText(body.text)
+        if (!text)
           return sendJson(response, 400, { code: 'LIVE_INVALID_TEXT' })
         const delivery = body.delivery ?? 'neutral'
         if (!DELIVERIES.has(delivery))
           return sendJson(response, 400, { code: 'LIVE_INVALID_DELIVERY' })
-        const result = await startTurn({ text, delivery })
-        return sendJson(response, result.status, result.body)
+        // The host's own words pass the same output gate (without a strike).
+        const verdict = await screen({ text, delivery })
+        if (!verdict.ok && verdict.reason === 'empty')
+          return sendJson(response, 400, { code: 'LIVE_EMPTY' })
+        if (!verdict.ok) {
+          lastHostBlock = { reason: verdict.reason, term: verdict.term ?? null, at: now() }
+          hub.publish('control.say-blocked', { text, ...lastHostBlock })
+          return sendJson(response, 400, { code: 'LIVE_BLOCKED', reason: verdict.reason })
+        }
+        const result = await startTurn({ text, delivery, origin: 'host' })
+        return result.ok
+          ? sendJson(response, 200, { turnId: result.turnId, sentences: result.sentences })
+          : sendJson(response, result.status, { code: result.code })
+      }
+      case 'inject': {
+        const text = hostText(body.text)
+        if (!text)
+          return sendJson(response, 400, { code: 'LIVE_INVALID_TEXT' })
+        const event = hub.publish('input.host', { type: 'host', msgId: null, user: null, text }, { source: 'console' })
+        return sendJson(response, 200, { eventId: event.id })
+      }
+      case 'approve':
+      case 'reject': {
+        const done = typeof body.itemId === 'string'
+          && (body.action === 'approve' ? queue.approve(body.itemId) : queue.reject(body.itemId))
+        if (!done)
+          return sendJson(response, 404, { code: 'LIVE_ITEM_NOT_FOUND' })
+        hub.publish(`queue.${body.action}d`, { itemId: body.itemId })
+        return sendJson(response, 200, state())
       }
       case 'stop':
+        brain.abortGeneration()
         if (turn)
           endTurn(turn.turnId, 'stopped', { notifyStage: true })
         return sendJson(response, 200, state())
       case 'pause':
-        if (control === 'running')
-          control = 'paused'
+        pause('host')
         return sendJson(response, 200, state())
       case 'resume':
-        control = 'running'
+        setControl('running')
         setMode('live')
+        brain.resetStrikes()
+        brain.schedule()
         return sendJson(response, 200, state())
       case 'panic':
+        // Everything stops and nothing from before resumes: the interrupted
+        // reply leaves the context and waiting candidates are dropped.
+        brain.abortGeneration()
         if (turn)
           endTurn(turn.turnId, 'stopped', { notifyStage: true })
-        control = 'panic'
+        brain.forgetContext()
+        queue.clearOpen('panic')
+        setControl('panic', 'panic')
         setMode('brb')
         return sendJson(response, 200, state())
       case 'reload-stage':
@@ -153,6 +370,7 @@ export function createLiveRuntime({
     switch (body.type) {
       case 'ready':
         bus.updatePrimaryStatus(body.leaseId, { ready: true })
+        brain.schedule()
         break
       case 'avatar':
         if (!AVATAR_STATES.has(body.status))
@@ -168,11 +386,12 @@ export function createLiveRuntime({
         break
       case 'problem': {
         const message = typeof body.message === 'string'
-          ? body.message.replace(CONTROL_CHARACTERS, '').trim().slice(0, MAX_PROBLEM_CHARS) : ''
+          ? body.message.replace(HOST_CONTROL, '').trim().slice(0, MAX_PROBLEM_CHARS) : ''
         if (!message)
           return sendJson(response, 400, { code: 'LIVE_INVALID_REPORT' })
         bus.updatePrimaryStatus(body.leaseId, {})
         lastProblem = { message, at: now() }
+        hub.publish('stage.problem', { message })
         break
       }
       case 'obs': {
@@ -180,6 +399,7 @@ export function createLiveRuntime({
         bus.updatePrimaryStatus(body.leaseId, {
           obs: { active: flag(body.active), visible: flag(body.visible), streaming: flag(body.streaming) },
         })
+        brain.schedule()
         break
       }
       default:
@@ -200,13 +420,16 @@ export function createLiveRuntime({
     if (typeof body.text !== 'string' || !DELIVERIES.has(body.delivery)
       || !turn.allowance.take({ text: body.text, delivery: body.delivery }))
       return sendJson(response, 409, { code: 'LIVE_SENTENCE_NOT_ALLOWED' })
-    turn.bought++
+    const owner = turn
+    owner.bought++
 
     const cancelled = new AbortController()
     const abort = () => cancelled.abort()
     response.once('close', abort)
     try {
       const result = await speech.synthesise({ text: body.text, delivery: body.delivery }, { signal: cancelled.signal })
+      // Only audio that was actually produced enters the brain's history.
+      owner.spoken.push(body.text)
       if (!response.destroyed && !response.writableEnded)
         sendJson(response, 200, result)
     }
@@ -227,14 +450,28 @@ export function createLiveRuntime({
   function state() {
     return {
       control,
+      pauseReason,
       mode,
       stage: bus.summary(),
       turn: turn ? {
-        turnId: turn.turnId, text: turn.text, delivery: turn.delivery,
+        turnId: turn.turnId, text: turn.text, delivery: turn.delivery, origin: turn.origin,
         startedAgoMs: now() - turn.startedAt, sentencesPlanned: turn.planned, sentencesBought: turn.bought,
       } : null,
       lastOutcome,
       lastProblem,
+      lastHostBlock,
+      queue: queue.snapshot(),
+      brain: {
+        ...brain.state(),
+        dailyReplyLimit: dailyReplies,
+        // null: the ledger could not be read (shown as unknown).
+        dailyRepliesReserved: ledger && ledger.day === new Date(now()).toISOString().slice(0, 10) ? ledger.reserved : ledger ? 0 : null,
+      },
+      moderation: {
+        rulesProblem,
+        ignoredTerms: activeRules.ignored ?? [],
+        provider: Boolean(moderationProvider),
+      },
       speech: speech.health(),
     }
   }
@@ -285,6 +522,9 @@ export function createLiveRuntime({
 
   return {
     handle,
+    hub,
+    // Resolves once the host's blocklist has been read (tests and startup).
+    ready: rulesReady,
     // Non-secret status for /api/health.
     health() {
       const summary = bus.summary()
@@ -302,9 +542,15 @@ export function createLiveRuntime({
       if (stopped)
         return
       stopped = true
+      for (const source of startedSources)
+        source.stop?.()
+      brain.stop()
       if (turn)
         endTurn(turn.turnId, 'stopped', { notifyStage: true })
+      detachInputs()
       bus.closeAll()
+      await auditLog?.flush()
+      detachAudit?.()
     },
   }
 }

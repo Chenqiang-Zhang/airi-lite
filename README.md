@@ -304,15 +304,16 @@ For responsive layout checks, `/airi/scripts/layout-preview.html` embeds the act
 
 ## Live stage for OBS (in development)
 
-The first step towards a streamed AI VTuber: a host console sends a line, and an OBS browser source speaks it with Hiyori, captions and lip sync. There is no LLM or danmaku in this stage yet; see the [stage-1 plan](docs/plans/2026-10-19-ai-vtuber-stage1.md).
+The first steps towards a streamed AI VTuber: a host console sends a line, or approves a viewer message for the brain to answer, and an OBS browser source speaks it with Hiyori, captions and lip sync. Real Bilibili danmaku is not wired in yet; see the [stage-1 plan](docs/plans/2026-10-19-ai-vtuber-stage1.md).
 
 - Start with `AIRI_LIVE=1` (loopback `HOST` only; the server refuses otherwise). Stage: `/airi/stage.html?role=obs` as an OBS browser source; host console: `/airi/console.html` in a normal browser on the same machine.
 - Every `/api/live/*` request must come directly from this machine (no proxy headers, a loopback Host on the server's port, same-origin). In live mode the Host check also covers chat and speech, which share the stage's speech slots and ledger.
 - The newest OBS page holds the only speaking lease. The server plans each line's sentences itself, and the stage can buy each planned sentence once, through its own route, only while it is primary. A watchdog ends a turn the stage never reports.
 - **Panic** stops speech and shows a "back soon" screen until **Resume**.
-- Zero-cost rehearsal: `node scripts/mock-live.mjs` (port 4176) uses macOS `say` instead of cloud TTS and reads no `.env.local`.
+- **Brain (M2):** viewer messages wait in the console until the host approves them. The brain then asks DeepSeek for a short reply, screens the whole reply (links, contact details, gift solicitation, leaked markup, the host's `.data/moderation/blocklist.txt`), and only then lets the stage speak it. Three blocked replies in 10 minutes, a daily reply limit (`LIVE_DAILY_REPLY_LIMIT`, default 250) or repeated upstream errors pause the stream. Every event is logged to `.data/live-logs/` (owner-only, kept 183 days). The live persona drops the chat card's age setting and answers honestly that it is an AI character.
+- Zero-cost rehearsal: `node scripts/mock-live.mjs` (port 4176) uses macOS `say` instead of cloud TTS and a canned fake instead of DeepSeek, and reads no `.env.local`. Add `--replay --speed=10` for a synthetic 30-minute danmaku stream, and `--adversarial` to watch the gate stop bad replies.
 
-What has and has not been verified, including the OBS checks that still need a human, is in [the M1 record](docs/verification/2026-10-19-live-stage-m1.md).
+What has and has not been verified, including the OBS checks that still need a human, is in the [M1](docs/verification/2026-10-19-live-stage-m1.md) and [M2](docs/verification/2026-10-19-live-brain-m2.md) records.
 
 ## Deployment
 

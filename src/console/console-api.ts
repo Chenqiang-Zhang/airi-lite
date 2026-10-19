@@ -2,8 +2,23 @@ import type { Delivery } from '../delivery'
 
 export type LiveControl = 'running' | 'paused' | 'panic'
 
+export type QueueStatus = 'pending' | 'approved' | 'answering' | 'answered' | 'blocked' | 'rejected' | 'expired' | 'failed' | 'dropped'
+
+export interface QueueItem {
+  id: string
+  kind: 'danmaku' | 'superchat' | 'host'
+  user: null | { openId: string, name: string, guardLevel: number, medalLevel: number, isAdmin: boolean }
+  text: string
+  amountCny: number
+  receivedAt: number
+  expiresAt: number
+  status: QueueStatus
+  detail?: string
+}
+
 export interface LiveState {
   control: LiveControl
+  pauseReason: string | null
   mode: 'live' | 'brb'
   stage: {
     primary: null | {
@@ -20,12 +35,28 @@ export interface LiveState {
     turnId: string
     text: string
     delivery: Delivery
+    origin: 'host' | 'brain'
     startedAgoMs: number
     sentencesPlanned: number
     sentencesBought: number
   }
   lastOutcome: null | { turnId: string, outcome: string, at: number, sentencesBought: number, sentencesPlanned: number }
   lastProblem: null | { message: string, at: number }
+  lastHostBlock: null | { reason: string, term: string | null, at: number }
+  queue: { open: QueueItem[], recent: QueueItem[] }
+  brain: {
+    configured: boolean
+    phase: 'idle' | 'generating' | 'speaking' | 'cooldown'
+    strikes: number
+    strikeLimit: number
+    historyRounds: number
+    usage: { calls: number, failedCalls: number, promptTokens: number, completionTokens: number, cacheHitTokens: number }
+    lastBlock: null | { reason: string, category: string | null, term: string | null, at: number }
+    lastError: null | { message: string, at: number }
+    dailyReplyLimit: number
+    dailyRepliesReserved: number | null
+  }
+  moderation: { rulesProblem: string | null, ignoredTerms: string[], provider: boolean }
   speech: { configured: boolean, provider: string, model: string, region?: string }
 }
 
@@ -51,6 +82,8 @@ export async function fetchLiveState(signal?: AbortSignal): Promise<LiveState> {
 
 export type LiveAction =
   | { action: 'say', text: string, delivery: Delivery }
+  | { action: 'inject', text: string }
+  | { action: 'approve' | 'reject', itemId: string }
   | { action: 'stop' | 'pause' | 'resume' | 'panic' | 'reload-stage' }
 
 export async function sendLiveControl(command: LiveAction): Promise<unknown> {
@@ -75,6 +108,8 @@ const MESSAGES: Record<string, string> = {
   LIVE_NO_STAGE: '没有已就绪的 OBS 舞台：确认 OBS 浏览器源已打开 stage.html?role=obs。',
   LIVE_TURN_ACTIVE: '上一句还没说完，先等它结束或点「停下」。',
   LIVE_INVALID_TEXT: '文字需为 1–200 字，不能包含 [[ 或 ]]。',
+  LIVE_BLOCKED: '这句话没有通过输出审核（链接、联系方式、索要礼物或屏蔽词），没有说出。',
+  LIVE_ITEM_NOT_FOUND: '这条消息已经处理、过期或被挤出队列。',
   LIVE_INVALID_DELIVERY: '语气无效。',
   LIVE_EMPTY: '这句话没有可朗读的正文。',
   LIVE_NOT_LOCAL: '只能在推流这台电脑本机访问控制台。',

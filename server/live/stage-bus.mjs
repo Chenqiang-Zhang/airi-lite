@@ -3,14 +3,16 @@
 // captions. Only the primary may buy speech or report playback.
 export const STAGE_ROLES = new Set(['obs', 'preview'])
 
-export function createStageBus({ sse, newId, now = Date.now, getMode = () => 'live' }) {
+export function createStageBus({ sse, newId, now = Date.now, getMode = () => 'live', getActivity = () => 'idle' }) {
   const stages = new Set()
   const listeners = new Set()
   let primary = null
 
   function hello(stage) {
+    // The current activity too: a page that reconnects while the brain is
+    // composing shows the thinking pose without waiting for the next cue.
     stage.client.send('hello', {
-      leaseId: stage.leaseId, role: stage.role, primary: stage === primary, mode: getMode(),
+      leaseId: stage.leaseId, role: stage.role, primary: stage === primary, mode: getMode(), activity: getActivity(),
     })
   }
 

@@ -1,6 +1,14 @@
-// Zero-cost live rehearsal: the real request handler and live runtime, with
-// macOS `say` standing in for cloud TTS. Loopback only; reads no .env.local,
-// calls no DeepSeek/MiniMax/Bilibili, and prints only character counts.
+// Zero-cost live rehearsal: the real request handler, live runtime and brain,
+// with macOS `say` standing in for cloud TTS and canned replies standing in
+// for DeepSeek. Loopback only; reads no .env.local, calls no DeepSeek,
+// MiniMax or Bilibili, and prints only character counts.
+//
+//   node scripts/mock-live.mjs [--replay] [--speed=N] [--adversarial]
+//
+// --replay plays server/live/fixtures/rehearsal.jsonl (30 synthetic minutes;
+// --speed=10 makes it 3) into the approval queue. --adversarial makes every
+// other fake reply something the output gate must stop. Ledgers and the audit
+// log live in a temporary directory that is deleted on exit.
 //
 // MOCK ONLY: the returned clip is a WAV labelled `format: 'mp3'` on purpose.
 // There is no MP3 encoder on this machine, and the real MiniMax path validates
@@ -17,7 +25,9 @@ import { promisify } from 'node:util'
 import { createServer as createViteServer } from 'vite'
 
 import { createRequestHandler, readServerConfig } from '../server/app.mjs'
+import { createFakeDeepSeek } from '../server/live/fake-deepseek.mjs'
 import { createLiveRuntime } from '../server/live/runtime.mjs'
+import { createFixtureSource, loadFixture } from '../server/live/sources/fixture.mjs'
 import { SpeechProviderError } from '../server/speech-error.mjs'
 
 const run = promisify(execFile)
@@ -25,6 +35,11 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 const port = Number(process.env.MOCK_LIVE_PORT ?? 4176)
 const SAMPLE_RATE = 32_000
 const workDirectory = await mkdtemp(join(tmpdir(), 'airi-mock-live-'))
+const replay = process.argv.includes('--replay')
+const adversarial = process.argv.includes('--adversarial')
+const speedArgument = process.argv.find(argument => argument.startsWith('--speed='))
+const speed = speedArgument ? Math.min(100, Math.max(0.1, Number(speedArgument.slice('--speed='.length)) || 1)) : 1
+const fakeDeepSeek = createFakeDeepSeek({ adversarial, delayMs: 600 })
 let clips = 0
 
 async function chooseVoice() {
@@ -106,17 +121,30 @@ const speech = {
 }
 
 const vite = await createViteServer({ root, envDir: false, appType: 'spa', server: { middlewareMode: true } })
+const fixture = replay ? await loadFixture(fileURLToPath(new URL('../server/live/fixtures/rehearsal.jsonl', import.meta.url))) : null
 const handler = createRequestHandler({
+  // The visitor chat stays unconfigured (local fallback), as before.
   env: {},
   config: readServerConfig({ PORT: String(port) }),
+  root: workDirectory,
   vite,
-  fetchImpl: async () => { throw new Error('mock-live never calls DeepSeek') },
+  fetchImpl: async () => { throw new Error('mock-live chat never calls DeepSeek') },
   speech,
-  live: ({ speech }) => createLiveRuntime({ speech }),
+  // The placeholder key and the canned fake go only to the live brain; no
+  // "DeepSeek" request ever leaves this process.
+  live: deps => createLiveRuntime({
+    ...deps,
+    env: { DEEPSEEK_API_KEY: 'mock-only' },
+    fetchImpl: fakeDeepSeek.fetch,
+    sources: fixture ? [({ publish }) => createFixtureSource({ entries: fixture, speed, onEvent: event => publish(event, 'fixture') })] : [],
+  }),
 })
 const server = createServer(handler)
 server.listen(port, '127.0.0.1', () => {
-  console.log(`MOCK LIVE ONLY (voice: ${voice ?? 'tone fallback'}; no provider charges)`)
+  console.log(`MOCK LIVE ONLY (voice: ${voice ?? 'tone fallback'}; fake DeepSeek${adversarial ? ', adversarial' : ''}; no provider charges)`)
+  if (fixture)
+    console.log(`  replaying ${fixture.length} synthetic events at ${speed}x; approve them in the console`)
+  console.log(`  ledgers and audit log (deleted on exit): ${workDirectory}/.data`)
   console.log(`  stage:   http://127.0.0.1:${port}/airi/stage.html?role=obs`)
   console.log(`  preview: http://127.0.0.1:${port}/airi/stage.html?role=preview`)
   console.log(`  console: http://127.0.0.1:${port}/airi/console.html`)

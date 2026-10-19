@@ -7,7 +7,7 @@ import { pipeline } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 
 import { buildSystemPrompt, normaliseChatRequest } from './persona.mjs'
-import { createDeliveryCueParser } from './delivery-cue.mjs'
+import { DeepSeekRequestError, openDeepSeekStream } from './deepseek.mjs'
 import { checkLocalHost } from './live/local-request.mjs'
 import { readSpeechConfig } from './speech-provider.mjs'
 import { createSpeechHandler } from './speech.mjs'
@@ -39,8 +39,9 @@ export function createRequestHandler({
   // Optional: an existing speech handler ({health, handle, synthesise}) so the
   // public route and the live stage share one concurrency cap and ledger.
   speech: providedSpeech = null,
-  // Optional live-stream subsystem factory: ({speech, config, env}) =>
-  // {handle(request, response, pathname): Promise<boolean>, health(), stop()}.
+  // Optional live-stream subsystem factory: ({speech, config, env, root,
+  // fetchImpl}) => {handle(request, response, pathname): Promise<boolean>,
+  // health(), stop()}.
   live: createLive = null,
 } = {}) {
   const { production, model, baseUrl, accessCode } = config
@@ -56,7 +57,7 @@ export function createRequestHandler({
   if (production && accessCode.length < 16)
     throw new Error('Production requires AIRI_DEMO_ACCESS_CODE with at least 16 characters')
 
-  const live = createLive ? createLive({ speech, config, env }) : null
+  const live = createLive ? createLive({ speech, config, env, root, fetchImpl }) : null
 
   async function handleRequest(request, response) {
     try {
@@ -183,42 +184,27 @@ export function createRequestHandler({
     const abortController = new AbortController()
     response.on('close', () => abortController.abort())
 
-    const upstream = await fetchImpl(new URL('chat/completions', ensureTrailingSlash(baseUrl)), {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
+    let stream
+    try {
+      stream = await openDeepSeekStream({
+        apiKey,
+        baseUrl,
         model,
         messages: [
           { role: 'system', content: buildSystemPrompt(chatRequest.persona, chatRequest.userMemory) },
           ...chatRequest.messages,
         ],
-        stream: true,
-        stream_options: { include_usage: true },
-        thinking: { type: 'disabled' },
-        max_tokens: safeNumber(env.DEEPSEEK_MAX_TOKENS, 320, 32, 4_096),
+        maxTokens: safeNumber(env.DEEPSEEK_MAX_TOKENS, 320, 32, 4_096),
         temperature: safeNumber(env.DEEPSEEK_TEMPERATURE, 0.8, 0, 2),
-      }),
-      signal: AbortSignal.any([
-        abortController.signal,
-        AbortSignal.timeout(90_000),
-      ]),
-    })
-
-    if (!upstream.ok) {
-      const detail = await upstream.json().catch(() => null)
-      const providerMessage = detail?.error?.message
-      return sendJson(response, 502, {
-        message: providerMessage
-          ? `DeepSeek：${String(providerMessage).slice(0, 240)}`
-          : `DeepSeek 请求失败（HTTP ${upstream.status}）`,
+        signal: abortController.signal,
+        fetchImpl,
       })
     }
-
-    if (!upstream.body)
-      return sendJson(response, 502, { message: 'DeepSeek 没有返回响应内容' })
+    catch (error) {
+      if (error instanceof DeepSeekRequestError)
+        return sendJson(response, error.status, { message: error.message })
+      throw error
+    }
 
     response.writeHead(200, {
       'Content-Type': 'application/x-ndjson; charset=utf-8',
@@ -227,7 +213,7 @@ export function createRequestHandler({
     })
 
     try {
-      const { truncated } = await relayDeepSeekStream(upstream.body, response)
+      const { truncated } = await stream.relay(event => writeEvent(response, event))
       writeEvent(response, truncated ? { type: 'done', truncated: true } : { type: 'done' })
     }
     catch (error) {
@@ -294,49 +280,6 @@ function clientIp(request) {
   return remote
 }
 
-async function relayDeepSeekStream(body, response) {
-  const reader = body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let truncated = false
-  const deliveryCue = createDeliveryCueParser()
-
-  const consumeLine = (line) => {
-    if (!line.startsWith('data:'))
-      return
-
-    const data = line.slice(5).trim()
-    if (!data || data === '[DONE]')
-      return
-
-    const chunk = JSON.parse(data)
-    // max_tokens stops the reply mid-thought; tell the browser it was cut off.
-    if (chunk.choices?.[0]?.finish_reason === 'length')
-      truncated = true
-    const content = chunk.choices?.[0]?.delta?.content
-    if (typeof content === 'string' && content) {
-      for (const event of deliveryCue.push(content))
-        writeEvent(response, event)
-    }
-  }
-
-  while (true) {
-    const { done, value } = await reader.read()
-    buffer += decoder.decode(value, { stream: !done })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const line of lines)
-      consumeLine(line.trimEnd())
-    if (done)
-      break
-  }
-
-  consumeLine(buffer.trimEnd())
-  for (const event of deliveryCue.finish())
-    writeEvent(response, event)
-  return { truncated }
-}
-
 async function readJson(request) {
   const chunks = []
   let size = 0
@@ -359,10 +302,6 @@ function sendJson(response, status, payload) {
 
 function writeEvent(response, event) {
   response.write(`${JSON.stringify(event)}\n`)
-}
-
-function ensureTrailingSlash(value) {
-  return value.endsWith('/') ? value : `${value}/`
 }
 
 function safeNumber(value, fallback, minimum, maximum) {

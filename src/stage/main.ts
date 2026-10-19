@@ -27,12 +27,13 @@ let live2d: Avatar | null = null
 let latestMouth: { opening: number | null, form: number, beat: number | null } = { opening: 0, form: 0, beat: null }
 let speaking = false
 let preparing = false
+let composing = false
 let spokenDelivery: Delivery = 'neutral'
 const avatarContext = createAvatarContext({ onChange: delivery => live2d?.setDelivery(delivery) })
 
 function syncAvatar() {
-  live2d?.setActivity(speaking ? 'speaking' : preparing ? 'thinking' : 'idle')
-  avatarContext.sync({ speaking, waiting: preparing, spokenDelivery })
+  live2d?.setActivity(speaking ? 'speaking' : preparing || composing ? 'thinking' : 'idle')
+  avatarContext.sync({ speaking, waiting: preparing || composing, spokenDelivery })
   live2d?.setDelivery(avatarContext.current)
 }
 
@@ -98,6 +99,10 @@ client = createStageClient({
     },
     setBrb(on) { brbElement.hidden = !on },
     reload() { location.reload() },
+    setThinking(on) {
+      composing = on
+      syncAvatar()
+    },
     setConnection(state) {
       document.body.dataset.connection = state
       connectionElement.dataset.state = state

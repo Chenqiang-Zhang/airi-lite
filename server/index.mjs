@@ -25,7 +25,7 @@ const createLiveRuntime = liveEnabled
 const handler = createRequestHandler({
   config,
   vite,
-  live: createLiveRuntime ? ({ speech }) => createLiveRuntime({ speech }) : null,
+  live: createLiveRuntime ? deps => createLiveRuntime(deps) : null,
 })
 const server = createServer(handler)
 

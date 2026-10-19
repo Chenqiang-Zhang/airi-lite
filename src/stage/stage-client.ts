@@ -15,7 +15,7 @@ export type StageConnection = 'connecting' | 'live' | 'standby' | 'preview' | 'o
 export type AvatarStatus = 'loading' | 'ready' | 'failed'
 export interface ObsStatus { active: boolean | null, visible: boolean | null, streaming: boolean | null }
 
-export const STAGE_EVENT_TYPES = ['hello', 'standby', 'say', 'stop', 'mode', 'reload'] as const
+export const STAGE_EVENT_TYPES = ['hello', 'standby', 'say', 'stop', 'mode', 'reload', 'activity'] as const
 const RECONNECT_SECONDS = [1, 2, 4, 8, 16, 30]
 const CAPTION_LINGER_MS = 1_200
 // Progress chatter from the controller, not something the host must see.
@@ -32,6 +32,8 @@ export interface StageView {
   setBrb: (on: boolean) => void
   reload: () => void
   setConnection: (state: StageConnection) => void
+  // The brain is composing a reply: a thinking pose until speech takes over.
+  setThinking?: (on: boolean) => void
 }
 
 export interface StageClientOptions {
@@ -121,6 +123,7 @@ export function createStageClient(options: StageClientOptions) {
     leaseId = typeof data.leaseId === 'string' ? data.leaseId : null
     primary = data.primary === true && leaseId !== null
     options.view.setBrb(data.mode === 'brb')
+    options.view.setThinking?.(data.activity === 'thinking' && data.mode !== 'brb')
     options.view.setConnection(options.role === 'preview' ? 'preview' : primary ? 'live' : 'standby')
     if (primary) {
       report({ type: 'ready' })
@@ -136,6 +139,7 @@ export function createStageClient(options: StageClientOptions) {
     const cues = Array.isArray(data.cues) ? data.cues as DeliveryCue[] : []
     clearCaptionTimer()
     captionTurn = turnId
+    options.view.setThinking?.(false)
     options.view.showCaption(text)
     if (!primary) {
       // Previews never hear an ended report; fade their caption on a budget.
@@ -184,11 +188,15 @@ export function createStageClient(options: StageClientOptions) {
         if (data.mode === 'brb') {
           silence()
           clearCaption()
+          options.view.setThinking?.(false)
         }
         options.view.setBrb(data.mode === 'brb')
         break
       case 'reload':
         options.view.reload()
+        break
+      case 'activity':
+        options.view.setThinking?.(data.state === 'thinking')
         break
     }
   }
@@ -208,6 +216,9 @@ export function createStageClient(options: StageClientOptions) {
     primary = false
     silence()
     clearCaption()
+    // Never keep a pose from a lost stream; the next hello carries the
+    // server's current activity.
+    options.view.setThinking?.(false)
     options.view.setConnection('offline')
     if (stopped || reconnectTimer !== null)
       return
@@ -252,6 +263,7 @@ export function createStageClient(options: StageClientOptions) {
       source = null
       silence()
       clearCaption()
+      options.view.setThinking?.(false)
     },
     synthesizeCloud,
     reportProblem(message: string) {

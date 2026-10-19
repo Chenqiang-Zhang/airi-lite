@@ -83,3 +83,18 @@ test('cancel before reservation does not write, cancellation after reservation n
   await budget.reserve(8)
   await assert.rejects(createTtsBudget({ path, dailyLimit: 10, now: day }).reserve(4), { code: 'TTS_DAILY_LIMIT' })
 })
+
+test('reserve reports the day total and peek reads it without reserving', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'airi-ledger-peek-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const path = join(directory, 'ledger.json')
+  let time = Date.parse('2026-10-19T10:00:00Z')
+  const budget = createTtsBudget({ path, dailyLimit: 10, now: () => time })
+  assert.deepEqual(await budget.peek(), { day: '2026-10-19', reserved: 0 }, 'no file yet')
+  assert.deepEqual(await budget.reserve(3), { day: '2026-10-19', reserved: 3 })
+  assert.deepEqual(await budget.reserve(2), { day: '2026-10-19', reserved: 5 })
+  assert.deepEqual(await budget.peek(), { day: '2026-10-19', reserved: 5 })
+  assert.deepEqual(await budget.peek(), { day: '2026-10-19', reserved: 5 }, 'peeking never reserves')
+  time = Date.parse('2026-10-20T00:00:01Z')
+  assert.deepEqual(await budget.peek(), { day: '2026-10-20', reserved: 0 }, 'a new UTC day starts at zero')
+})

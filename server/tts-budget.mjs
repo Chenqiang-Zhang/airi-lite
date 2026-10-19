@@ -87,6 +87,7 @@ export function createTtsBudget({ path, dailyLimit, now = Date.now }) {
           }
           // No refund after this point, even if aborted before/during fetch: the
           // upstream might have already charged and retries must be conservative.
+          return { day: today, reserved: ledger.reservedCharacters }
         }
         catch (error) {
           if (error instanceof TtsBudgetError)
@@ -113,6 +114,28 @@ export function createTtsBudget({ path, dailyLimit, now = Date.now }) {
           queues.delete(file)
       }).catch(() => {})
       return current
+    },
+    // Today's reserved total for display only: no lock, a bounded read, and
+    // null when the ledger cannot be read. Never used to decide spending.
+    async peek() {
+      const today = new Date(now()).toISOString().slice(0, 10)
+      try {
+        const handle = await open(file, 'r')
+        try {
+          if ((await handle.stat()).size > MAX_FILE_BYTES)
+            return null
+          const ledger = JSON.parse(await handle.readFile('utf8'))
+          if (!Number.isSafeInteger(ledger?.reservedCharacters) || typeof ledger.day !== 'string')
+            return null
+          return { day: today, reserved: ledger.day === today ? ledger.reservedCharacters : 0 }
+        }
+        finally {
+          await handle.close()
+        }
+      }
+      catch (error) {
+        return error?.code === 'ENOENT' ? { day: today, reserved: 0 } : null
+      }
     },
   }
 }
