@@ -213,7 +213,7 @@ const fakeSpeech = (health = CLOUD_SPEECH) => ({
   async synthesise() { return CLIP },
 })
 
-async function start(context, { env = { DEEPSEEK_API_KEY: 'test-only' }, speech = fakeSpeech(), blocklist = '坏词\n', locks = [], probe = refuseProbe } = {}) {
+async function start(context, { env = { DEEPSEEK_API_KEY: 'test-only' }, speech = fakeSpeech(), blocklist = '坏词\n', locks = [], probe = refuseProbe, startPaused = false } = {}) {
   const root = await temporaryDirectory(context)
   if (blocklist !== null) {
     await mkdir(join(root, '.data', 'moderation'), { recursive: true })
@@ -232,7 +232,7 @@ async function start(context, { env = { DEEPSEEK_API_KEY: 'test-only' }, speech 
     fetchImpl: async () => { throw new Error('preflight tests must not call DeepSeek') },
     speech,
     live: (deps) => {
-      runtime = createLiveRuntime({ ...deps, env, probeFetch: probe, newId: () => `id-${++ids}` })
+      runtime = createLiveRuntime({ ...deps, env, probeFetch: probe, startPaused, newId: () => `id-${++ids}` })
       return runtime
     },
   })
@@ -362,6 +362,21 @@ test('a passing checklist resumes without a skip, and an inactive OBS source blo
   assert.equal((await resumed.json()).control, 'running')
   assert.deepEqual(events.at(-1).data.skipped, false)
   assert.deepEqual(events.at(-1).data.failed, [])
+})
+
+test('after a paused start, the first go-live is a resume through the checklist', async (context) => {
+  const { base, events } = await start(context, { startPaused: true })
+  const stage = await readyStage(context, base, { obs: { active: false, visible: true, streaming: false } })
+  const blocked = await control(base, { action: 'resume' })
+  assert.equal(blocked.status, 409)
+  assert.deepEqual(failed((await blocked.json()).preflight), ['obs'])
+  await stage.report({ type: 'obs', active: true, visible: true, streaming: false })
+  const live = await control(base, { action: 'resume' })
+  assert.equal(live.status, 200)
+  const state = await live.json()
+  assert.deepEqual([state.control, state.pauseReason, state.mode], ['running', null, 'live'])
+  assert.deepEqual(events.map(event => [event.data.trigger, event.data.ok, event.data.skipped]),
+    [['resume', false, false], ['resume', true, false]])
 })
 
 test('a pause or panic pressed while the checklist runs wins over the resume', async (context) => {

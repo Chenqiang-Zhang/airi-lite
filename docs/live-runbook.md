@@ -56,7 +56,10 @@ npm run live
 ```
 AIRI Lite running at http://127.0.0.1:5173/airi/
 Live mode: enabled (stage /airi/stage.html, console /airi/console.html)
+Live control: paused until 继续 in the console passes the go-live checklist
 ```
+
+服务启动后是「已暂停」（控制台显示「刚启动，还没开播」），她不会开口，也不会调用 DeepSeek，直到你在控制台点「继续」。
 
 - 已经构建过、只想快速重启（比如处理完残留锁）：`npm run live -- --skip-build`。直播期间不要改代码。
 - 停止：在这个终端按一次 Ctrl+C，等它自己退出（最多 3 秒）。不要连按两次，也不要直接关窗口：服务需要这点时间写完账本、释放锁，否则下次会出现残留锁。
@@ -119,10 +122,10 @@ OBS 会自动播放声音，不需要点页面。用普通浏览器打开舞台�
 
 ## 开播流程
 
-1. 启动 `npm run live`，等它打印 `Live mode: enabled`。
+1. 启动 `npm run live`，等它打印 `Live mode: enabled`。服务启动后是「已暂停」。
 2. 打开 OBS（舞台源会自动连上），再在浏览器打开控制台。
 3. 在控制台的「开播预检」里点「重新检查」，所有项都应该是 ✓（见下表）。
-4. 先「暂停」，再「继续」：「继续」会再跑一次预检，全部通过才会继续。服务刚启动时是「运行中」，这一步就是让预检把关。
+4. 点「继续」：它会再跑一次预检，全部通过才会开始。没通过时控制台列出原因，她保持暂停。
 5. 在 OBS（或直播姬）开始推流。控制台的「OBS」一栏应显示「推流中」。
 6. 用「让她照读」说开场白；之后用「对她说」转述观众的话，或在「待回答」里逐条「通过」。
 
@@ -195,7 +198,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5173/airi/api/live/control 
 node scripts/mock-live.mjs --replay --speed=10
 ```
 
-真实的服务、大脑和审核，但 DeepSeek 换成固定的假回复，语音换成假 TTS：Mac 上用系统的 `say`，Windows/Linux 上（或加 `--tone`）用一段随句长变化的正弦波提示音，口型照样会动。不读 `.env.local`，不产生任何费用。端口是 4176：舞台 `http://127.0.0.1:4176/airi/stage.html?role=obs`，控制台 `http://127.0.0.1:4176/airi/console.html`。彩排自带一个示例屏蔽词，预检可以全部通过。加 `--adversarial` 可以看到审核拦下不良回复。
+真实的服务、大脑和审核，但 DeepSeek 换成固定的假回复，语音换成假 TTS：Mac 上用系统的 `say`，Windows/Linux 上（或加 `--tone`）用一段随句长变化的正弦波提示音，口型照样会动。不读 `.env.local`，不产生任何费用。端口是 4176：舞台 `http://127.0.0.1:4176/airi/stage.html?role=obs`，控制台 `http://127.0.0.1:4176/airi/console.html`。彩排自带一个示例屏蔽词，预检可以全部通过。彩排和正式开播一样从「已暂停」开始，点「继续」才会开口。加 `--adversarial` 可以看到审核拦下不良回复。
 
 彩排的声音不代表真实语音链路。首播前还要用真实配置合成并试听一次（第一次付费调用前先确认额度）。
 

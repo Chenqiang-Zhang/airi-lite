@@ -53,6 +53,8 @@ const handler = createRequestHandler({
   // "DeepSeek" request ever leaves this process.
   live: deps => createLiveRuntime({
     ...deps,
+    // Like `npm run live`: the rehearsal goes live through the checklist.
+    startPaused: true,
     env: { DEEPSEEK_API_KEY: 'mock-only' },
     fetchImpl: fakeDeepSeek.fetch,
     sources: fixture ? [({ publish }) => createFixtureSource({ entries: fixture, speed, onEvent: event => publish(event, 'fixture') })] : [],
@@ -67,6 +69,7 @@ server.listen(port, '127.0.0.1', () => {
   console.log(`  stage:   http://127.0.0.1:${port}/airi/stage.html?role=obs`)
   console.log(`  preview: http://127.0.0.1:${port}/airi/stage.html?role=preview`)
   console.log(`  console: http://127.0.0.1:${port}/airi/console.html`)
+  console.log('  starts paused: press 继续 in the console (it runs the go-live checklist)')
 })
 
 async function stop() {

@@ -22,7 +22,7 @@ const STATUS_LABELS: Record<string, string> = {
   rejected: '已拒绝', expired: '已过期', failed: '未完成', dropped: '队列满被挤出',
 }
 const PAUSE_LABELS: Record<string, string> = {
-  host: '主播暂停', panic: '紧急停止', strikes: '连续被审核拦下，自动暂停',
+  startup: '刚启动，还没开播：开播预检通过后点「继续」', host: '主播暂停', panic: '紧急停止', strikes: '连续被审核拦下，自动暂停',
   'reply-budget': '今日回复额度用完，自动暂停', 'reply-budget-unavailable': '回复额度记录不可用，自动暂停',
   'upstream-errors': 'DeepSeek 连续出错，自动暂停',
 }

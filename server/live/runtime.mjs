@@ -75,12 +75,15 @@ export function createLiveRuntime({
   // The go-live checklist's local TTS reachability probe (never DeepSeek).
   probeFetch = fetch,
   preflightFs = undefined,
+  // Boot paused ('startup'), so the first go-live is a `resume` and passes
+  // the checklist like any other (live mode and mock-live set this).
+  startPaused = false,
 } = {}) {
   if (!speech?.synthesise)
     throw new TypeError('createLiveRuntime requires a speech handler with synthesise()')
 
-  let control = 'running' // running | paused | panic
-  let pauseReason = null
+  let control = startPaused ? 'paused' : 'running' // running | paused | panic
+  let pauseReason = startPaused ? 'startup' : null
   let mode = 'live' // live | brb
   let turn = null
   let lastOutcome = null

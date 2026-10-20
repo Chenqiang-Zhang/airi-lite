@@ -14,7 +14,7 @@ import { planUtterance } from './utterance.mjs'
 // injected as fetch: nothing here can reach DeepSeek or a speech provider.
 const CLIP = { audio: 'AAAA', format: 'mp3', sampleRate: 32_000, words: [] }
 
-async function start(context, { model = createFakeDeepSeek(), env = { DEEPSEEK_API_KEY: 'test-only' } } = {}) {
+async function start(context, { model = createFakeDeepSeek(), env = { DEEPSEEK_API_KEY: 'test-only' }, startPaused = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'airi-brain-http-'))
   const synthesised = []
   const speech = {
@@ -23,7 +23,7 @@ async function start(context, { model = createFakeDeepSeek(), env = { DEEPSEEK_A
     async synthesise(request) { synthesised.push(request.text); return CLIP },
   }
   let runtime
-  const handler = createRequestHandler({ env, root, fetchImpl: model.fetch, speech, live: deps => (runtime = createLiveRuntime(deps)) })
+  const handler = createRequestHandler({ env, root, fetchImpl: model.fetch, speech, live: deps => (runtime = createLiveRuntime({ ...deps, startPaused })) })
   const server = createServer(handler)
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   // Stop first (it flushes the audit log), then delete the data directory.
@@ -173,6 +173,34 @@ test('without a DeepSeek key the brain stays idle and approved items simply wait
   assert.equal(current.brain.configured, false)
   assert.equal(model.calls, 0)
   assert.equal(current.queue.open[0].status, 'approved')
+})
+
+test('a runtime that starts paused asks DeepSeek nothing until the first resume', async (context) => {
+  const { base, model, runtime } = await start(context, { startPaused: true })
+  const { said } = await playingStage(context, base)
+  await control(base, { action: 'inject', text: '开播前打个招呼' })
+  runtime.hub.publish('input.danmaku', { type: 'danmaku', msgId: 'early', user: { name: '甲' }, text: '在吗' }, { source: 'test' })
+  const pending = await until(async () => (await state(base)).queue.open.find(item => item.status === 'pending'), 'pending item')
+  await control(base, { action: 'approve', itemId: pending.id })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  const waiting = await state(base)
+  assert.equal(waiting.control, 'paused')
+  assert.equal(waiting.pauseReason, 'startup')
+  assert.equal(waiting.brain.phase, 'idle')
+  assert.deepEqual(waiting.queue.open.map(item => item.status), ['approved', 'approved'])
+  assert.equal(model.calls, 0)
+  assert.equal(said.length, 0)
+
+  // The test data directory has no blocklist, so this resume must skip.
+  assert.equal((await control(base, { action: 'resume' })).status, 409)
+  assert.equal(model.calls, 0, 'a refused resume starts nothing')
+  assert.equal((await control(base, { action: 'resume', skipPreflight: true })).status, 200)
+  await until(() => said.length === 1, 'first reply after resume')
+  // Both items waited through the pause and are answered together.
+  assert.equal(model.requests[0].messages.at(-1).content, [
+    '<viewer_message from="主播" kind="host">开播前打个招呼</viewer_message>',
+    '<viewer_message from="甲" kind="danmaku">在吗</viewer_message>',
+  ].join('\n'))
 })
 
 test('a data directory gets the reply ledger and an owner-only audit log', async (context) => {
