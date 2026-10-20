@@ -168,7 +168,7 @@ test('a 30-minute adversarial rehearsal never puts unscreened text on stage', { 
   const lines = (await Promise.all(logs.map(name => readFile(join(root, '.data', 'live-logs', name), 'utf8'))))
     .join('').trim().split('\n').map(line => JSON.parse(line))
   const types = new Set(lines.map(line => line.type))
-  for (const type of ['input.danmaku', 'input.superchat', 'input.gift', 'brain.reply', 'brain.blocked', 'brain.usage', 'turn.started', 'turn.ended', 'control.changed'])
+  for (const type of ['input.danmaku', 'input.superchat', 'input.gift', 'brain.reply', 'brain.blocked', 'brain.usage', 'brain.style', 'turn.started', 'turn.ended', 'control.changed'])
     assert.ok(types.has(type), type)
   // Cost is reconstructible from the log alone: one usage record per model
   // call, whatever happened to the reply, summing to the brain's own count.

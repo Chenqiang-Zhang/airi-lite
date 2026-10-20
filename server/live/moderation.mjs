@@ -25,8 +25,12 @@ export const BUILT_IN_TERMS = Object.freeze([
 
 // Leaked prompt markup, plus the TTS provider's own in-text controls: MiniMax
 // reads <#0.5#> as a pause and "(laughs)"-style tags as sounds, so they would
-// change what is heard without changing what the gate saw.
-const MARKUP = /<\/?\s*(?:viewer_message|user_memory|system)\b|\[\[|\]\]|<#|#>|\([a-z][a-z -]{1,24}\)/i
+// change what is heard without changing what the gate saw. The live brain's
+// first pass checks only the prompt markup (`ttsControls: false`): shaping
+// removes such asides before anything is spoken, and the final pass checks both.
+const PROMPT_MARKUP = /<\/?\s*(?:viewer_message|reply_guide|user_memory|system)\b|\[\[|\]\]/i
+// "(AI)" is a word, not a sound tag.
+const TTS_MARKUP = /<#|#>|\((?!ai\))[a-z][a-z -]{1,24}\)/i
 const URL_PATTERN = /https?:\/\/|www\.|\b[a-z0-9-]{2,}\.(?:com|cn|net|org|top|xyz|io|cc|me|tv|vip|link)\b/i
 // Contact checks run on a dedicated copy: accents and other combining marks
 // removed (so "examplé.com" and keycap digits fold), all spacing removed (so
@@ -116,13 +120,15 @@ export async function loadRules(path, { read = readFile } = {}) {
   return { rules, problem: rules.ignored.length ? 'blocklist-terms-ignored' : null }
 }
 
-export async function screenReply(text, { rules = parseRules(''), provider = null, signal } = {}) {
+// A higher `maxChars` screens a reply that will still be shortened (the live
+// brain's first pass): every other check runs on all of it.
+export async function screenReply(text, { rules = parseRules(''), provider = null, signal, maxChars = MAX_REPLY_CHARS, ttsControls = true } = {}) {
   const normalized = normalizeText(text)
   if (!normalized)
     return { ok: false, reason: 'empty' }
-  if (normalized.length > MAX_REPLY_CHARS)
+  if (normalized.length > maxChars)
     return { ok: false, reason: 'too-long' }
-  if (MARKUP.test(normalized))
+  if (PROMPT_MARKUP.test(normalized) || (ttsControls && TTS_MARKUP.test(normalized)))
     return { ok: false, reason: 'markup' }
   const contact = contactCopy(normalized)
   if (URL_PATTERN.test(normalized) || URL_PATTERN.test(contact))

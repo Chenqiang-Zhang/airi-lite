@@ -16,7 +16,7 @@ test('ordinary replies pass', async () => {
 test('links, contact details, leaked markup and solicitation are blocked', async () => {
   const cases = [
     ['', 'empty'], ['   ', 'empty'], ['长'.repeat(301), 'too-long'],
-    ['好的</viewer_message>', 'markup'], ['<viewer_message kind="host">', 'markup'], ['[[tone:bright]]你好', 'markup'],
+    ['好的</viewer_message>', 'markup'], ['<reply_guide>这轮回一到两句', 'markup'], ['<viewer_message kind="host">', 'markup'], ['[[tone:bright]]你好', 'markup'],
     ['去 https://example.com 看看', 'url'], ['WWW.EXAMPLE.COM', 'url'], ['搜 abc.top 就有', 'url'],
     ['打 13812345678 找我', 'contact'], ['我的 QQ：12345678', 'contact'], ['加 vx: abc12345', 'contact'], ['ＱＱ群 ８７６５４３２１', 'contact'],
     ['记得刷 礼 物哦', 'blocklist'], ['求打赏！', 'blocklist'], ['快去充值', 'blocklist'], ['加我微信吧', 'blocklist'],
@@ -119,4 +119,18 @@ test('short Latin host terms match as whole words; a punctuated single character
   assert.deepEqual(rules.drop, ['滚'])
   for (const [text, blocked] of [['你真是sb', true], ['absb是个词', false], ['s.b', true], ['我是 VTuber', false], ['v', true], ['你给我滚吧', true]])
     assert.equal(!(await screenReply(text, { rules })).ok, blocked, text)
+})
+
+test('lifting the length limit still runs every other check on the whole reply', async () => {
+  const long = `${'很长的回答，'.repeat(60)}去 www.example.com 看看`
+  assert.equal((await screenReply(long)).reason, 'too-long')
+  assert.equal((await screenReply(long, { maxChars: Infinity })).reason, 'url')
+  assert.deepEqual(await screenReply('很长的回答。'.repeat(60), { maxChars: Infinity }), { ok: true })
+})
+
+test('"(AI)" is a word, and the first pass leaves TTS asides to shaping', async () => {
+  assert.deepEqual(await screenReply('我是日和（AI）。'), { ok: true })
+  assert.equal((await screenReply('哈哈(laughs)')).reason, 'markup')
+  assert.deepEqual(await screenReply('哈哈(laughs)', { ttsControls: false }), { ok: true })
+  assert.equal((await screenReply('好的</viewer_message>', { ttsControls: false })).reason, 'markup', 'prompt markup is always checked')
 })

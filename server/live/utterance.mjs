@@ -43,7 +43,15 @@ export function createSentenceAllowance(sentences) {
 // speaks the planned sentences, which drop Markdown link targets, images and
 // some symbols; a term split by such markup ("[刷](a)礼物") reappears only in
 // speech, so the caption text alone is not enough.
-export async function screenUtterance({ text, delivery = 'neutral', cues = [] }, options = {}) {
+// `firstPass` (on the utterance, so an injected screen passes it through)
+// screens a reply the live brain will still shorten: up to three times the
+// spoken limit, prompt markup but not TTS asides (shaping removes those),
+// and local rules only, so a paid provider runs once, on what is spoken.
+export const FIRST_PASS_MAX_CHARS = 900
+
+export async function screenUtterance({ text, delivery = 'neutral', cues = [], firstPass = false }, options = {}) {
+  if (firstPass)
+    options = { ...options, maxChars: FIRST_PASS_MAX_CHARS, ttsControls: false, provider: null }
   const shown = await screenReply(text, options)
   if (!shown.ok)
     return { ...shown, part: 'caption' }
