@@ -60,14 +60,33 @@ export interface LiveState {
   speech: { configured: boolean, provider: string, model: string, region?: string }
 }
 
+export type PreflightCheckId = 'profile' | 'deepseek' | 'tts' | 'local-tts' | 'ledger' | 'moderation' | 'stage' | 'avatar' | 'obs'
+
+export interface PreflightCheck {
+  id: PreflightCheckId
+  ok: boolean
+  detail: string
+  fix: string | null
+}
+
+export interface PreflightResult {
+  profile: 'cloud' | 'local-voice'
+  ok: boolean
+  at: number
+  checks: PreflightCheck[]
+}
+
 export class LiveApiError extends Error {
   readonly code: string
   readonly status: number
+  // The checklist that refused a resume (LIVE_PREFLIGHT_FAILED).
+  readonly preflight: PreflightResult | null
 
-  constructor(status: number, code: string) {
+  constructor(status: number, code: string, preflight: PreflightResult | null = null) {
     super(code)
     this.status = status
     this.code = code
+    this.preflight = preflight
   }
 }
 
@@ -80,11 +99,21 @@ export async function fetchLiveState(signal?: AbortSignal): Promise<LiveState> {
   return response.json() as Promise<LiveState>
 }
 
+// Read-only: runs the go-live checklist without changing anything.
+export async function fetchPreflight(signal?: AbortSignal): Promise<PreflightResult> {
+  const response = await fetch(`${base}api/live/preflight`, { cache: 'no-store', signal })
+  if (!response.ok)
+    throw new LiveApiError(response.status, (await response.json().catch(() => null))?.code ?? 'LIVE_UNAVAILABLE')
+  return response.json() as Promise<PreflightResult>
+}
+
 export type LiveAction =
   | { action: 'say', text: string, delivery: Delivery }
   | { action: 'inject', text: string }
   | { action: 'approve' | 'reject', itemId: string }
-  | { action: 'stop' | 'pause' | 'resume' | 'panic' | 'reload-stage' }
+  // skipPreflight: the host resumes although the checklist failed.
+  | { action: 'resume', skipPreflight?: true }
+  | { action: 'stop' | 'pause' | 'panic' | 'reload-stage' }
 
 export async function sendLiveControl(command: LiveAction): Promise<unknown> {
   const response = await fetch(`${base}api/live/control`, {
@@ -98,7 +127,7 @@ export async function sendLiveControl(command: LiveAction): Promise<unknown> {
   })
   const body = await response.json().catch(() => null)
   if (!response.ok)
-    throw new LiveApiError(response.status, body?.code ?? 'LIVE_UNAVAILABLE')
+    throw new LiveApiError(response.status, body?.code ?? 'LIVE_UNAVAILABLE', body?.preflight ?? null)
   return body
 }
 
@@ -114,7 +143,9 @@ const MESSAGES: Record<string, string> = {
   LIVE_EMPTY: '这句话没有可朗读的正文。',
   LIVE_NOT_LOCAL: '只能在推流这台电脑本机访问控制台。',
   LIVE_BAD_HOST: '请用 127.0.0.1 或 localhost 打开控制台。',
-  LIVE_UNAVAILABLE: '直播服务没有响应：确认以 AIRI_LIVE=1 启动。',
+  LIVE_UNAVAILABLE: '直播服务没有响应：确认已用 npm run live（彩排用 mock-live）启动。',
+  LIVE_PREFLIGHT_FAILED: '开播预检没有全部通过，没有继续：按「开播预检」里的提示处理，或确认后点「跳过预检，仍然继续」。',
+  LIVE_CONTROL_CHANGED: '预检期间又按了暂停或紧急停止，没有继续。',
 }
 
 export function describeLiveError(error: unknown): string {

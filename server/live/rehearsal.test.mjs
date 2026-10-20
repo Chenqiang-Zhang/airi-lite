@@ -129,7 +129,7 @@ test('a 30-minute adversarial rehearsal never puts unscreened text on stage', { 
       approvals++
     }
     if (current.control === 'paused')
-      await control({ action: 'resume' })
+      await control({ action: 'resume', skipPreflight: true })
     await settle()
     if (!clock.step(end)) break
   }

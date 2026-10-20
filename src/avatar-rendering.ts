@@ -12,9 +12,17 @@ function positiveFinite(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
 }
 
+// The OBS stage renders at a fixed rate matching the broadcast (1080p30);
+// `?fps=60` opts into 60 for a 60 fps canvas. Anything else is 30.
+export function resolveStageFrameRate(value: string | null | undefined): 30 | 60 {
+  return value?.trim() === '60' ? 60 : 30
+}
+
 // Device hints are an opt-in saving heuristic, not a GPU benchmark. Missing
-// WebGPU says nothing about the WebGL renderer used by Live2D.
-export function resolveAvatarRenderBudget(hints: DeviceHints = {}, dpr = 1, profile: AvatarRenderProfile = 'auto'): AvatarRenderBudget {
+// WebGPU says nothing about the WebGL renderer used by Live2D. `fixedFPS`
+// (the stage) replaces only the frame rate; pixels and antialias still
+// follow the profile and hints. The web chat never passes it.
+export function resolveAvatarRenderBudget(hints: DeviceHints = {}, dpr = 1, profile: AvatarRenderProfile = 'auto', fixedFPS?: 30 | 60): AvatarRenderBudget {
   const candidate: unknown = hints
   const read = (key: keyof DeviceHints): unknown => {
     try {
@@ -31,7 +39,7 @@ export function resolveAvatarRenderBudget(hints: DeviceHints = {}, dpr = 1, prof
     || (positiveFinite(cores) && cores <= 2)
   const ratio = positiveFinite(dpr) ? dpr : 1
   return {
-    maxFPS: saving ? 30 : 60,
+    maxFPS: fixedFPS === 30 || fixedFPS === 60 ? fixedFPS : saving ? 30 : 60,
     resolution: Math.min(ratio, profile === 'economy' ? 1 : saving ? 1.25 : 2),
     antialias: !saving,
   }

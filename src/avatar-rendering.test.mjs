@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyAvatarRenderBudget, attachAvatarRenderLoop, resolveAvatarRenderBudget } from './avatar-rendering.ts'
+import { applyAvatarRenderBudget, attachAvatarRenderLoop, resolveAvatarRenderBudget, resolveStageFrameRate } from './avatar-rendering.ts'
 
 function fixture({ hidden = false, interactionEnabled = true, budget, priority = 0 } = {}) {
   const events = []
@@ -98,6 +98,25 @@ test('invalid hints and DPR never manufacture weak hardware or a broken resoluti
     cores: 2,
     get saveData() { throw new Error('denied') },
   }, 2), { maxFPS: 30, resolution: 1.25, antialias: false })
+})
+
+test('the OBS stage renders at a fixed 30 fps unless ?fps=60 asks for 60', () => {
+  assert.equal(resolveStageFrameRate(null), 30)
+  assert.equal(resolveStageFrameRate(undefined), 30)
+  assert.equal(resolveStageFrameRate('60'), 60)
+  assert.equal(resolveStageFrameRate(' 60 '), 60)
+  for (const value of ['', '30', '59', '120', '60.0', 'abc', '6e1'])
+    assert.equal(resolveStageFrameRate(value), 30, value)
+  // A fixed rate replaces only the frame rate: a strong machine keeps its
+  // pixels and antialias at 30, a weak one keeps its savings at 60.
+  assert.deepEqual(resolveAvatarRenderBudget({}, 2, 'auto', 30), { maxFPS: 30, resolution: 2, antialias: true })
+  assert.deepEqual(resolveAvatarRenderBudget({ memoryGB: 4 }, 2, 'auto', 60), { maxFPS: 60, resolution: 1.25, antialias: false })
+  assert.deepEqual(resolveAvatarRenderBudget({}, 3, 'economy', 60), { maxFPS: 60, resolution: 1, antialias: false })
+  // The web chat passes no fixed rate and keeps its adaptive budget.
+  for (const fixed of [undefined, 0, 45, NaN, '60'])
+    assert.deepEqual(resolveAvatarRenderBudget({}, 2, 'auto', fixed), { maxFPS: 60, resolution: 2, antialias: true })
+  const f = fixture({ budget: resolveAvatarRenderBudget({}, 1, 'auto', resolveStageFrameRate(null)) })
+  assert.equal(f.app.ticker.maxFPS, 30)
 })
 
 test('explicit economy caps frame rate and pixels even when weak-device hints are absent', () => {

@@ -307,6 +307,7 @@ For responsive layout checks, `/airi/scripts/layout-preview.html` embeds the act
 The first steps towards a streamed AI VTuber: a host console sends a line, or approves a viewer message for the brain to answer, and an OBS browser source speaks it with Hiyori, captions and lip sync. Real Bilibili danmaku is not wired in yet; see the [stage-1 plan](docs/plans/2026-10-19-ai-vtuber-stage1.md).
 
 - Start with `AIRI_LIVE=1` (loopback `HOST` only; the server refuses otherwise). Stage: `/airi/stage.html?role=obs` as an OBS browser source; host console: `/airi/console.html` in a normal browser on the same machine.
+- Live mode (and the rehearsal) starts **paused**: the host's first **Resume** runs the go-live checklist and is refused unless it passes or is explicitly skipped. See the [live runbook](docs/live-runbook.md).
 - Every `/api/live/*` request must come directly from this machine (no proxy headers, a loopback Host on the server's port, same-origin). In live mode the Host check also covers chat and speech, which share the stage's speech slots and ledger.
 - The newest OBS page holds the only speaking lease. The server plans each line's sentences itself, and the stage can buy each planned sentence once, through its own route, only while it is primary. A watchdog ends a turn the stage never reports.
 - **Panic** stops speech and shows a "back soon" screen until **Resume**.

@@ -50,14 +50,14 @@ function fakeTimers() {
   }
 }
 
-async function start(context, { speech = fakeSpeech(), timers, live = true } = {}) {
+async function start(context, { speech = fakeSpeech(), timers, live = true, startPaused = false } = {}) {
   let ids = 0
   const handler = createRequestHandler({
     env: {},
     fetchImpl: unexpectedFetch,
     speech,
     // root: null keeps ledgers and the audit log out of the repository's .data.
-    live: live ? deps => createLiveRuntime({ ...deps, root: null, ...(timers ? { timers } : {}), newId: () => `id-${++ids}` }) : null,
+    live: live ? deps => createLiveRuntime({ ...deps, root: null, startPaused, ...(timers ? { timers } : {}), newId: () => `id-${++ids}` }) : null,
   })
   const server = createServer(handler)
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -349,7 +349,7 @@ test('stop, pause, resume, panic and reload drive the stage and gate new lines',
   const paused = await control(base, { action: 'say', text: '暂停中。' })
   assert.equal(paused.status, 409)
   assert.deepEqual(await paused.json(), { code: 'LIVE_PAUSED' })
-  assert.equal((await control(base, { action: 'resume' })).status, 200)
+  assert.equal((await control(base, { action: 'resume', skipPreflight: true })).status, 200)
   const next = await (await control(base, { action: 'say', text: '紧急停止前。' })).json()
 
   const panic = await (await control(base, { action: 'panic' })).json()
@@ -364,10 +364,36 @@ test('stop, pause, resume, panic and reload drive the stage and gate new lines',
   const reconnect = await openStage(context, base, 'preview')
   assert.equal((await reconnect.next('hello')).mode, 'brb', 'a new page starts on the brb screen')
 
-  assert.equal((await control(base, { action: 'resume' })).status, 200)
+  assert.equal((await control(base, { action: 'resume', skipPreflight: true })).status, 200)
   assert.deepEqual(await stage.next('mode'), { mode: 'live' })
   assert.equal((await control(base, { action: 'reload-stage' })).status, 200)
   assert.deepEqual(await stage.next('reload'), {})
+})
+
+test('startPaused boots paused for "startup", refuses lines, and the first resume runs the checklist', async (context) => {
+  const { base } = await start(context, { startPaused: true })
+  assert.equal((await (await fetch(`${base}/airi/api/health`)).json()).live.control, 'paused')
+  const booted = await state(base)
+  assert.deepEqual([booted.control, booted.pauseReason, booted.mode], ['paused', 'startup', 'live'])
+
+  const { stage } = await readyStage(context, base)
+  const refused = await control(base, { action: 'say', text: '还没开播。' })
+  assert.equal(refused.status, 409)
+  assert.deepEqual(await refused.json(), { code: 'LIVE_PAUSED' })
+
+  // No pause-then-resume: the very first resume is gated (here no DeepSeek
+  // key and no data directory, so the checklist fails).
+  const gated = await control(base, { action: 'resume' })
+  assert.equal(gated.status, 409)
+  const { code, preflight } = await gated.json()
+  assert.equal(code, 'LIVE_PREFLIGHT_FAILED')
+  assert.equal(preflight.checks.find(check => check.id === 'deepseek').ok, false)
+  assert.equal((await state(base)).pauseReason, 'startup', 'a refused resume stays paused for startup')
+
+  const resumed = await (await control(base, { action: 'resume', skipPreflight: true })).json()
+  assert.deepEqual([resumed.control, resumed.pauseReason], ['running', null])
+  assert.equal((await control(base, { action: 'say', text: '开播了。' })).status, 200)
+  assert.equal((await stage.next('say')).text, '开播了。')
 })
 
 test('console input is validated before any turn starts', async (context) => {

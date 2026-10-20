@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import type { Delivery } from '../delivery'
-import type { LiveAction, LiveState, QueueItem } from './console-api'
+import type { LiveAction, LiveState, PreflightCheckId, PreflightResult, QueueItem } from './console-api'
 
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
-import { describeLiveError, fetchLiveState, sendLiveControl } from './console-api'
+import { describeLiveError, fetchLiveState, fetchPreflight, LiveApiError, sendLiveControl } from './console-api'
 
 const DELIVERY_OPTIONS: { value: Delivery, label: string }[] = [
   { value: 'neutral', label: '平常' },
@@ -22,7 +22,7 @@ const STATUS_LABELS: Record<string, string> = {
   rejected: '已拒绝', expired: '已过期', failed: '未完成', dropped: '队列满被挤出',
 }
 const PAUSE_LABELS: Record<string, string> = {
-  host: '主播暂停', panic: '紧急停止', strikes: '连续被审核拦下，自动暂停',
+  startup: '刚启动，还没开播：开播预检通过后点「继续」', host: '主播暂停', panic: '紧急停止', strikes: '连续被审核拦下，自动暂停',
   'reply-budget': '今日回复额度用完，自动暂停', 'reply-budget-unavailable': '回复额度记录不可用，自动暂停',
   'upstream-errors': 'DeepSeek 连续出错，自动暂停',
 }
@@ -30,6 +30,11 @@ const PHASE_LABELS: Record<string, string> = { idle: '空闲', generating: '正�
 const AVATAR_LABELS: Record<string, string> = {
   unknown: '等待舞台上报', loading: '载入中', ready: '已载入', failed: '载入失败（看舞台页的控制台）',
 }
+const CHECK_LABELS: Record<PreflightCheckId, string> = {
+  profile: '主机档位', deepseek: 'DeepSeek', tts: '语音', 'local-tts': '本地 TTS', ledger: '额度账本',
+  moderation: '屏蔽词', stage: '舞台', avatar: '形象', obs: 'OBS 源',
+}
+const PROFILE_LABELS: Record<PreflightResult['profile'], string> = { cloud: '云端语音', 'local-voice': '本地语音' }
 const BLOCK_LABELS: Record<string, string> = {
   empty: '空回复', 'too-long': '太长', markup: '泄露了标签', url: '含链接', contact: '含联系方式',
   blocklist: '命中屏蔽词', provider: '云审核不通过', 'provider-timeout': '云审核超时', 'provider-error': '云审核出错',
@@ -42,8 +47,15 @@ const draft = ref('')
 const injectDraft = ref('')
 const delivery = ref<Delivery>('neutral')
 const busy = ref(false)
+const preflight = ref<PreflightResult | null>(null)
+const preflightProblem = ref('')
+// Why the last resume did not happen; shown next to the checklist.
+const resumeNotice = ref('')
+const checking = ref(false)
 let poll: ReturnType<typeof setInterval> | null = null
+let preflightPoll: ReturnType<typeof setInterval> | null = null
 let inFlight: AbortController | null = null
+let preflightInFlight: AbortController | null = null
 
 const primary = computed(() => state.value?.stage.primary ?? null)
 const stageLabel = computed(() => {
@@ -74,6 +86,15 @@ const canInject = computed(() => Boolean(injectDraft.value.trim()) && !busy.valu
 // regenerated after this line.
 const canSay = computed(() => Boolean(draft.value.trim()) && !busy.value && state.value?.control === 'running'
   && Boolean(primary.value?.ready) && !state.value?.turn && brain.value?.phase !== 'generating')
+const failedChecks = computed(() => preflight.value?.checks.filter(check => !check.ok) ?? [])
+const preflightLabel = computed(() => {
+  const result = preflight.value
+  if (!result) return checking.value ? '检查中…' : '尚未检查'
+  return result.ok ? '全部通过' : `${failedChecks.value.length} 项未通过`
+})
+// Only an explicit second button resumes past a failed checklist.
+const canSkipPreflight = computed(() => !busy.value && Boolean(state.value) && state.value?.control !== 'running'
+  && Boolean(preflight.value) && !preflight.value?.ok)
 const rulesLabel = computed(() => {
   const moderation = state.value?.moderation
   if (!moderation) return ''
@@ -96,9 +117,33 @@ async function refresh() {
   }
 }
 
+async function checkPreflight() {
+  preflightInFlight?.abort()
+  const controller = new AbortController()
+  preflightInFlight = controller
+  checking.value = true
+  try {
+    preflight.value = await fetchPreflight(controller.signal)
+    preflightProblem.value = ''
+  }
+  catch (error) {
+    if (controller.signal.aborted) return
+    preflightProblem.value = describeLiveError(error)
+  }
+  finally {
+    if (preflightInFlight === controller) {
+      preflightInFlight = null
+      checking.value = false
+    }
+  }
+}
+
 async function run(command: LiveAction) {
   busy.value = true
   notice.value = ''
+  if (command.action === 'resume')
+    resumeNotice.value = ''
+  let refusal: PreflightResult | null = null
   try {
     await sendLiveControl(command)
     if (command.action === 'say')
@@ -107,11 +152,26 @@ async function run(command: LiveAction) {
       injectDraft.value = ''
   }
   catch (error) {
-    notice.value = describeLiveError(error)
+    // A refused resume is explained next to the checklist only.
+    if (command.action === 'resume')
+      resumeNotice.value = describeLiveError(error)
+    else
+      notice.value = describeLiveError(error)
+    // The refusal carries the checklist the server just ran.
+    if (error instanceof LiveApiError && error.preflight)
+      refusal = error.preflight
   }
   finally {
     busy.value = false
     void refresh()
+    if (refusal) {
+      preflightInFlight?.abort()
+      preflight.value = refusal
+      preflightProblem.value = ''
+    }
+    else if (command.action === 'resume' || command.action === 'pause' || command.action === 'panic') {
+      void checkPreflight()
+    }
   }
 }
 
@@ -152,11 +212,19 @@ function ago(ms: number | null | undefined) {
 
 onMounted(() => {
   void refresh()
+  void checkPreflight()
   poll = setInterval(() => void refresh(), 1_000)
+  // Re-check on its own only while paused, i.e. before a resume.
+  preflightPoll = setInterval(() => {
+    if (state.value && state.value.control !== 'running' && !checking.value)
+      void checkPreflight()
+  }, 5_000)
 })
 onUnmounted(() => {
   if (poll) clearInterval(poll)
+  if (preflightPoll) clearInterval(preflightPoll)
   inFlight?.abort()
+  preflightInFlight?.abort()
 })
 </script>
 
@@ -180,6 +248,31 @@ onUnmounted(() => {
         <dt>画面</dt><dd>{{ state?.mode === 'brb' ? '「稍后回来」' : '正常' }}</dd>
       </dl>
       <p v-if="pauseLabel" class="alert">{{ pauseLabel }}</p>
+    </section>
+
+    <section class="preflight" aria-label="开播预检" :data-ok="preflight?.ok ?? 'unknown'">
+      <div class="heading">
+        <h2>开播预检<template v-if="preflight">（{{ PROFILE_LABELS[preflight.profile] ?? preflight.profile }}）</template></h2>
+        <span class="muted">{{ preflightLabel }}</span>
+        <button type="button" :disabled="checking" @click="checkPreflight">重新检查</button>
+      </div>
+      <p class="muted">「继续」前会再检查一次；没全部通过时不会继续。</p>
+      <p v-if="resumeNotice" class="alert">{{ resumeNotice }}</p>
+      <p v-if="preflightProblem" class="alert">{{ preflightProblem }}</p>
+      <ul v-if="preflight">
+        <li v-for="check in preflight.checks" :key="check.id" class="check" :data-ok="check.ok">
+          <span class="mark" :aria-label="check.ok ? '通过' : '未通过'">{{ check.ok ? '✓' : '✗' }}</span>
+          <span class="label">{{ CHECK_LABELS[check.id] ?? check.id }}</span>
+          <span class="detail">
+            {{ check.detail }}
+            <span v-if="check.fix" class="fix">怎么办：{{ check.fix }}</span>
+          </span>
+        </li>
+      </ul>
+      <div v-if="canSkipPreflight" class="row skip">
+        <span class="muted">只有确认这些问题不影响开播时才跳过；跳过会写进审计日志。</span>
+        <button type="button" class="warning" @click="run({ action: 'resume', skipPreflight: true })">跳过预检，仍然继续</button>
+      </div>
     </section>
 
     <section class="brain" aria-label="大脑">
@@ -277,7 +370,7 @@ onUnmounted(() => {
 :root {
   color: #2d2a29;
   background: #f4f1ee;
-  font-family: "PingFang SC", ui-sans-serif, -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", ui-sans-serif, -apple-system, BlinkMacSystemFont, sans-serif;
 }
 body { margin: 0; }
 .console { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; display: grid; gap: 16px; }
@@ -299,6 +392,7 @@ button, select { font: inherit; padding: 8px 16px; border-radius: 8px; border: 1
 button:disabled { opacity: 0.5; cursor: default; }
 button.primary { background: #3d6b4f; color: #fff; border-color: #3d6b4f; }
 button.danger { background: #a23b2e; color: #fff; border-color: #a23b2e; }
+button.warning { background: #f3e6c8; border-color: #d9b866; }
 .muted { color: #7a7270; }
 .alert { color: #a23b2e; margin: 8px 0 0; }
 .problem { color: #8a5a00; }
@@ -313,7 +407,27 @@ li[data-status="approved"], li[data-status="answering"] { background: #eef5ef; }
 .text { overflow-wrap: anywhere; }
 .actions { display: flex; gap: 6px; }
 .actions button { padding: 4px 10px; }
+.preflight .heading { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+.preflight .heading h2 { margin: 0; }
+.preflight .heading button { margin-left: auto; padding: 4px 12px; }
+.preflight[data-ok="false"] { box-shadow: inset 4px 0 0 #a23b2e, 0 1px 2px rgb(0 0 0 / 6%); }
+.preflight[data-ok="true"] { box-shadow: inset 4px 0 0 #3d6b4f, 0 1px 2px rgb(0 0 0 / 6%); }
+.preflight ul { margin-top: 8px; }
+li.check { grid-template-columns: 1.5em 5.5em 1fr; align-items: start; }
+li.check[data-ok="false"] { background: #fbefed; }
+.check .mark { font-weight: 600; color: #3d6b4f; }
+.check[data-ok="false"] .mark { color: #a23b2e; }
+.check .label { color: #5b5452; }
+.check .detail { overflow-wrap: anywhere; }
+.check .fix { display: block; color: #8a5a00; margin-top: 2px; }
+.preflight .skip { flex-wrap: wrap; }
+.preflight .skip button { margin-left: auto; }
 details { margin-top: 8px; }
 summary { cursor: pointer; color: #7a7270; }
-@media (max-width: 560px) { li { grid-template-columns: max-content 1fr; } .text, .actions { grid-column: 1 / -1; } }
+@media (max-width: 560px) {
+  li { grid-template-columns: max-content 1fr; }
+  .text, .actions { grid-column: 1 / -1; }
+  li.check { grid-template-columns: 1.5em 1fr; }
+  .check .detail { grid-column: 2; }
+}
 </style>

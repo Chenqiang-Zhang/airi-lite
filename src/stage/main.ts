@@ -4,6 +4,7 @@ import type { Delivery } from '../delivery'
 import type { ObsStatus } from './stage-client'
 
 import { createAvatarContext } from '../avatar-context'
+import { resolveStageFrameRate } from '../avatar-rendering'
 import { loadAvatarModule } from '../avatar-startup'
 import { createSpeechController } from '../speech'
 import { createStageClient, resolveStageRole, STAGE_EVENT_TYPES } from './stage-client'
@@ -15,6 +16,9 @@ const base = import.meta.env.BASE_URL
 const params = new URLSearchParams(location.search)
 const role = resolveStageRole(params.get('role'), 'obsstudio' in window)
 const captionsEnabled = params.get('captions') !== '0'
+// Matches OBS's 1080p30 output by default; ?fps=60 for a 60 fps canvas.
+const frameRate = resolveStageFrameRate(params.get('fps'))
+document.body.dataset.fps = String(frameRate)
 
 const stageElement = document.querySelector<HTMLElement>('#avatar')!
 const captionElement = document.querySelector<HTMLElement>('#caption')!
@@ -114,7 +118,7 @@ async function mountAvatar(attempt = 0) {
   client?.reportAvatar('loading')
   try {
     const { mountHiyori } = await loadAvatarModule()
-    live2d = await mountHiyori(stageElement, { autoInteract: false, renderProfile: 'auto' })
+    live2d = await mountHiyori(stageElement, { autoInteract: false, renderProfile: 'auto', fixedFPS: frameRate })
     live2d.setMouth(latestMouth.opening, latestMouth.form, latestMouth.beat)
     syncAvatar()
     client?.reportAvatar('ready')

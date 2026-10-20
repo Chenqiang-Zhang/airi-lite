@@ -16,7 +16,7 @@ body,
 
 #stage {
   position: relative;
-  font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", ui-sans-serif, sans-serif;
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", ui-sans-serif, sans-serif;
 }
 
 #avatar {

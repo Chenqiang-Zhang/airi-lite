@@ -677,8 +677,12 @@ test('server/index.mjs refuses live mode on a non-loopback HOST and serves it on
   })
   const state = await fetch(`http://127.0.0.1:${port}/airi/api/live/state`)
   assert.equal(state.status, 200)
-  assert.equal((await state.json()).control, 'running')
-  assert.equal((await (await fetch(`http://127.0.0.1:${port}/airi/api/health`)).json()).live.enabled, true)
+  // Live mode boots paused, so the first 继续 runs the go-live checklist.
+  const { control, pauseReason } = await state.json()
+  assert.deepEqual({ control, pauseReason }, { control: 'paused', pauseReason: 'startup' })
+  const health = await (await fetch(`http://127.0.0.1:${port}/airi/api/health`)).json()
+  assert.equal(health.live.enabled, true)
+  assert.equal(health.live.control, 'paused')
   // SIGTERM closes live streams first, then exits cleanly.
   child.kill('SIGTERM')
   assert.equal(await exited, 0)

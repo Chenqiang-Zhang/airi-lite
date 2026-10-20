@@ -10,6 +10,7 @@ import { createLiveBrain } from './brain.mjs'
 import { createHub } from './hub.mjs'
 import { checkLocalRequest, LiveRequestError, readSmallJson } from './local-request.mjs'
 import { loadRules, parseRules } from './moderation.mjs'
+import { countRuleTerms, runPreflight } from './preflight.mjs'
 import { createCandidateQueue } from './queue.mjs'
 import { createSseChannel } from './sse.mjs'
 import { createStageBus, STAGE_ROLES } from './stage-bus.mjs'
@@ -71,12 +72,18 @@ export function createLiveRuntime({
   rules = null,
   moderationProvider = null,
   sources = [],
+  // The go-live checklist's local TTS reachability probe (never DeepSeek).
+  probeFetch = fetch,
+  preflightFs = undefined,
+  // Boot paused ('startup'), so the first go-live is a `resume` and passes
+  // the checklist like any other (live mode and mock-live set this).
+  startPaused = false,
 } = {}) {
   if (!speech?.synthesise)
     throw new TypeError('createLiveRuntime requires a speech handler with synthesise()')
 
-  let control = 'running' // running | paused | panic
-  let pauseReason = null
+  let control = startPaused ? 'paused' : 'running' // running | paused | panic
+  let pauseReason = startPaused ? 'startup' : null
   let mode = 'live' // live | brb
   let turn = null
   let lastOutcome = null
@@ -85,6 +92,11 @@ export function createLiveRuntime({
   let stopped = false
   let activeRules = rules ?? parseRules('')
   let rulesProblem = null
+  let rulesLoaded = Boolean(rules) || !root
+  // Every control change bumps this, so a resume that waited for the
+  // checklist never overrides a pause or panic pressed meanwhile.
+  let controlVersion = 0
+  let lastPreflightKey = null
 
   const sse = createSseChannel({ heartbeatMs, timers })
   let activity = 'idle'
@@ -129,6 +141,7 @@ export function createLiveRuntime({
       : loadRules(join(dataDirectory, 'moderation', 'blocklist.txt')).then(({ rules: loaded, problem }) => {
           activeRules = loaded
           rulesProblem = problem
+          rulesLoaded = true
         }),
     refreshLedger(),
   ])
@@ -183,6 +196,7 @@ export function createLiveRuntime({
     source.start?.()
 
   function setControl(next, reason = null) {
+    controlVersion++
     control = next
     pauseReason = next === 'running' ? null : reason
     hub.publish('control.changed', { control, reason: pauseReason, mode })
@@ -283,6 +297,43 @@ export function createLiveRuntime({
       ? text : null
   }
 
+  function preflight() {
+    return runPreflight({
+      env,
+      deepseek: { configured: Boolean(apiKey), model: config.model ?? 'deepseek-flash' },
+      speech: speech.health(),
+      dataDirectory,
+      moderation: {
+        loaded: rulesLoaded,
+        problem: rulesProblem,
+        terms: countRuleTerms(activeRules),
+        ignored: activeRules.ignored?.length ?? 0,
+      },
+      stage: bus.summary().primary,
+      stageUrl: `http://127.0.0.1:${config.port ?? 5173}/airi/stage.html?role=obs`,
+      probe: probeFetch,
+      ...(preflightFs ? { fs: preflightFs } : {}),
+      now,
+    })
+  }
+
+  // The audit log records every resume attempt, and a console check only
+  // when its outcome changed (the console re-checks every few seconds).
+  function recordPreflight(result, { trigger, skipped = false }) {
+    const key = JSON.stringify([result.profile, result.checks.map(check => [check.id, check.ok])])
+    if (trigger === 'check' && key === lastPreflightKey)
+      return
+    lastPreflightKey = key
+    hub.publish('preflight.checked', {
+      trigger,
+      profile: result.profile,
+      ok: result.ok,
+      skipped,
+      failed: result.checks.filter(check => !check.ok).map(check => check.id),
+      checks: result.checks.map(({ id, ok, detail }) => ({ id, ok, detail })),
+    })
+  }
+
   async function handleControl(request, response) {
     const body = await readSmallJson(request)
     switch (body.action) {
@@ -331,12 +382,25 @@ export function createLiveRuntime({
       case 'pause':
         pause('host')
         return sendJson(response, 200, state())
-      case 'resume':
+      case 'resume': {
+        // Resuming starts a public broadcast: the checklist must pass, or
+        // the host must say explicitly that they are skipping it.
+        const skip = body.skipPreflight === true
+        const version = controlVersion
+        const result = await preflight()
+        if (stopped)
+          return sendJson(response, 409, { code: 'LIVE_PAUSED' })
+        recordPreflight(result, { trigger: 'resume', skipped: skip && !result.ok })
+        if (!result.ok && !skip)
+          return sendJson(response, 409, { code: 'LIVE_PREFLIGHT_FAILED', preflight: result })
+        if (controlVersion !== version)
+          return sendJson(response, 409, { code: 'LIVE_CONTROL_CHANGED' })
         setControl('running')
         setMode('live')
         brain.resetStrikes()
         brain.schedule()
         return sendJson(response, 200, state())
+      }
       case 'panic':
         // Everything stops and nothing from before resumes: the interrupted
         // reply leaves the context and waiting candidates are dropped.
@@ -495,6 +559,12 @@ export function createLiveRuntime({
       }
       if (request.method === 'GET' && pathname === '/api/live/state') {
         sendJson(response, 200, state())
+        return true
+      }
+      if (request.method === 'GET' && pathname === '/api/live/preflight') {
+        const result = await preflight()
+        recordPreflight(result, { trigger: 'check' })
+        sendJson(response, 200, result)
         return true
       }
       if (request.method === 'POST' && pathname === '/api/live/stage/report') {

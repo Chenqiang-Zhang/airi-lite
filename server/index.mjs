@@ -25,15 +25,18 @@ const createLiveRuntime = liveEnabled
 const handler = createRequestHandler({
   config,
   vite,
-  live: createLiveRuntime ? deps => createLiveRuntime(deps) : null,
+  // Boots paused: the host's first 「继续」 runs the go-live checklist.
+  live: createLiveRuntime ? deps => createLiveRuntime({ ...deps, startPaused: true }) : null,
 })
 const server = createServer(handler)
 
 server.listen(config.port, config.host, () => {
   console.log(`AIRI Lite running at http://${config.host}:${config.port}/airi/`)
   console.log(`DeepSeek: ${process.env.DEEPSEEK_API_KEY?.trim() ? `configured (${config.model})` : 'not configured; local fallback enabled'}`)
-  if (liveEnabled)
+  if (liveEnabled) {
     console.log('Live mode: enabled (stage /airi/stage.html, console /airi/console.html)')
+    console.log('Live control: paused until 继续 in the console passes the go-live checklist')
+  }
 })
 
 if (liveEnabled) {
