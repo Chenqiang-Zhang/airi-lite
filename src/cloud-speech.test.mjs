@@ -84,7 +84,7 @@ test('default route works without Vite env in Node, and optional access header i
 })
 
 test('the expected provider guard defaults to MiniMax and preserves only an explicit known selection', async () => {
-  for (const expectedProvider of [undefined, 'minimax', 'elevenlabs']) {
+  for (const expectedProvider of [undefined, 'minimax', 'elevenlabs', 'local']) {
     let body
     let calls = 0
     await fetchCloudSpeech(options({ expectedProvider }), { fetch: async (_url, init) => {
@@ -99,7 +99,7 @@ test('the expected provider guard defaults to MiniMax and preserves only an expl
 })
 
 test('unknown, coerced or empty expected provider values fail before any request', async () => {
-  for (const expectedProvider of ['ElevenLabs', 'unknown', '', ' elevenlabs ', null, 123, {}, ['elevenlabs']]) {
+  for (const expectedProvider of ['ElevenLabs', 'unknown', '', ' elevenlabs ', 'Local', ' local', null, 123, {}, ['elevenlabs']]) {
     let calls = 0
     await assert.rejects(fetchCloudSpeech(options({ expectedProvider }), { fetch: async () => {
       calls++
@@ -198,6 +198,7 @@ test('unknown regions and a region attached to another provider fail before any 
     .map(expectedRegion => options({ expectedRegion }))
   inputs.push(options({ expectedProvider: 'elevenlabs', expectedRegion: 'cn' }))
   inputs.push(options({ expectedProvider: 'elevenlabs', expectedRegion: 'global' }))
+  inputs.push(options({ expectedProvider: 'local', expectedRegion: 'cn' }))
   for (const input of inputs) {
     let calls = 0
     await assert.rejects(fetchCloudSpeech(input, { fetch: async () => { calls++; return response() } }), apiFailure('invalid_request'))
@@ -274,7 +275,7 @@ test('endpoint overrides cannot send the access code to another host or a traver
 })
 
 test('wrong format/rate, missing fields, malformed or empty JSON all reject safely', async () => {
-  for (const body of [payload({ format: 'pcm_s16le' }), ...[24000, 48000, 96000, 44100.5, '32000', '44100', null, undefined].map(sampleRate => payload({ sampleRate })), payload({ words: undefined }), [], null, {}, payload({ audio: 123 })]) {
+  for (const body of [payload({ format: 'pcm_s16le' }), payload({ format: 'WAV' }), payload({ format: 'ogg' }), ...[7999, 96001, 0, -32000, 44100.5, '32000', '44100', null, undefined, Number.NaN, Infinity].map(sampleRate => payload({ sampleRate })), payload({ words: undefined }), [], null, {}, payload({ audio: 123 })]) {
     let decodes = 0
     await assert.rejects(fetchCloudSpeech(options(), {
       fetch: async () => response(body),
@@ -825,4 +826,44 @@ test('canceling 44.1 kHz aligned stereo decoding ignores late buffers and alignm
     assert.equal(closes, 1)
     assert.equal(calls, 1)
   })
+})
+
+test('self-hosted WAV and MP3 at any integer rate from 8 kHz to 96 kHz reach the codec intact', async () => {
+  const bytes = Buffer.from('RIFF-fake-wav-WAVE')
+  for (const [format, sampleRate] of [['wav', 8000], ['wav', 22050], ['wav', 24000], ['wav', 48000], ['wav', 96000],
+    ['mp3', 16000], ['mp3', 24000], ['mp3', 32000], ['mp3', 44100]]) {
+    const audio = decoded({ sampleRate })
+    let decodes = 0
+    const result = await fetchCloudSpeech(options({ expectedProvider: 'local' }), {
+      fetch: async () => response(payload({ audio: bytes.toString('base64'), format, sampleRate, words: [] })),
+      decodeAudio: async (encoded) => {
+        decodes++
+        assert.deepEqual(new Uint8Array(encoded), new Uint8Array(bytes))
+        return audio
+      },
+    })
+    assert.equal(decodes, 1)
+    assert.equal(result.sampleRate, sampleRate)
+    assert.deepEqual(result.words, [])
+    assert.equal('wordAlignmentAvailable' in result, false)
+  }
+})
+
+test('a WAV rate is only a context hint: the decoded rate and 30 s cap still decide', async () => {
+  const created = []
+  class Context {
+    constructor(config) { created.push(config) }
+    async decodeAudioData() { return audioBuffer(decoded({ sampleRate: 48000 })) }
+    async close() {}
+  }
+  await withAudioContext(Context, async () => {
+    const result = await requestCloudSpeech(options({ expectedProvider: 'local' }),
+      { fetch: async () => response(payload({ format: 'wav', sampleRate: 22050, words: [] })) })
+    assert.equal(result.sampleRate, 48000)
+    assert.deepEqual(created, [{ sampleRate: 22050 }])
+  })
+  await assert.rejects(fetchCloudSpeech(options({ expectedProvider: 'local' }), {
+    fetch: async () => response(payload({ format: 'wav', sampleRate: 24000, words: [] })),
+    decodeAudio: async () => decoded({ sampleRate: 24000, length: 24000 * 30 + 1 }),
+  }), apiFailure('invalid_response'))
 })

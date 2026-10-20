@@ -26,9 +26,9 @@ export function normaliseSpeechRequest(value) {
     || typeof value.text !== 'string' || !value.text.trim() || value.text.length > 360
     || !value.text.isWellFormed() || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.text)
     || !DELIVERIES.has(value.delivery)
-    || (Object.hasOwn(value, 'expectedProvider') && !['minimax', 'elevenlabs'].includes(value.expectedProvider))
+    || (Object.hasOwn(value, 'expectedProvider') && !['minimax', 'elevenlabs', 'local'].includes(value.expectedProvider))
     || (Object.hasOwn(value, 'expectedRegion') && (!['cn', 'global'].includes(value.expectedRegion)
-      || value.expectedProvider === 'elevenlabs')))
+      || ['elevenlabs', 'local'].includes(value.expectedProvider))))
     throw new SpeechProviderError('TTS_INVALID_REQUEST')
   return { text: value.text, delivery: value.delivery,
     ...(Object.hasOwn(value, 'expectedProvider') ? { expectedProvider: value.expectedProvider } : {}),

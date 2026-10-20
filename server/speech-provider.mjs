@@ -1,5 +1,6 @@
 import { MINIMAX_ENDPOINTS, readMinimaxConfig, synthesiseMinimax } from './minimax.mjs'
 import { estimateElevenLabsReservation, readElevenLabsConfig, synthesiseElevenLabs } from './elevenlabs.mjs'
+import { estimateLocalReservation, isLocalTtsModel, readLocalTtsConfig, synthesiseLocal } from './local-tts.mjs'
 
 const MINIMAX_MODELS = new Set(['speech-2.8-hd', 'speech-2.8-turbo'])
 const unavailable = Object.freeze({
@@ -14,6 +15,9 @@ export function readSpeechConfig(env = process.env) {
     return Object.freeze({ ...readMinimaxConfig(env), provider })
   if (provider === 'elevenlabs')
     return readElevenLabsConfig(env)
+  // A self-hosted engine is never a fallback: it too must be named explicitly.
+  if (provider === 'local')
+    return readLocalTtsConfig(env)
   return Object.freeze({ configured: false, provider: 'unavailable', model: '', dailyLimit: 0 })
 }
 
@@ -38,6 +42,15 @@ export function resolveSpeechProvider(config) {
       ledgerFilename: 'tts-budget-elevenlabs.json',
       estimateReservation: estimateElevenLabsReservation,
       synthesise: synthesiseElevenLabs,
+    }
+  }
+  if (provider === 'local' && isLocalTtsModel(config?.model)) {
+    return {
+      // synthesiseLocal re-validates the whole config before any request.
+      configured: config.configured === true, provider, model: config.model,
+      ledgerFilename: 'tts-budget-local.json',
+      estimateReservation: estimateLocalReservation,
+      synthesise: synthesiseLocal,
     }
   }
   return unavailable

@@ -1,9 +1,9 @@
 import { resolveSpeechMode } from './speech-mode.ts'
 import type { DeviceHints, SpeechMode } from './speech-mode.ts'
 
-export type CloudSpeechProvider = 'minimax' | 'elevenlabs' | 'unavailable'
+export type CloudSpeechProvider = 'minimax' | 'elevenlabs' | 'local' | 'unavailable'
 export type MinimaxRegion = 'cn' | 'global'
-export type CloudSpeechScope = 'minimax:cn' | 'minimax:global' | 'elevenlabs'
+export type CloudSpeechScope = 'minimax:cn' | 'minimax:global' | 'elevenlabs' | 'local'
 export const CLOUD_PROVIDER_CONSENT_KEY = 'airi-lite:cloud-provider:v2'
 export const LEGACY_CLOUD_PROVIDER_CONSENT_KEY = 'airi-lite:cloud-provider:v1'
 
@@ -13,7 +13,9 @@ interface StorageLike {
 }
 
 const isSelectedScope = (value: unknown): value is CloudSpeechScope =>
-  value === 'minimax:cn' || value === 'minimax:global' || value === 'elevenlabs'
+  value === 'minimax:cn' || value === 'minimax:global' || value === 'elevenlabs' || value === 'local'
+// Same pattern the server applies to LOCAL_TTS_MODEL; anything else is unknown.
+const LOCAL_MODEL = /^[A-Za-z0-9][\w.:/@+-]{0,127}$/
 const browserStorage = () => typeof window === 'undefined' ? undefined : window.localStorage
 
 export function loadCloudProviderConsent(storage?: StorageLike | null): CloudSpeechScope | null {
@@ -71,6 +73,12 @@ export function readCloudSpeechService(value: unknown): CloudSpeechService {
     return {
       configured: status.configured === true, provider: 'elevenlabs', label: 'ElevenLabs',
       model: status.model, region: null, scope: 'elevenlabs',
+    }
+  // A self-hosted engine on the streamer's own network; still needs consent.
+  if (status.provider === 'local' && typeof status.model === 'string' && LOCAL_MODEL.test(status.model))
+    return {
+      configured: status.configured === true, provider: 'local', label: '自托管语音',
+      model: status.model, region: null, scope: 'local',
     }
   return unavailable
 }
