@@ -30,9 +30,10 @@ Authorization: Bearer …      (only when LOCAL_TTS_API_KEY is set)
 Put these in `.env.local` on the machine that runs airi-lite (see `.env.example`):
 
 ```dotenv
+AIRI_PROFILE=local-voice                  # for the live stream's go-live checklist
 TTS_PROVIDER=local
 LOCAL_TTS_ENABLED=1
-LOCAL_TTS_URL=http://192.168.1.20:50000   # base URL, without /v1
+LOCAL_TTS_URL=http://192.168.1.20:50000   # base URL; a URL ending in /v1/audio/speech also works
 LOCAL_TTS_MODEL=cosyvoice2                # whatever your wrapper expects
 LOCAL_TTS_VOICE=中文女                     # a speaker name your engine knows
 LOCAL_TTS_FORMAT=wav
@@ -41,6 +42,8 @@ LOCAL_TTS_FORMAT=wav
 # LOCAL_TTS_DAILY_CHAR_LIMIT=500000       # runaway guard; this is the default
 # LOCAL_TTS_INSTRUCTIONS=0
 ```
+
+For the live stream, `AIRI_PROFILE=local-voice` makes the go-live checklist (`docs/live-runbook.md`) expect this provider and send one light `HEAD` to the engine's origin before every 继续; with the default `cloud` profile the checklist refuses a local provider.
 
 The configuration fails closed. The provider is reported `configured: false` and nothing is sent unless:
 
@@ -61,6 +64,7 @@ node scripts/mock-local-tts.mjs
 That serves `http://127.0.0.1:8765/v1/audio/speech` and answers every request with a short sine tone in a WAV file. It logs only the sentence length, never the text. Then start airi-lite with:
 
 ```dotenv
+AIRI_PROFILE=local-voice
 TTS_PROVIDER=local
 LOCAL_TTS_ENABLED=1
 LOCAL_TTS_URL=http://127.0.0.1:8765

@@ -51,20 +51,43 @@ const handler = createRequestHandler({
   speech,
   // The placeholder key and the canned fake go only to the live brain; no
   // "DeepSeek" request ever leaves this process.
-  live: deps => createLiveRuntime({
-    ...deps,
-    // Like `npm run live`: the rehearsal goes live through the checklist.
-    startPaused: true,
-    env: { DEEPSEEK_API_KEY: 'mock-only' },
-    fetchImpl: fakeDeepSeek.fetch,
-    sources: fixture ? [({ publish }) => createFixtureSource({ entries: fixture, speed, onEvent: event => publish(event, 'fixture') })] : [],
-  }),
+  live: (deps) => {
+    const runtime = createLiveRuntime({
+      ...deps,
+      // Like `npm run live`: the rehearsal goes live through the checklist.
+      startPaused: true,
+      env: { DEEPSEEK_API_KEY: 'mock-only' },
+      fetchImpl: fakeDeepSeek.fetch,
+    })
+    // The replay starts at the first 继续, not at boot: otherwise stage setup
+    // and the checklist would pile the first minutes up into a backlog the
+    // brain answers three at a time, unlike the paced stream it rehearses.
+    if (fixture) {
+      const source = createFixtureSource({
+        entries: fixture,
+        speed,
+        onEvent: event => runtime.hub.publish(`input.${event.type}`, event, { source: 'fixture' }),
+      })
+      const detach = runtime.hub.subscribe('control.changed', (event) => {
+        if (event.data?.control !== 'running')
+          return
+        detach()
+        source.start()
+      })
+      const stopRuntime = runtime.stop
+      runtime.stop = async () => {
+        source.stop()
+        return stopRuntime()
+      }
+    }
+    return runtime
+  },
 })
 const server = createServer(handler)
 server.listen(port, '127.0.0.1', () => {
   console.log(`MOCK LIVE ONLY (voice: ${voice ? `say ${voice}` : 'sine-wave tone'}; fake DeepSeek${adversarial ? ', adversarial' : ''}; no provider charges)`)
   if (fixture)
-    console.log(`  replaying ${fixture.length} synthetic events at ${speed}x; approve them in the console`)
+    console.log(`  replaying ${fixture.length} synthetic events at ${speed}x from the first 继续; approve them in the console`)
   console.log(`  ledgers, blocklist and audit log (deleted on exit): ${join(workDirectory, '.data')}`)
   console.log(`  stage:   http://127.0.0.1:${port}/airi/stage.html?role=obs`)
   console.log(`  preview: http://127.0.0.1:${port}/airi/stage.html?role=preview`)

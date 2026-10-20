@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { localTtsUrlProblem } from '../local-tts.mjs'
+
 // The go-live checklist. Every check is {id, ok, detail, fix}: `detail` says
 // what was found and `fix` tells the host what to do, both in the console's
 // language. Read-only apart from one probe file in .data/; never calls a paid
@@ -47,12 +49,14 @@ function checkDeepSeek({ configured, model }) {
         '在 .env.local 写入 DEEPSEEK_API_KEY=…，然后重启 npm run live。')
 }
 
+const LOCAL_SETUP = '在 .env.local 设 TTS_PROVIDER=local、LOCAL_TTS_ENABLED=1、LOCAL_TTS_URL（引擎的基础地址，例如 http://127.0.0.1:9880）、LOCAL_TTS_MODEL、LOCAL_TTS_VOICE（见 docs/local-tts.md），然后重启。'
+
 function checkSpeech(profile, health) {
   const provider = typeof health?.provider === 'string' ? health.provider : 'unavailable'
   const label = `${provider}${health?.model ? ` · ${health.model}` : ''}`
   if (profile === 'local-voice' && provider !== 'local') {
     return fail('tts', `local-voice 档位应使用本地 TTS，当前是 ${label}。`,
-      '在 .env.local 设 TTS_PROVIDER=local 和 LOCAL_TTS_URL，或把 AIRI_PROFILE 改回 cloud，然后重启。')
+      `${LOCAL_SETUP.replace('，然后重启。', '')}；或把 AIRI_PROFILE 改回 cloud，然后重启。`)
   }
   if (profile === 'cloud' && provider === 'local') {
     return fail('tts', 'cloud 档位却选了本地 TTS。',
@@ -60,7 +64,7 @@ function checkSpeech(profile, health) {
   }
   if (health?.configured !== true) {
     const fix = profile === 'local-voice'
-      ? '在 .env.local 设 TTS_PROVIDER=local、LOCAL_TTS_URL（及模型、音色），然后重启。'
+      ? LOCAL_SETUP
       : provider === 'elevenlabs'
         ? '在 .env.local 设 ELEVENLABS_TTS_ENABLED=1、ELEVENLABS_API_KEY、ELEVENLABS_VOICE_ID、ELEVENLABS_TTS_DAILY_CHAR_LIMIT，然后重启。'
         : '在 .env.local 设 MINIMAX_TTS_ENABLED=1、MINIMAX_API_KEY、MINIMAX_VOICE_ID、MINIMAX_TTS_DAILY_CHAR_LIMIT，然后重启。'
@@ -71,18 +75,25 @@ function checkSpeech(profile, health) {
   return pass('tts', `已配置（${label}${health.region ? ` · ${health.region}` : ''}）`)
 }
 
+// What the local provider (server/local-tts.mjs) would refuse, so the
+// checklist never passes a URL speech cannot use, and never probes it.
+const URL_PROBLEMS = Object.freeze({
+  missing: '没有 LOCAL_TTS_URL。',
+  invalid: 'LOCAL_TTS_URL 不是有效网址。',
+  scheme: 'LOCAL_TTS_URL 只能是 http 或 https。',
+  credentials: 'LOCAL_TTS_URL 里不能带用户名或密码（密钥写在 LOCAL_TTS_API_KEY）。',
+  query: 'LOCAL_TTS_URL 里不能带 ? 或 #。',
+  host: 'LOCAL_TTS_URL 只能指向本机、局域网 IP 或 localhost，不接受其他主机名或公网地址。',
+})
+
 // Any HTTP answer, even 404 or 405, means the engine's server is up. Only the
-// origin is probed and only its host is shown: the URL may carry a token.
+// origin is probed and only its host is shown.
 async function checkLocalTts(env, probe, timeoutMs) {
-  const raw = typeof env.LOCAL_TTS_URL === 'string' ? env.LOCAL_TTS_URL.trim() : ''
-  const fixUrl = '在 .env.local 设 LOCAL_TTS_URL（例如 http://127.0.0.1:9880/v1/audio/speech），然后重启。'
-  if (!raw)
-    return fail('local-tts', '没有 LOCAL_TTS_URL。', fixUrl)
-  let url
-  try { url = new URL(raw) }
-  catch { return fail('local-tts', 'LOCAL_TTS_URL 不是有效网址。', fixUrl) }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:')
-    return fail('local-tts', 'LOCAL_TTS_URL 只能是 http 或 https。', fixUrl)
+  const fixUrl = '在 .env.local 设 LOCAL_TTS_URL 为引擎的基础地址（例如 http://127.0.0.1:9880，不用写 /v1/audio/speech），然后重启。'
+  const problem = localTtsUrlProblem(env.LOCAL_TTS_URL)
+  if (problem)
+    return fail('local-tts', URL_PROBLEMS[problem], fixUrl)
+  const url = new URL(env.LOCAL_TTS_URL.trim())
   try {
     const response = await probe(`${url.origin}/`, {
       method: 'HEAD', redirect: 'manual', cache: 'no-store', signal: AbortSignal.timeout(timeoutMs),
@@ -95,6 +106,21 @@ async function checkLocalTts(env, probe, timeoutMs) {
     return fail('local-tts', `${url.host} ${reason}。`,
       '先启动本地 TTS 服务，确认它监听的地址和端口与 LOCAL_TTS_URL 一致（防火墙放行局域网），然后点「重新检查」。')
   }
+}
+
+// Today's brain replies: a used-up budget would let 继续 "succeed" and then
+// fail the next approved batch (a Super Chat, perhaps). One reply left is
+// passed with a note, since a retried turn can need two.
+function checkReplies(replies) {
+  if (!replies || !Number.isInteger(replies.limit))
+    return pass('replies', '没有每日回复额度信息（测试模式）。')
+  if (replies.reserved === null)
+    return fail('replies', '读不出今天用了多少次回复额度。', '检查 .data/live-reply-budget.json 是否可读，然后点「重新检查」。')
+  const left = replies.limit - replies.reserved
+  if (left <= 0)
+    return fail('replies', `今天的回复额度已用完（${replies.reserved}/${replies.limit}），继续也不会生成回复。`,
+      '等额度在北京时间早上 8 点重置；或在 .env.local 调高 LIVE_DAILY_REPLY_LIMIT，然后重启。')
+  return pass('replies', `今天还剩 ${left} 次（${replies.reserved}/${replies.limit}）${left === 1 ? '，只够一回合' : ''}。`)
 }
 
 // The ledgers (TTS characters, daily replies) live directly in .data/. A
@@ -192,6 +218,7 @@ export async function runPreflight({
   deepseek = { configured: false, model: '' },
   speech = null,
   dataDirectory = null,
+  replies = null,
   moderation = { loaded: false, problem: null, terms: 0, ignored: 0 },
   stage = null,
   stageUrl = 'http://127.0.0.1:5173/airi/stage.html?role=obs',
@@ -209,6 +236,7 @@ export async function runPreflight({
     checkSpeech(profile, speech),
     ...(profile === 'local-voice' ? [await checkLocalTts(env, probe, probeTimeoutMs)] : []),
     await checkLedger(dataDirectory, fs, now, staleLockMs),
+    checkReplies(replies),
     checkModeration(moderation),
     checkStage(stage, stageUrl),
     checkAvatar(stage),

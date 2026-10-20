@@ -32,12 +32,13 @@ const AVATAR_LABELS: Record<string, string> = {
 }
 const CHECK_LABELS: Record<PreflightCheckId, string> = {
   profile: '主机档位', deepseek: 'DeepSeek', tts: '语音', 'local-tts': '本地 TTS', ledger: '额度账本',
-  moderation: '屏蔽词', stage: '舞台', avatar: '形象', obs: 'OBS 源',
+  replies: '回复额度', moderation: '屏蔽词', stage: '舞台', avatar: '形象', obs: 'OBS 源',
 }
 const PROFILE_LABELS: Record<PreflightResult['profile'], string> = { cloud: '云端语音', 'local-voice': '本地语音' }
 const BLOCK_LABELS: Record<string, string> = {
   empty: '空回复', 'too-long': '太长', markup: '泄露了标签', url: '含链接', contact: '含联系方式',
   blocklist: '命中屏蔽词', provider: '云审核不通过', 'provider-timeout': '云审核超时', 'provider-error': '云审核出错',
+  'prompt-leak': '复述了设定或本轮提示',
 }
 
 const state = ref<LiveState | null>(null)

@@ -39,7 +39,7 @@ Windows 额外注意：
 | `LIVE_MAX_TOKENS` | 否 | `160`（32–400） | 每条直播回复的最大输出 token。 |
 | `TTS_PROVIDER` | 否 | `minimax` | `minimax`、`elevenlabs` 或 `local`（`local-voice` 档位用）。 |
 | `MINIMAX_TTS_ENABLED`、`MINIMAX_API_KEY`、`MINIMAX_VOICE_ID`、`MINIMAX_TTS_DAILY_CHAR_LIMIT` | `cloud` 档位必需 | `MINIMAX_TTS_ENABLED=0` | 四项都要填，`ENABLED=1` 才会花钱。可选 `MINIMAX_TTS_MODEL`（`speech-2.8-turbo`）、`MINIMAX_TTS_REGION`（`cn`）。细节见 `.env.example`。 |
-| `LOCAL_TTS_URL` 等 `LOCAL_TTS_*` | `local-voice` 档位必需 | — | 本地 TTS 引擎地址（OpenAI 兼容的 `/v1/audio/speech`）。模型、音色、格式等变量见 `docs/local-tts.md` 和 `.env.example`。预检会对这个地址的主机做一次很轻的 HEAD 请求，确认引擎开着。 |
+| `LOCAL_TTS_URL` 等 `LOCAL_TTS_*` | `local-voice` 档位必需 | — | 本地 TTS 引擎的基础地址，例如 `http://127.0.0.1:9880`（程序会接上 OpenAI 兼容的 `/v1/audio/speech`）；还要 `LOCAL_TTS_ENABLED=1`、`LOCAL_TTS_MODEL`、`LOCAL_TTS_VOICE`，其余见 `docs/local-tts.md` 和 `.env.example`。预检会对这个地址的主机做一次很轻的 HEAD 请求，确认引擎开着。 |
 | `BILIBILI_OPEN_ACCESS_KEY_ID`、`BILIBILI_OPEN_ACCESS_KEY_SECRET`、`BILIBILI_OPEN_APP_ID`、`BILIBILI_OPEN_CODE` | 现在不需要 | — | B 站开放平台凭据。目前只有 `scripts/bili-probe.mjs` 读取，直播服务还不读（M5 接入弹幕时才用）。 |
 | `MOCK_LIVE_PORT`、`MOCK_SAY_VOICE` | 否 | `4176` / 自动 | 只给零费用彩排用。 |
 
@@ -136,7 +136,8 @@ OBS 会自动播放声音，不需要点页面。用普通浏览器打开舞台�
 | 主机档位 | `AIRI_PROFILE` 是 `cloud` 或 `local-voice`（不填就是 `cloud`） | 改正拼写后重启。 |
 | DeepSeek | 有 `DEEPSEEK_API_KEY` | 写进 `.env.local` 后重启。预检不会真的调用 DeepSeek。 |
 | 语音 | 语音服务已配置，且与档位一致：`cloud` 要 MiniMax/ElevenLabs，`local-voice` 要本地 TTS | 按提示补齐变量后重启。 |
-| 本地 TTS（仅 `local-voice`） | `LOCAL_TTS_URL` 的主机 1.5 秒内有任何 HTTP 响应 | 先启动引擎，确认地址和端口。 |
+| 本地 TTS（仅 `local-voice`） | `LOCAL_TTS_URL` 是本机/局域网地址，且它的主机 1.5 秒内有任何 HTTP 响应 | 先启动引擎，确认地址和端口。 |
+| 回复额度 | 今天的 `LIVE_DAILY_REPLY_LIMIT` 还没用完 | 等北京时间早上 8 点重置，或调高额度后重启。 |
 | 额度账本 | `.data/` 可写，且没有 15 秒以上的 `*.lock` | 见下面的残留锁处理。 |
 | 屏蔽词 | `.data/moderation/blocklist.txt` 读取成功且至少有一条可用的词 | 补好文件后重启。 |
 | 舞台 | 有 `role=obs` 的舞台连着并已就绪 | 检查 OBS 浏览器源网址；点「刷新舞台」。 |

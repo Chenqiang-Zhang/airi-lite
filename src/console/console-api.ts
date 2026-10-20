@@ -60,7 +60,7 @@ export interface LiveState {
   speech: { configured: boolean, provider: string, model: string, region?: string }
 }
 
-export type PreflightCheckId = 'profile' | 'deepseek' | 'tts' | 'local-tts' | 'ledger' | 'moderation' | 'stage' | 'avatar' | 'obs'
+export type PreflightCheckId = 'profile' | 'deepseek' | 'tts' | 'local-tts' | 'ledger' | 'replies' | 'moderation' | 'stage' | 'avatar' | 'obs'
 
 export interface PreflightCheck {
   id: PreflightCheckId

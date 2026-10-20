@@ -53,5 +53,9 @@ export function resolveSpeechProvider(config) {
       synthesise: synthesiseLocal,
     }
   }
+  // Still the local engine the operator chose, just not usable yet (e.g. no
+  // valid model), so health and the go-live checklist name it correctly.
+  if (provider === 'local')
+    return Object.freeze({ configured: false, provider, model: '', ledgerFilename: 'tts-budget-local.json' })
   return unavailable
 }

@@ -297,12 +297,19 @@ export function createLiveRuntime({
       ? text : null
   }
 
-  function preflight() {
+  // null: the ledger could not be read (shown as unknown).
+  function repliesReservedToday() {
+    return ledger && ledger.day === new Date(now()).toISOString().slice(0, 10) ? ledger.reserved : ledger ? 0 : null
+  }
+
+  async function preflight() {
+    await refreshLedger()
     return runPreflight({
       env,
       deepseek: { configured: Boolean(apiKey), model: config.model ?? 'deepseek-flash' },
       speech: speech.health(),
       dataDirectory,
+      replies: { limit: dailyReplies, reserved: repliesReservedToday() },
       moderation: {
         loaded: rulesLoaded,
         problem: rulesProblem,
@@ -529,7 +536,7 @@ export function createLiveRuntime({
         ...brain.state(),
         dailyReplyLimit: dailyReplies,
         // null: the ledger could not be read (shown as unknown).
-        dailyRepliesReserved: ledger && ledger.day === new Date(now()).toISOString().slice(0, 10) ? ledger.reserved : ledger ? 0 : null,
+        dailyRepliesReserved: repliesReservedToday(),
       },
       moderation: {
         rulesProblem,

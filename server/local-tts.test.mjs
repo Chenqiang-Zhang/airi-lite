@@ -136,8 +136,13 @@ test('TTS_PROVIDER=local selects only this provider, with its own ledger and ide
   // Without the explicit selector, a ready local engine never activates.
   assert.equal(readSpeechConfig(environment).provider, 'minimax')
   assert.equal(readSpeechConfig({ ...environment, TTS_PROVIDER: 'Local' }).provider, 'unavailable')
-  assert.equal(resolveSpeechProvider({ ...selected, model: '' }).provider, 'unavailable')
-  assert.equal(resolveSpeechProvider(readSpeechConfig({ TTS_PROVIDER: 'local' })).provider, 'unavailable')
+  // Chosen but not usable yet: still named local, never able to synthesise.
+  for (const resolved of [resolveSpeechProvider({ ...selected, model: '' }), resolveSpeechProvider(readSpeechConfig({ TTS_PROVIDER: 'local' }))]) {
+    assert.equal(resolved.provider, 'local')
+    assert.equal(resolved.configured, false)
+    assert.equal(resolved.synthesise, undefined)
+    assert.equal(resolved.ledgerFilename, 'tts-budget-local.json')
+  }
 })
 
 test('the request body is OpenAI-compatible and maps delivery through the one table', () => {
@@ -371,4 +376,13 @@ test('POST /api/speech returns decodable WAV for the confirmed local provider on
   assert.equal((await post({ ...speech, expectedProvider: 'minimax' })).status, 409)
   assert.equal((await post({ ...speech, expectedProvider: 'local', expectedRegion: 'cn' })).status, 400)
   assert.equal(engine.requests.length, 1)
+})
+
+test('a LOCAL_TTS_URL that already ends in the speech path is not doubled; refusals are explained', async () => {
+  const { localTtsUrlProblem } = await import('./local-tts.mjs')
+  for (const url of ['http://127.0.0.1:9880', 'http://127.0.0.1:9880/', 'http://127.0.0.1:9880/v1/audio/speech', 'http://127.0.0.1:9880/v1/audio/speech/'])
+    assert.equal(readLocalTtsConfig({ LOCAL_TTS_URL: url }).endpoint, 'http://127.0.0.1:9880/v1/audio/speech', url)
+  assert.equal(readLocalTtsConfig({ LOCAL_TTS_URL: 'http://10.0.0.5:8000/tts' }).endpoint, 'http://10.0.0.5:8000/tts/v1/audio/speech')
+  assert.deepEqual(['', 'nope', 'ftp://127.0.0.1/', 'http://a:b@127.0.0.1/', 'http://127.0.0.1/?k=1', 'http://example.com/', 'http://127.0.0.1:9880'].map(localTtsUrlProblem),
+    ['missing', 'invalid', 'scheme', 'credentials', 'query', 'host', null])
 })

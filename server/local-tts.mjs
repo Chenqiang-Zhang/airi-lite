@@ -65,9 +65,36 @@ function parseLocalUrl(value) {
   return url
 }
 
+// LOCAL_TTS_URL is the engine's base URL; a URL that already ends in the
+// speech path is taken as it is rather than getting the path twice.
 function localEndpoint(value) {
   const url = parseLocalUrl(trimmed(value))
-  return url ? `${url.origin}${url.pathname.replace(/\/+$/, '')}${SPEECH_PATH}` : ''
+  if (!url)
+    return ''
+  const path = url.pathname.replace(/\/+$/, '')
+  return `${url.origin}${path.endsWith(SPEECH_PATH) ? path : `${path}${SPEECH_PATH}`}`
+}
+
+// Why LOCAL_TTS_URL would be refused (null when it is usable), in the words
+// the go-live checklist shows the host. The same rules as parseLocalUrl.
+export function localTtsUrlProblem(value) {
+  const raw = trimmed(value)
+  if (!raw)
+    return 'missing'
+  if (raw.length > 2_048)
+    return 'invalid'
+  let url
+  try { url = new URL(raw) }
+  catch { return 'invalid' }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:')
+    return 'scheme'
+  if (url.username || url.password)
+    return 'credentials'
+  if (url.search || url.hash || raw.includes('?') || raw.includes('#'))
+    return 'query'
+  if (!isPrivateTtsHost(url.hostname))
+    return 'host'
+  return null
 }
 
 function validLocalConfig(config) {

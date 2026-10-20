@@ -47,7 +47,7 @@ test('a ready cloud host passes every check, each with a detail and no fix', asy
   assert.equal(result.profile, 'cloud')
   assert.equal(result.ok, true)
   assert.equal(result.at, NOW)
-  assert.deepEqual(result.checks.map(check => check.id), ['profile', 'deepseek', 'tts', 'ledger', 'moderation', 'stage', 'avatar', 'obs'])
+  assert.deepEqual(result.checks.map(check => check.id), ['profile', 'deepseek', 'tts', 'ledger', 'replies', 'moderation', 'stage', 'avatar', 'obs'])
   for (const check of result.checks) {
     assert.deepEqual(Object.keys(check), ['id', 'ok', 'detail', 'fix'])
     assert.equal(typeof check.detail, 'string')
@@ -80,7 +80,7 @@ test('unconfigured or mismatched TTS fails for the selected profile', async (con
 
 test('local-voice needs the local provider and a reachable LOCAL_TTS_URL host', async (context) => {
   const directory = await temporaryDirectory(context)
-  const env = { AIRI_PROFILE: 'local-voice', LOCAL_TTS_URL: 'http://user:secret@127.0.0.1:9880/v1/audio/speech?token=abc' }
+  const env = { AIRI_PROFILE: 'local-voice', LOCAL_TTS_URL: 'http://127.0.0.1:9880/v1/audio/speech' }
   const probes = []
   const reachable = await runPreflight(passing(directory, {
     env, speech: LOCAL_SPEECH,
@@ -88,11 +88,26 @@ test('local-voice needs the local provider and a reachable LOCAL_TTS_URL host', 
   }))
   assert.equal(reachable.profile, 'local-voice')
   assert.equal(reachable.ok, true)
-  assert.deepEqual(reachable.checks.map(check => check.id), ['profile', 'deepseek', 'tts', 'local-tts', 'ledger', 'moderation', 'stage', 'avatar', 'obs'])
-  // Only the origin is probed, cheaply, and no credential or query is shown.
+  assert.deepEqual(reachable.checks.map(check => check.id), ['profile', 'deepseek', 'tts', 'local-tts', 'ledger', 'replies', 'moderation', 'stage', 'avatar', 'obs'])
+  // Only the origin is probed, cheaply.
   assert.deepEqual(probes, [['http://127.0.0.1:9880/', 'HEAD', 'manual']])
   assert.match(byId(reachable, 'local-tts').detail, /127\.0\.0\.1:9880 可达（HTTP 405）/)
-  assert.doesNotMatch(JSON.stringify(reachable), /secret|token=abc/)
+  // A URL the local provider would refuse fails without a probe, and its
+  // credential or query is never shown.
+  for (const [url, reason] of [
+    ['http://user:secret@127.0.0.1:9880/', /用户名或密码/],
+    ['http://127.0.0.1:9880/?token=abc', /\? 或 #/],
+    ['http://tts.example.com:9880/', /局域网 IP 或 localhost/],
+    ['', /没有 LOCAL_TTS_URL/],
+  ]) {
+    const before = probes.length
+    const refused = await runPreflight(passing(directory, { env: { ...env, LOCAL_TTS_URL: url }, speech: LOCAL_SPEECH, probe: async (...args) => { probes.push(args); return new Response(null, { status: 200 }) } }))
+    assert.deepEqual(failed(refused), ['local-tts'], url)
+    assert.match(byId(refused, 'local-tts').detail, reason)
+    assert.match(byId(refused, 'local-tts').fix, /基础地址/)
+    assert.equal(probes.length, before, 'no probe of a refused URL')
+    assert.doesNotMatch(JSON.stringify(refused), /secret|token=abc/)
+  }
 
   const down = await runPreflight(passing(directory, { env, speech: LOCAL_SPEECH, probe: async () => { throw new TypeError('fetch failed') } }))
   assert.deepEqual(failed(down), ['local-tts'])
@@ -213,7 +228,7 @@ const fakeSpeech = (health = CLOUD_SPEECH) => ({
   async synthesise() { return CLIP },
 })
 
-async function start(context, { env = { DEEPSEEK_API_KEY: 'test-only' }, speech = fakeSpeech(), blocklist = '坏词\n', locks = [], probe = refuseProbe, startPaused = false } = {}) {
+async function start(context, { env = { DEEPSEEK_API_KEY: 'test-only' }, speech = fakeSpeech(), blocklist = '坏词\n', locks = [], probe = refuseProbe, startPaused = false, replyBudget } = {}) {
   // Removed only after the runtime has stopped (see the after hook below):
   // its audit log writes into root until then, and an rm racing it fails
   // with ENOTEMPTY, which skips the remaining hooks and leaves the server
@@ -236,7 +251,7 @@ async function start(context, { env = { DEEPSEEK_API_KEY: 'test-only' }, speech 
     fetchImpl: async () => { throw new Error('preflight tests must not call DeepSeek') },
     speech,
     live: (deps) => {
-      runtime = createLiveRuntime({ ...deps, env, probeFetch: probe, startPaused, newId: () => `id-${++ids}` })
+      runtime = createLiveRuntime({ ...deps, env, probeFetch: probe, startPaused, newId: () => `id-${++ids}`, ...(replyBudget ? { replyBudget } : {}) })
       return runtime
     },
   })
@@ -407,4 +422,42 @@ test('a pause or panic pressed while the checklist runs wins over the resume', a
   const state = await (await fetch(`${base}/airi/api/live/state`)).json()
   assert.equal(state.control, 'panic')
   assert.equal(state.mode, 'brb')
+})
+
+test('the local-voice setup hint names everything the local provider needs', async (context) => {
+  const directory = await temporaryDirectory(context)
+  const env = { AIRI_PROFILE: 'local-voice', LOCAL_TTS_URL: 'http://127.0.0.1:9880' }
+  const reachable = async () => new Response(null, { status: 404 })
+  const unconfigured = await runPreflight(passing(directory, { env, speech: { configured: false, provider: 'local', model: '' }, probe: reachable }))
+  assert.deepEqual(failed(unconfigured), ['tts'])
+  for (const name of ['TTS_PROVIDER=local', 'LOCAL_TTS_ENABLED=1', 'LOCAL_TTS_URL', 'LOCAL_TTS_MODEL', 'LOCAL_TTS_VOICE'])
+    assert.match(byId(unconfigured, 'tts').fix, new RegExp(name), name)
+  const cloud = await runPreflight(passing(directory, { env, speech: CLOUD_SPEECH }))
+  assert.match(byId(cloud, 'tts').fix, /LOCAL_TTS_ENABLED=1/)
+})
+
+test('a used-up daily reply budget fails the checklist; one reply left passes with a note', async (context) => {
+  const directory = await temporaryDirectory(context)
+  const used = await runPreflight(passing(directory, { replies: { limit: 250, reserved: 250 } }))
+  assert.deepEqual(failed(used), ['replies'])
+  assert.match(byId(used, 'replies').detail, /已用完（250\/250）/)
+  assert.match(byId(used, 'replies').fix, /LIVE_DAILY_REPLY_LIMIT/)
+  const last = await runPreflight(passing(directory, { replies: { limit: 250, reserved: 249 } }))
+  assert.equal(last.ok, true)
+  assert.match(byId(last, 'replies').detail, /还剩 1 次.*只够一回合/)
+  assert.deepEqual(failed(await runPreflight(passing(directory, { replies: { limit: 250, reserved: null } }))), ['replies'])
+})
+
+test('resume is refused while the daily reply budget is used up', async (context) => {
+  const ledger = { day: new Date().toISOString().slice(0, 10), reserved: 0 }
+  const replyBudget = { peek: async () => ({ ...ledger }), reserve: async () => { ledger.reserved++; return { ...ledger } } }
+  const { base } = await start(context, { env: { DEEPSEEK_API_KEY: 'test-only', LIVE_DAILY_REPLY_LIMIT: '1' }, replyBudget })
+  await readyStage(context, base)
+  await control(base, { action: 'pause' })
+  assert.equal((await control(base, { action: 'resume' })).status, 200, 'one reply left')
+  await control(base, { action: 'pause' })
+  ledger.reserved = 1
+  const refused = await control(base, { action: 'resume' })
+  assert.equal(refused.status, 409)
+  assert.deepEqual(failed((await refused.json()).preflight), ['replies'])
 })
