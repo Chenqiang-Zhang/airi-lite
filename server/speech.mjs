@@ -87,6 +87,9 @@ export function createSpeechHandler({
   return {
     health: () => ({ configured: provider.configured, provider: provider.provider, model: provider.model,
       ...(provider.provider === 'minimax' ? { region: provider.region } : {}) }),
+    // false once the character ledger failed closed (it then refuses until
+    // restart); the go-live checklist reports it.
+    ledgerHealthy: () => selectedBudget.healthy?.() !== false,
     // Trusted in-process callers (the live stage route) that have already done
     // their own authorisation. Shares the concurrency cap and the same ledger.
     async synthesise({ text, delivery }, { signal } = {}) {

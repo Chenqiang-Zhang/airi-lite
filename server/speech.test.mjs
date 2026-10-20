@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, rmdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -282,6 +282,21 @@ test('cancel after fetch and failed provider calls retain durable reservations a
   } })
   assert.equal((await run(failed)).status, 502)
   assert.equal(JSON.parse(await readFile(failure.path, 'utf8')).reservedCharacters, 2 * payload.text.length)
+})
+
+test('a TTS ledger that met another process\'s lock reports unhealthy until restart', async (context) => {
+  const { path, budget } = await temporaryBudget(context)
+  let calls = 0
+  const handler = create({ budget, fetchImpl: async () => { calls++; return audioResponse() } })
+  assert.equal(handler.ledgerHealthy(), true)
+  await mkdir(`${path}.lock`)
+  assert.equal(JSON.parse((await run(handler)).body).code, 'TTS_BUDGET_UNAVAILABLE')
+  await rmdir(`${path}.lock`)
+  assert.equal(JSON.parse((await run(handler)).body).code, 'TTS_BUDGET_UNAVAILABLE')
+  assert.equal(handler.ledgerHealthy(), false)
+  assert.equal(calls, 0)
+  // An injected budget without health reporting counts as healthy.
+  assert.equal(create().ledgerHealthy(), true)
 })
 
 test('timeout aborts upstream; upstream and filesystem errors never echo secrets or submitted text', async () => {

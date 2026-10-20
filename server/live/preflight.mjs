@@ -3,6 +3,7 @@ import { mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { localTtsUrlProblem } from '../local-tts.mjs'
+import { snapshotLedgerLocks } from '../tts-budget.mjs'
 
 // The go-live checklist. Every check is {id, ok, detail, fix}: `detail` says
 // what was found and `fix` tells the host what to do, both in the console's
@@ -124,11 +125,23 @@ function checkReplies(replies) {
 }
 
 // The ledgers (TTS characters, daily replies) live directly in .data/. A
-// leftover `<ledger>.lock` directory makes that ledger fail closed until it
-// is removed, and this process keeps treating it as unhealthy until restart.
-async function checkLedger(dataDirectory, fs, now, staleLockMs) {
-  if (!dataDirectory)
-    return pass('ledger', '没有数据目录（测试模式，额度只记在内存里）。')
+// reservation that meets a `<ledger>.lock` held by another process, or fails
+// to write, fails closed, and that ledger keeps refusing in this process
+// until restart (`ledgers` says which). A lock this process is not holding
+// belongs to another process: still running (fresh) or dead (stale).
+const LEDGERS = Object.freeze({ replies: ['回复额度账本', '回复'], speech: ['语音额度账本', '语音'] })
+
+async function checkLedger(dataDirectory, ledgers, fs, now, staleLockMs, snapshotLocks) {
+  const broken = Object.keys(LEDGERS).filter(key => ledgers?.[key] === false).map(key => LEDGERS[key])
+  const brokenDetail = broken.length
+    ? `本进程的${broken.map(([name]) => name).join('和')}出过错（锁被另一个进程占着，或写入失败），重启前${broken.map(([, what]) => what).join('和')}会一直被拒绝。`
+    : ''
+  const restartFix = (stale = false) => `先停掉还在运行的另一个 AIRI 服务（npm run live / mock-live / dev），确认磁盘没满、.data 可写；再停止本服务${stale ? '，删除 .data 里残留的 .lock 文件夹' : ''}，然后重新 npm run live。账本出错后只有重启才会恢复。`
+  if (!dataDirectory) {
+    return broken.length
+      ? fail('ledger', brokenDetail, restartFix())
+      : pass('ledger', '没有数据目录（测试模式，额度只记在内存里）。')
+  }
   const probe = join(dataDirectory, `.preflight-${randomUUID()}.tmp`)
   try {
     await fs.mkdir(dataDirectory, { recursive: true, mode: 0o700 })
@@ -141,25 +154,43 @@ async function checkLedger(dataDirectory, fs, now, staleLockMs) {
   finally {
     await fs.unlink(probe).catch(() => {})
   }
+  // Taken before the locks are read, so a reservation of this process that
+  // starts meanwhile still counts as this process's own.
+  const mightOwn = snapshotLocks()
   const stale = []
+  const held = []
   try {
     for (const name of await fs.readdir(dataDirectory)) {
       if (!name.endsWith('.lock'))
         continue
       const info = await fs.stat(join(dataDirectory, name)).catch(() => null)
-      const age = info ? now() - info.mtimeMs : 0
-      if (info && age >= staleLockMs)
+      if (!info)
+        continue
+      const age = now() - info.mtimeMs
+      if (age >= staleLockMs)
         stale.push(`${name}（${ago(age)}）`)
+      else if (!mightOwn(join(dataDirectory, name)))
+        held.push(`${name}（${ago(age)}）`)
     }
   }
   catch (error) {
     return fail('ledger', `读不了 .data 目录（${error?.code ?? 'error'}）。`, '检查 .data 目录的权限，然后重启。')
   }
+  const found = [
+    brokenDetail,
+    stale.length ? `残留的账本锁：${stale.join('、')}。对应的额度会一直拒绝。` : '',
+    held.length ? `另一个进程正占着账本锁：${held.join('、')}。本服务碰上它就会拒绝额度，直到重启。` : '',
+  ].filter(Boolean)
+  if (!found.length)
+    return pass('ledger', '.data 可写，没有残留的锁。')
+  if (broken.length)
+    return fail('ledger', found.join(''), restartFix(stale.length > 0))
   if (stale.length) {
-    return fail('ledger', `残留的账本锁：${stale.join('、')}。对应的额度会一直拒绝。`,
+    return fail('ledger', found.join(''),
       '先确认没有另一个 AIRI 服务还在运行（npm run live / mock-live / dev），再停止本服务，删除 .data 里这些 .lock 文件夹，然后重新 npm run live。')
   }
-  return pass('ledger', '.data 可写，没有残留的锁。')
+  return fail('ledger', found.join(''),
+    '停掉另一个 AIRI 服务（npm run live / mock-live / dev），它和本服务共用 .data 里的额度账本；然后点「重新检查」。')
 }
 
 function checkModeration({ loaded, problem, terms, ignored = 0 }) {
@@ -212,12 +243,14 @@ function checkObs(primary) {
 }
 
 // Runs every check; never throws. `stage` is the stage bus summary's primary
-// (or null), `speech` the speech handler's health().
+// (or null), `speech` the speech handler's health(), `ledgers` whether the
+// reply and TTS ledgers of this process are still healthy.
 export async function runPreflight({
   env = {},
   deepseek = { configured: false, model: '' },
   speech = null,
   dataDirectory = null,
+  ledgers = { replies: true, speech: true },
   replies = null,
   moderation = { loaded: false, problem: null, terms: 0, ignored: 0 },
   stage = null,
@@ -225,6 +258,7 @@ export async function runPreflight({
   probe = fetch,
   fs = { mkdir, readdir, stat, unlink, writeFile },
   now = Date.now,
+  snapshotLocks = snapshotLedgerLocks,
   staleLockMs = STALE_LOCK_MS,
   probeTimeoutMs = PROBE_TIMEOUT_MS,
 } = {}) {
@@ -235,7 +269,7 @@ export async function runPreflight({
     checkDeepSeek(deepseek),
     checkSpeech(profile, speech),
     ...(profile === 'local-voice' ? [await checkLocalTts(env, probe, probeTimeoutMs)] : []),
-    await checkLedger(dataDirectory, fs, now, staleLockMs),
+    await checkLedger(dataDirectory, ledgers, fs, now, staleLockMs, snapshotLocks),
     checkReplies(replies),
     checkModeration(moderation),
     checkStage(stage, stageUrl),
