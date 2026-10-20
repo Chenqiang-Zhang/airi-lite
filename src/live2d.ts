@@ -10,14 +10,15 @@ import type { DeviceHints } from './speech-mode'
 
 // autoInteract:false is for the OBS stage, which nobody clicks: no pointer
 // tracking and no Tap motion that a stray "Interact" click could trigger.
-export async function mountHiyori(container: HTMLElement, options: { signal?: AbortSignal, deviceHints?: DeviceHints, renderProfile?: AvatarRenderProfile, autoInteract?: boolean } = {}) {
+// fixedFPS is also the stage's: a frame rate that profiles never change.
+export async function mountHiyori(container: HTMLElement, options: { signal?: AbortSignal, deviceHints?: DeviceHints, renderProfile?: AvatarRenderProfile, autoInteract?: boolean, fixedFPS?: 30 | 60 } = {}) {
   const autoInteract = options.autoInteract ?? true
   const scope = createAvatarMountScope(options.signal)
   try {
     scope.assertActive()
     Object.assign(window, { PIXI })
     const deviceHints = options.deviceHints ?? readDeviceHints()
-    let renderBudget = resolveAvatarRenderBudget(deviceHints, window.devicePixelRatio, options.renderProfile)
+    let renderBudget = resolveAvatarRenderBudget(deviceHints, window.devicePixelRatio, options.renderProfile, options.fixedFPS)
     const contextAntialias = renderBudget.antialias
     const app = new PIXI.Application({
       width: Math.max(1, container.clientWidth),
@@ -101,7 +102,7 @@ export async function mountHiyori(container: HTMLElement, options: { signal?: Ab
       get renderBudget() { return { ...renderBudget } },
       setRenderProfile(profile: AvatarRenderProfile) {
         if (!scope.disposed) {
-          const next = resolveAvatarRenderBudget(deviceHints, window.devicePixelRatio, profile)
+          const next = resolveAvatarRenderBudget(deviceHints, window.devicePixelRatio, profile, options.fixedFPS)
           applyAvatarRenderBudget(app, next)
           // Keep an honest report of the existing WebGL context's AA policy.
           renderBudget = { ...next, antialias: contextAntialias }

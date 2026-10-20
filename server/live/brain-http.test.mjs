@@ -201,7 +201,7 @@ test('panic drops every waiting candidate and the interrupted context; resume st
   assert.deepEqual(panic.queue.open, [])
   assert.deepEqual(panic.queue.recent.slice(0, 2).map(item => [item.status, item.detail]), [['dropped', 'panic'], ['dropped', 'panic']])
   assert.equal(panic.brain.historyRounds, 0)
-  await control(base, { action: 'resume' })
+  await control(base, { action: 'resume', skipPreflight: true })
   await control(base, { action: 'inject', text: '重新开始' })
   await until(() => model.requests.length === 2, 'second request')
   assert.equal(model.requests[1].messages.length, 2, 'system prompt and the new message only')

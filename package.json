@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "node --env-file-if-exists=.env.local server/index.mjs",
     "build": "vue-tsc --noEmit && vite build",
-    "start": "NODE_ENV=production node --env-file-if-exists=.env.local server/index.mjs",
-    "test": "node --test 'server/**/*.test.mjs' 'src/**/*.test.mjs' 'shared/**/*.test.mjs' 'scripts/**/*.test.mjs'",
+    "start": "node scripts/run-live.mjs --start",
+    "live": "node scripts/run-live.mjs",
+    "test": "node --test \"server/**/*.test.mjs\" \"src/**/*.test.mjs\" \"shared/**/*.test.mjs\" \"scripts/**/*.test.mjs\"",
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {

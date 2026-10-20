@@ -349,7 +349,7 @@ test('stop, pause, resume, panic and reload drive the stage and gate new lines',
   const paused = await control(base, { action: 'say', text: '暂停中。' })
   assert.equal(paused.status, 409)
   assert.deepEqual(await paused.json(), { code: 'LIVE_PAUSED' })
-  assert.equal((await control(base, { action: 'resume' })).status, 200)
+  assert.equal((await control(base, { action: 'resume', skipPreflight: true })).status, 200)
   const next = await (await control(base, { action: 'say', text: '紧急停止前。' })).json()
 
   const panic = await (await control(base, { action: 'panic' })).json()
@@ -364,7 +364,7 @@ test('stop, pause, resume, panic and reload drive the stage and gate new lines',
   const reconnect = await openStage(context, base, 'preview')
   assert.equal((await reconnect.next('hello')).mode, 'brb', 'a new page starts on the brb screen')
 
-  assert.equal((await control(base, { action: 'resume' })).status, 200)
+  assert.equal((await control(base, { action: 'resume', skipPreflight: true })).status, 200)
   assert.deepEqual(await stage.next('mode'), { mode: 'live' })
   assert.equal((await control(base, { action: 'reload-stage' })).status, 200)
   assert.deepEqual(await stage.next('reload'), {})
