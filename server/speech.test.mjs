@@ -83,6 +83,15 @@ test('input permits only bounded well-formed text and delivery; no client identi
     assert.throws(() => normaliseSpeechRequest(invalid), { code: 'TTS_INVALID_REQUEST' })
 })
 
+test('a self-hosted confirmation is accepted by name only and never carries a region', () => {
+  assert.deepEqual(normaliseSpeechRequest({ ...payload, expectedProvider: 'local' }),
+    { ...payload, expectedProvider: 'local' })
+  for (const invalid of [{ ...payload, expectedProvider: 'Local' }, { ...payload, expectedProvider: 'local ' },
+    { ...payload, expectedProvider: 'local', expectedRegion: 'cn' },
+    { ...payload, expectedProvider: 'local', expectedRegion: 'global' }])
+    assert.throws(() => normaliseSpeechRequest(invalid), { code: 'TTS_INVALID_REQUEST' })
+})
+
 test('success returns only the MP3 contract and reserves exactly twice the entire text length before fetch', async () => {
   const order = []
   const handler = create({

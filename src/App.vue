@@ -106,7 +106,7 @@ const avatarMountController = new AbortController()
 let viewDisposed = false
 let latestMouth: { opening: number | null, form: number, beat: number | null } = { opening: 0, form: 0, beat: null }
 let speech: ReturnType<typeof createSpeechController> | null = null
-let activeCloudProvider: 'minimax' | 'elevenlabs' = 'minimax'
+let activeCloudProvider: 'minimax' | 'elevenlabs' | 'local' = 'minimax'
 let activeCloudRegion: 'cn' | 'global' = 'cn'
 let chatScroll: ReturnType<typeof createChatScrollController> | null = null
 const restoredMessages = loadConversation()
@@ -177,7 +177,8 @@ onMounted(async () => {
       if (!signal.aborted && !viewDisposed)
         lastCloudUsage.value = clip.usage ? {
           ...clip.usage, label: provider === 'minimax'
-            ? region === 'cn' ? 'MiniMax · 国内' : 'MiniMax · 国际' : 'ElevenLabs',
+            ? region === 'cn' ? 'MiniMax · 国内' : 'MiniMax · 国际'
+            : provider === 'local' ? '自托管语音' : 'ElevenLabs',
         } : null
       return clip
     },
@@ -554,7 +555,8 @@ function applyVoice() {
 function pinCloudProvider() {
   // Pin vendor and region for the run, not whichever health responds later.
   // The server compares both before reserving or sending reply text upstream.
-  activeCloudProvider = cloudService.value.provider === 'elevenlabs' ? 'elevenlabs' : 'minimax'
+  const provider = cloudService.value.provider
+  activeCloudProvider = provider === 'elevenlabs' || provider === 'local' ? provider : 'minimax'
   activeCloudRegion = cloudService.value.region === 'global' ? 'global' : 'cn'
   lastCloudUsage.value = null
 }

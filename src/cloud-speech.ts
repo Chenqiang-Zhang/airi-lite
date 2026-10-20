@@ -38,7 +38,7 @@ export interface CloudSpeechOptions {
   delivery: Delivery
   // Match the explicitly confirmed service; this cannot select the server's
   // provider. Existing callers default to MiniMax rather than a new paid one.
-  expectedProvider?: 'minimax' | 'elevenlabs'
+  expectedProvider?: 'minimax' | 'elevenlabs' | 'local'
   expectedRegion?: 'cn' | 'global'
   accessCode?: string
   signal?: AbortSignal
@@ -370,7 +370,7 @@ export async function fetchCloudSpeech(
 ): Promise<CloudSpeechClip> {
   throwIfAborted(options.signal)
   const expectedProvider = options.expectedProvider === undefined ? 'minimax' : options.expectedProvider
-  if (expectedProvider !== 'minimax' && expectedProvider !== 'elevenlabs')
+  if (expectedProvider !== 'minimax' && expectedProvider !== 'elevenlabs' && expectedProvider !== 'local')
     throw new SpeechApiError('invalid_request')
   if (options.expectedRegion !== undefined
     && (expectedProvider !== 'minimax' || !['cn', 'global'].includes(options.expectedRegion)))
@@ -437,8 +437,11 @@ export async function decodeCloudSpeechResponse(
   try {
     const payload = await readBoundedJson(response, options.signal)
     throwIfAborted(options.signal)
-    if (!record(payload) || payload.format !== 'mp3'
-      || (payload.sampleRate !== 32000 && payload.sampleRate !== 44100))
+    // The rate is only a hint for creating the decoding context; the decoded
+    // buffer's own rate and duration are validated below.
+    if (!record(payload) || (payload.format !== 'mp3' && payload.format !== 'wav')
+      || typeof payload.sampleRate !== 'number' || !Number.isInteger(payload.sampleRate)
+      || payload.sampleRate < 8000 || payload.sampleRate > 96000)
       throw new SpeechApiError('invalid_response')
     const requestedSampleRate = payload.sampleRate
     const encoded = decodeBase64(payload.audio)

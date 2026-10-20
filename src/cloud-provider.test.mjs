@@ -9,6 +9,8 @@ test('only known provider/model pairs enable cloud; labels are fixed rather than
     ['minimax', 'speech-2.8-turbo', 'MiniMax · 国内', 'cn', 'minimax:cn'],
     ['minimax', 'speech-2.8-hd', 'MiniMax · 国际', 'global', 'minimax:global'],
     ['elevenlabs', 'eleven_v4', 'ElevenLabs', null, 'elevenlabs'],
+    ['local', 'cosyvoice2', '自托管语音', null, 'local'],
+    ['local', 'FunAudioLLM/CosyVoice2-0.5B', '自托管语音', null, 'local'],
   ]) {
     assert.deepEqual(readCloudSpeechService({ configured: true, provider, model, region, label: 'untrusted' }),
       { configured: true, provider, model, label, region, scope })
@@ -23,6 +25,9 @@ test('unknown, missing, mismatched and unsupported Turbo health fails closed wit
     { configured: true, provider: 'elevenlabs', model: 'speech-2.8-hd' },
     { configured: true, provider: 'minimax', model: 'eleven_v4' },
     { configured: true, provider: 'unknown', model: 'eleven_v4' },
+    { configured: true, provider: 'local', model: '' }, { configured: true, provider: 'local' },
+    { configured: true, provider: 'local', model: '<b>x</b>' }, { configured: true, provider: 'local', model: 'a b' },
+    { configured: true, provider: 'local', model: 'm'.repeat(129) }, { configured: true, provider: 'Local', model: 'cosyvoice2' },
     { configured: true, provider: 'minimax', model: { toString() { throw new Error('no coercion') } } }]) {
     assert.deepEqual(readCloudSpeechService(value),
       { configured: false, provider: 'unavailable', label: '云端语音', model: '', region: null, scope: null })
@@ -106,4 +111,21 @@ test('unexpected MiniMax regions fail closed instead of inventing a cn/global di
     assert.equal(status.configured, false)
     assert.equal(status.scope, null)
   }
+})
+
+test('a self-hosted engine needs its own consent and never inherits a cloud vendor grant', () => {
+  const values = new Map()
+  const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) }
+  const local = readCloudSpeechService({ configured: true, provider: 'local', model: 'cosyvoice2', region: 'cn' })
+  assert.equal(local.region, null)
+  for (const consent of [null, 'minimax:cn', 'minimax:global', 'elevenlabs'])
+    assert.equal(resolveConsentedSpeechMode('cloud', {}, local, consent).engine, 'browser')
+  saveCloudProviderConsent('local', storage)
+  assert.equal(loadCloudProviderConsent(storage), 'local')
+  assert.equal(resolveConsentedSpeechMode('cloud', {}, local, loadCloudProviderConsent(storage)).engine, 'cloud')
+  const mini = readCloudSpeechService({ configured: true, provider: 'minimax', model: 'speech-2.8-hd' })
+  assert.equal(resolveConsentedSpeechMode('cloud', {}, mini, 'local').engine, 'browser')
+  assert.equal(resolveConsentedSpeechMode('cloud', {}, { ...local, configured: false }, 'local').engine, 'browser')
+  // A legacy v1 value never names the local engine.
+  assert.equal(loadCloudProviderConsent({ getItem: key => key === LEGACY_CLOUD_PROVIDER_CONSENT_KEY ? 'local' : null }), null)
 })

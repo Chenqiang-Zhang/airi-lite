@@ -15,7 +15,7 @@ export interface ProviderStatus {
   accessProtected: boolean
   speech?: {
     configured: boolean
-    provider: 'minimax' | 'elevenlabs' | 'unavailable'
+    provider: 'minimax' | 'elevenlabs' | 'local' | 'unavailable'
     model: string
     region?: 'cn' | 'global' | null
   }
