@@ -196,11 +196,14 @@ test('a runtime that starts paused asks DeepSeek nothing until the first resume'
   assert.equal(model.calls, 0, 'a refused resume starts nothing')
   assert.equal((await control(base, { action: 'resume', skipPreflight: true })).status, 200)
   await until(() => said.length === 1, 'first reply after resume')
-  // Both items waited through the pause and are answered together.
-  assert.equal(model.requests[0].messages.at(-1).content, [
+  // Both items waited through the pause and are answered together, followed
+  // by the turn's guide (a host line and a greeting: the time is hinted).
+  const [host, danmaku, guide] = model.requests[0].messages.at(-1).content.split('\n')
+  assert.deepEqual([host, danmaku], [
     '<viewer_message from="主播" kind="host">开播前打个招呼</viewer_message>',
     '<viewer_message from="甲" kind="danmaku">在吗</viewer_message>',
-  ].join('\n'))
+  ])
+  assert.match(guide, /^<reply_guide>这轮回一到三句，90 字以内，像直播时随口接话；现在是(?:早上|上午|中午|下午|晚上|深夜)。<\/reply_guide>$/)
 })
 
 test('a data directory gets the reply ledger and an owner-only audit log', async (context) => {

@@ -214,7 +214,11 @@ const fakeSpeech = (health = CLOUD_SPEECH) => ({
 })
 
 async function start(context, { env = { DEEPSEEK_API_KEY: 'test-only' }, speech = fakeSpeech(), blocklist = '坏词\n', locks = [], probe = refuseProbe, startPaused = false } = {}) {
-  const root = await temporaryDirectory(context)
+  // Removed only after the runtime has stopped (see the after hook below):
+  // its audit log writes into root until then, and an rm racing it fails
+  // with ENOTEMPTY, which skips the remaining hooks and leaves the server
+  // open (the file then never finishes).
+  const root = await mkdtemp(join(tmpdir(), 'airi-preflight-'))
   if (blocklist !== null) {
     await mkdir(join(root, '.data', 'moderation'), { recursive: true })
     await writeFile(join(root, '.data', 'moderation', 'blocklist.txt'), blocklist)
@@ -242,6 +246,7 @@ async function start(context, { env = { DEEPSEEK_API_KEY: 'test-only' }, speech 
     await handler.stop()
     server.closeAllConnections()
     await new Promise(resolve => server.close(resolve))
+    await rm(root, { recursive: true, force: true, maxRetries: 3 })
   })
   await runtime.ready
   const events = []

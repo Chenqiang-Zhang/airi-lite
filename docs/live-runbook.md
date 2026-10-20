@@ -37,9 +37,9 @@ Windows 额外注意：
 | `DEEPSEEK_MODEL` / `DEEPSEEK_BASE_URL` | 否 | `deepseek-flash` / `https://api.deepseek.com` | |
 | `LIVE_DAILY_REPLY_LIMIT` | 否 | `250`（1–5000） | 每天最多调用几次大脑（含失败和中止的调用），记在 `.data/live-reply-budget.json`。用完自动暂停。 |
 | `LIVE_MAX_TOKENS` | 否 | `160`（32–400） | 每条直播回复的最大输出 token。 |
-| `TTS_PROVIDER` | 否 | `minimax` | `minimax`、`elevenlabs`；本地语音接入后为 `local`。 |
+| `TTS_PROVIDER` | 否 | `minimax` | `minimax`、`elevenlabs` 或 `local`（`local-voice` 档位用）。 |
 | `MINIMAX_TTS_ENABLED`、`MINIMAX_API_KEY`、`MINIMAX_VOICE_ID`、`MINIMAX_TTS_DAILY_CHAR_LIMIT` | `cloud` 档位必需 | `MINIMAX_TTS_ENABLED=0` | 四项都要填，`ENABLED=1` 才会花钱。可选 `MINIMAX_TTS_MODEL`（`speech-2.8-turbo`）、`MINIMAX_TTS_REGION`（`cn`）。细节见 `.env.example`。 |
-| `LOCAL_TTS_URL` 等 `LOCAL_TTS_*` | `local-voice` 档位必需 | — | 本地 TTS 引擎地址（OpenAI 兼容的 `/v1/audio/speech`）。本地语音由另一个改动接入，模型、音色、格式等变量以它的说明为准。预检会对这个地址的主机做一次很轻的 HEAD 请求，确认引擎开着。 |
+| `LOCAL_TTS_URL` 等 `LOCAL_TTS_*` | `local-voice` 档位必需 | — | 本地 TTS 引擎地址（OpenAI 兼容的 `/v1/audio/speech`）。模型、音色、格式等变量见 `docs/local-tts.md` 和 `.env.example`。预检会对这个地址的主机做一次很轻的 HEAD 请求，确认引擎开着。 |
 | `BILIBILI_OPEN_ACCESS_KEY_ID`、`BILIBILI_OPEN_ACCESS_KEY_SECRET`、`BILIBILI_OPEN_APP_ID`、`BILIBILI_OPEN_CODE` | 现在不需要 | — | B 站开放平台凭据。目前只有 `scripts/bili-probe.mjs` 读取，直播服务还不读（M5 接入弹幕时才用）。 |
 | `MOCK_LIVE_PORT`、`MOCK_SAY_VOICE` | 否 | `4176` / 自动 | 只给零费用彩排用。 |
 
