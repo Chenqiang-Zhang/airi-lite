@@ -11,8 +11,10 @@ const payload = () => ({
 })
 const health = (extra = {}) => Response.json({ configured: true, model: 'test-model', accessProtected: false, ...extra })
 const ndjson = events => new Response(events.map(event => JSON.stringify(event)).join('\n') + '\n')
+// What /api/chat streams: an act event is evidence, never part of the text.
 const replyEvents = [
-  { type: 'delivery', value: 'bright' },
+  { type: 'delivery', value: 'happy' },
+  { type: 'act', value: 'laugh' },
   { type: 'delta', content: '好耶！' },
   { type: 'delta', content: '一起走。' },
   { type: 'done' },

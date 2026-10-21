@@ -55,8 +55,9 @@ export async function openDeepSeekStream({
     throw new DeepSeekRequestError(502, 'DeepSeek 没有返回响应内容')
 
   return {
-    // Emits {type:'delta'|'delivery'} events in order; resolves with whether
-    // max_tokens cut the reply and the provider's token usage, if reported.
+    // Emits {type:'delta'|'delivery'|'act'} events in order (see
+    // delivery-cue.mjs); resolves with whether max_tokens cut the reply and
+    // the provider's token usage, if reported.
     relay: onEvent => relayDeepSeekStream(upstream.body, onEvent),
   }
 }

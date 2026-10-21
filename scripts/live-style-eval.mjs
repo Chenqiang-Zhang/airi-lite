@@ -34,6 +34,7 @@ import { createCandidateQueue } from '../server/live/queue.mjs'
 import { COMMON_PAIRS, countChars, hanGrams, lintStyle, META_WORDS, openerOf, SENSE_CLAIMS, shapeReply, withoutProtected } from '../server/live/style.mjs'
 import { REPLY_CONTROL } from '../server/live/text.mjs'
 import { planUtterance, screenUtterance } from '../server/live/utterance.mjs'
+import { normaliseActCues } from '../shared/performance-cues.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 export const DEFAULT_CASES = join(root, 'server/live/fixtures/style-cases.jsonl')
@@ -64,6 +65,16 @@ const RECENT_WINDOW = 8
 
 const letters = text => (String(text).match(/[\p{L}\p{N}]/gu) ?? []).join('')
 const share = (count, total) => (total ? count / total : 0)
+
+// Acts written into the transcript where they are performed, so a blind
+// reviewer reading it "hears" the laugh, sigh or pause too.
+export const ACT_LABELS = Object.freeze({ laugh: '〔笑〕', sigh: '〔叹气〕', pause: '〔停顿〕' })
+export function renderActs(text, actCues = []) {
+  let rendered = String(text)
+  for (const cue of normaliseActCues(actCues, rendered.length).reverse())
+    rendered = `${rendered.slice(0, cue.start)}${ACT_LABELS[cue.act]}${rendered.slice(cue.start)}`
+  return rendered
+}
 
 // The character's own lines, and the viewer side, of the live examples.
 export function exampleReplies(examples = LIVE_PERSONA_OVERRIDES.dialogueExamples) {
@@ -179,16 +190,18 @@ export function checkRules(final, testCase) {
   return failures
 }
 
-// One result from what the model said first (`raw`) and what would be
-// spoken (`final`). Everything derived is recomputed here, so a saved run
-// can be re-measured with newer checks.
-export function measure(testCase, { sample = 0, raw, final, delivery = 'neutral', attempts = 1, gate = 'ok', blocked = false, usage = [] }, { replies = exampleReplies() } = {}) {
+// One result from what the model said first (`raw`, with the acts it wrote,
+// `rawActCues`) and what would be spoken (`final`, with the acts performed,
+// `actCues`). Everything derived is recomputed here, so a saved run can be
+// re-measured with newer checks.
+export function measure(testCase, { sample = 0, raw, final, delivery = 'neutral', actCues = [], rawActCues = [], attempts = 1, gate = 'ok', blocked = false, usage = [] }, { replies = exampleReplies() } = {}) {
   const budget = replyLengthBudget(testCase.batch)
   const first = raw ? shapeReply(raw, [], budget).report : null
   const echoed = viewerText(testCase)
   const metaPattern = new RegExp(META_WORDS.source, 'gu')
   // An honest answer ("我只读得到弹幕") is required wording, not backstage talk.
   const meta = [...withoutProtected(String(final ?? '')).matchAll(metaPattern)].some(match => !echoed.includes(match[0]))
+  const performed = normaliseActCues(actCues, String(final ?? '').length)
   return {
     id: testCase.id,
     sample,
@@ -200,6 +213,14 @@ export function measure(testCase, { sample = 0, raw, final, delivery = 'neutral'
     raw: raw ?? '',
     final: final ?? '',
     delivery,
+    actCues: performed,
+    rawActCues: normaliseActCues(rawActCues, String(raw ?? '').length),
+    // The kinds performed ('laugh', 'sigh', 'pause'), at most one.
+    acts: performed.map(cue => cue.act),
+    // Shaping removed an aside the model wrote itself ("（bushi）", or a
+    // sound such as "(laughs)" or "<laughter>" where the prompt asks for
+    // [[act:…]]).
+    rawAside: Boolean(first?.fixed.includes('aside')),
     attempts,
     // The model's own first reply already fitted the turn, before shaping.
     rawWithinBudget: Boolean(first && first.droppedForBudget === 0 && !first.hits.length
@@ -255,14 +276,17 @@ function createEvalBrain(open, { systemPrompt, now }) {
     deepseek: {
       configured: true,
       async open(messages) {
-        const call = { raw: '', usage: null }
+        const call = { raw: '', acts: [], usage: null }
         current.calls.push(call)
         const stream = await open(messages)
         return {
           async relay(onEvent) {
             const result = await stream.relay((event) => {
+              // Stripped per delta like the brain, so act offsets line up.
               if (event.type === 'delta')
-                call.raw += event.content
+                call.raw += event.content.replace(REPLY_CONTROL, '')
+              else if (event.type === 'act')
+                call.acts.push({ start: call.raw.length, act: event.value })
               onEvent(event)
             })
             call.usage = result.usage ?? null
@@ -292,9 +316,11 @@ function createEvalBrain(open, { systemPrompt, now }) {
     const said = outcome.type === 'brain.reply' ? current.said : null
     const result = measure(testCase, {
       sample,
-      raw: current.calls[0]?.raw.replace(REPLY_CONTROL, '').trimEnd() ?? '',
+      raw: current.calls[0]?.raw.trimEnd() ?? '',
       final: said?.text ?? '',
       delivery: said?.delivery ?? 'neutral',
+      actCues: said?.acts ?? [],
+      rawActCues: current.calls[0]?.acts ?? [],
       attempts: current.calls.length,
       gate: said ? 'ok' : outcome.data.reason ?? (outcome.type === 'brain.error' ? outcome.data.message : outcome.type),
       blocked: outcome.type === 'brain.blocked',
@@ -302,7 +328,7 @@ function createEvalBrain(open, { systemPrompt, now }) {
     }, replies ? { replies } : undefined)
     if (said) {
       // The stage reports the sentences it synthesised; history keeps those.
-      const spoken = (await planUtterance({ text: said.text, delivery: said.delivery, cues: said.cues })).map(sentence => sentence.text)
+      const spoken = (await planUtterance({ text: said.text, delivery: said.delivery, cues: said.cues, acts: said.acts })).map(sentence => sentence.text)
       hub.publish('turn.ended', { turnId: `t${turnId}`, outcome: 'played', spoken })
       cooldown?.()
       cooldown = null
@@ -479,6 +505,10 @@ export function summarise(results, { session = false, replies = exampleReplies()
     senseClaims: answered.filter(result => result.senseClaim).map(result => result.id),
     spoken: share(answered.filter(result => result.spoken).length, answered.length),
     laughs: answered.filter(result => result.laughs).length,
+    // Most replies should have no act; these are for a human to judge.
+    actShare: share(answered.filter(result => result.acts?.length).length, answered.length),
+    actKinds: Object.fromEntries(Object.keys(ACT_LABELS).map(act => [act, answered.filter(result => result.acts?.includes(act)).length])),
+    rawAsides: results.filter(result => result.rawAside).length,
     recentRepeat: repeats ? share(repeats.length, answered.length) : null,
     recentRepeats: repeats,
     promptTokens: usage.reduce((sum, item) => sum + (Number(item?.prompt_tokens) || 0), 0),
@@ -536,6 +566,7 @@ export function formatReport({ results, summary, mode = { samples: 1, session: f
     `原回复命中客服腔：${summary.rawHitCases} 条；被输出闸门拦下：${summary.gateBlocked} 条；没有可说内容：${summary.results - summary.answered} 条。`,
     `字数（字母和数字）：原回复中位数 ${summary.rawChars.median}、P90 ${summary.rawChars.p90}；最终中位数 ${summary.finalChars.median}、P90 ${summary.finalChars.p90}。`,
     `口语痕迹（哈哈、嗯/诶开头、……、叠词）：${percent(summary.spoken)}，其中带「哈哈」${summary.laughs} 条（仅供参考）。`,
+    `副语言动作：${percent(summary.actShare)} 的回复带一个（笑 ${summary.actKinds.laugh}、叹气 ${summary.actKinds.sigh}、停顿 ${summary.actKinds.pause}），逐条里写作${Object.values(ACT_LABELS).join('')}；模型自己写出、被整形删掉的旁白或音效：${summary.rawAsides} 条。`,
     `常见开头：${summary.topOpeners.map(item => `「${item.opener || '（空）'}」${item.count}`).join('，') || '无'}。`,
     `共用短语：${summary.sharedPhrases.slice(0, 10).map(item => `「${item.phrase}」${item.ids.length}`).join('，') || '无'}。`,
     `同类套话：${summary.groupTemplates.map(item => `${item.group}「${item.phrase}」${item.ids.length}/${item.of}`).join('，') || '无'}。`,
@@ -548,18 +579,21 @@ export function formatReport({ results, summary, mode = { samples: 1, session: f
     '| 场景 | 弹幕 | 最终回复 | 字数 | 备注 |',
     '|---|---|---|---|---|',
     ...results.map((result) => {
+      const final = renderActs(result.final, result.actCues)
+      const raw = renderActs(result.raw, result.rawActCues)
       const notes = [
-        result.final !== result.raw && `原文：${result.raw || '（空）'}`,
+        final !== raw && `原文：${raw || '（空）'}`,
         result.rawHits.length && `命中 ${result.rawHits.join('、')}`,
         result.attempts > 1 && '重试过',
         result.gate !== 'ok' && `闸门：${result.gate}`,
         result.closestExample.similarity >= COPY_SIMILARITY && `像示例：${result.closestExample.example}`,
         result.ruleFailures.length && result.final && `规则：${result.ruleFailures.join('、')}`,
         result.senseClaim && '假装能听/能玩',
+        result.rawAside && '删了模型自己写的旁白或音效',
       ].filter(Boolean).join('；')
       const batch = result.batch.replace(/<viewer_message from="([^"]*)" kind="(\w+)"(?: amount="([^"]*)")?>/g, (_, from, kind, amount) => `${kind === 'superchat' ? `SC ${amount}` : kind === 'host' ? '' : '弹幕'}（${from}）：`).replaceAll('</viewer_message>', ' ')
       const name = mode.samples > 1 ? `${result.id}#${result.sample + 1}` : result.id
-      return `| ${cell(name)} | ${cell(batch.trim())} | ${cell(result.final || '（无）')} | ${result.finalChars} | ${cell(notes)} |`
+      return `| ${cell(name)} | ${cell(batch.trim())} | ${cell(final || '（无）')} | ${result.finalChars} | ${cell(notes)} |`
     }),
     '',
   ]

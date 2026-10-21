@@ -11,7 +11,7 @@ const payload = () => ({
 })
 const health = (extra = {}) => Response.json({ configured: true, model: 'test-model', accessProtected: false, ...extra })
 const ndjson = events => new Response(events.map(event => JSON.stringify(event)).join('\n') + '\n')
-const reply = text => [{ type: 'delivery', value: 'bright' }, { type: 'delta', content: text }, { type: 'done' }]
+const reply = text => [{ type: 'delivery', value: 'happy' }, { type: 'delta', content: text }, { type: 'done' }]
 
 test('validates the entire plan, all turns, persona, and memory before any network request', async () => {
   const late = { id: 'second', turns: ['valid', 'valid', '中'.repeat(8_001)] }
@@ -57,8 +57,10 @@ test('relays actual successful assistant text, normalizes input, and isolates tr
       assert.equal(lines.length, packets.length, 'previous evidence must be recorded before the next text request')
       packets.push(JSON.parse(options.body))
       const answer = answers[packets.length - 1]
+      // An act event between deltas never enters the assistant text.
       return ndjson([
-        { type: 'delivery', value: 'bright' },
+        { type: 'delivery', value: 'happy' },
+        { type: 'act', value: 'sigh' },
         { type: 'delta', content: answer.slice(0, 3) },
         { type: 'delta', content: answer.slice(3) },
         { type: 'done' },
@@ -81,7 +83,7 @@ test('relays actual successful assistant text, normalizes input, and isolates tr
   ])
   assert.deepEqual(lines.map(line => line.content.context), packets.map(packet => packet.messages))
   assert.ok(lines.every(line => line.evidence.requestedModel === 'test-model' && line.evidence.observedAt === '2026-10-02T00:00:00.000Z'))
-  assert.ok(lines.every(line => line.evidence.serverEvents.length === 4))
+  assert.ok(lines.every(line => line.evidence.serverEvents.length === 5 && line.evidence.serverEvents[1].type === 'act'), 'the act is kept as evidence')
   assert.ok(!JSON.stringify(lines).includes('test-code'))
   assert.deepEqual(timeouts, Array(10).fill(90_000))
   assert.ok(calls.every(call => call.options.redirect === 'error'))

@@ -1,7 +1,9 @@
 import type { PersonaConfig } from './persona'
 import type { Delivery } from './delivery'
+import type { Act } from '../shared/performance-cues.mjs'
 import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code.ts'
 import { normaliseChatRequest } from '../shared/chat-request.mjs'
+import { isAct, normaliseEmotion } from '../shared/performance-cues.mjs'
 
 export interface ChatMessage {
   role: 'assistant' | 'user'
@@ -22,7 +24,7 @@ export interface ProviderStatus {
 }
 
 interface StreamEvent {
-  type: 'delta' | 'delivery' | 'done' | 'error'
+  type: 'delta' | 'delivery' | 'act' | 'done' | 'error'
   content?: string
   message?: string
   value?: string
@@ -62,6 +64,8 @@ export async function streamChat(options: {
   accessCode?: string
   onDelta: (content: string) => void
   onDelivery?: (delivery: Delivery) => void
+  // A one-off laugh, sigh or pause before the text that follows it.
+  onAct?: (act: Act) => void
 }): Promise<ChatResult> {
   if (options.accessCode && !isValidAccessCode(options.accessCode))
     throw new ChatApiError(INVALID_ACCESS_CODE_MESSAGE)
@@ -106,8 +110,15 @@ export async function streamChat(options: {
     if (event.type === 'done' && event.truncated === true)
       truncated = true
 
-    if (event.type === 'delivery' && ['neutral', 'soft', 'bright', 'curious'].includes(event.value ?? ''))
-      options.onDelivery?.(event.value as Delivery)
+    // A cached server may still send 'bright'; an unknown tone is ignored.
+    if (event.type === 'delivery') {
+      const delivery = normaliseEmotion(event.value)
+      if (delivery)
+        options.onDelivery?.(delivery)
+    }
+
+    if (event.type === 'act' && isAct(event.value))
+      options.onAct?.(event.value)
 
     if (event.type === 'delta' && event.content) {
       completeText += event.content

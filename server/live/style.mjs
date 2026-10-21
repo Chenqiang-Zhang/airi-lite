@@ -1,9 +1,12 @@
+import { SOUND_TAG } from './moderation.mjs'
+
 // Shapes a live reply before the output gate, so the stage sounds like a
 // person chatting rather than a chatbot answering: markdown, emoji and TTS
 // asides are removed, sentences with customer-service tells are dropped, and
 // the reply is cut to whole sentences within the turn's length budget.
 // Nothing here adds words. Tone cue offsets are remapped so each tone stays
-// on the sentence it was written for. What the safety rules require (an AI
+// on the sentence it was written for, and an act (a laugh, a sigh, a pause)
+// stays before its words or goes with them. What the safety rules require (an AI
 // admission, a pointer to help) is never removed. Soft signals (a trailing
 // question, the opening words, backstage words, claims to hear or play) are
 // only reported.
@@ -38,16 +41,31 @@ export const PROTECTED = new RegExp(`${ADMISSION.source}|${REFERRAL.source}`, 'i
 
 // Removed in place: they are never read aloud and only look machine-made.
 // Backticks stay: a code block is unspeakable and the gate drops it as such.
+// The passes repeat until nothing changes, so "( **laughs**)" loses its
+// "**" and then its aside, and an invisible character or emoji inside a tag
+// cannot hide it from shaping while the gate (which drops invisibles) sees it.
 const FIXES = Object.freeze([
+  { id: 'invisible', pattern: /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu },
   { id: 'markdown', pattern: /\*\*|__/gu },
   // "1. " or "1、" opening a line; "1.5 倍速" and a "3、2、1" countdown are
   // not lists.
   { id: 'list-marker', pattern: /^[ \t]*(?:#{1,6}[ \t]+|[-*•][ \t]+|\d{1,2}[.)）][ \t]+|\d{1,2}、(?!\d))/gmu },
   { id: 'emoji', pattern: /(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\u200d|\ufe0f)+/gu },
-  // "（bushi）", "(laughs)", "<#0.5#>": B站 asides and TTS controls the
-  // speech provider would act on. "（AI）" is a word, not an aside.
-  { id: 'aside', pattern: /[（(]\s*(?![Aa][Ii]\s*[)）])[A-Za-z][A-Za-z -]{1,24}\s*[)）]|<#[\d.]+#>/gu },
+  // "（bushi）", "(laughs)", "<#0.5#>", "<laughter>", '<break time="2s"/>':
+  // B站 asides, TTS controls and sound or SSML tags a speech provider would
+  // act on. A laugh the model wrote itself is removed, never turned into an
+  // act. "（AI）" is a word, not an aside; "1<2" and "<3" are not tags, and a
+  // tag is only a name and name=value attributes, so "a<b and b>c" and
+  // "<Hollow Knight>" are text. The output gate blocks the same shapes
+  // (moderation.mjs TTS_MARKUP and SOUND_TAG).
+  { id: 'aside', pattern: /[（(]\s*(?![Aa][Ii]\s*[)）])[A-Za-z][A-Za-z -]{1,24}\s*[)）]|<#\s*\d+(?:\.\d+)?\s*#>/gu },
+  { id: 'aside', pattern: new RegExp(SOUND_TAG.source, 'giu') },
 ])
+const MAX_FIX_PASSES = 4
+
+// An act is performed before words; one with none after it has nothing to do.
+const SPOKEN_AFTER = /[\p{L}\p{N}]/u
+export const hasWordsAfter = (text, start) => SPOKEN_AFTER.test(text.slice(start))
 
 const lettersOf = text => (String(text).match(COUNTED) ?? []).join('')
 
@@ -96,8 +114,12 @@ export function splitSentences(text) {
 // Removes the given spans, or replaces them with `replace`. A cue inside a
 // changed span moves to where that span was, so it applies to whatever
 // follows; of several cues landing on one offset, the last (the most recent
-// tone) wins.
-export function removeRanges(text, cues, ranges) {
+// tone) wins. Acts are a list of their own and never collapse with cues. A
+// `drop` span takes words out (a chatbot sentence, one past the budget): an
+// act inside it goes with them, as does one at its end when nothing follows,
+// rather than moving onto a sentence it was not written for. Other spans
+// (markup, emoji, leading space) move acts as they move cues.
+export function removeRanges(text, cues, ranges, acts = []) {
   const sorted = ranges.filter(range => range.end > range.start).sort((a, b) => a.start - b.start)
   const merged = []
   for (const range of sorted) {
@@ -106,6 +128,7 @@ export function removeRanges(text, cues, ranges) {
       if (range.end >= last.end)
         last.replace = range.replace
       last.end = Math.max(last.end, range.end)
+      last.drop ||= Boolean(range.drop)
     }
     else {
       merged.push({ ...range })
@@ -123,6 +146,8 @@ export function removeRanges(text, cues, ranges) {
     }
     return position - shift
   }
+  const dropped = position => merged.some(range => range.drop
+    && ((position >= range.start && position < range.end) || (position === range.end && range.end === text.length)))
   let result = ''
   let last = 0
   for (const range of merged) {
@@ -138,7 +163,11 @@ export function removeRanges(text, cues, ranges) {
     else
       moved.push({ ...cue, start })
   }
-  return { text: result, cues: moved.filter(cue => cue.start < result.length) }
+  return {
+    text: result,
+    cues: moved.filter(cue => cue.start < result.length),
+    acts: acts.filter(cue => !dropped(cue.start)).map(cue => ({ ...cue, start: map(cue.start) })).filter(cue => cue.start < result.length),
+  }
 }
 
 // Whole sentences from the start while they fit: at most `sentences`
@@ -147,7 +176,8 @@ export function removeRanges(text, cues, ranges) {
 // always kept, after a leading "哈哈哈！" too; one overlong sentence is left
 // to the output gate. Once one sentence is dropped the rest go too, except
 // one PROTECTED sentence (an AI admission, a pointer to help) within three
-// budgets' worth of letters. `ranges` are the dropped spans.
+// budgets' worth of letters. `ranges` are the dropped spans (`drop`: their
+// acts go with them).
 export function fitToBudget(text, budget) {
   const charLimit = Math.round(budget.chars * 1.2)
   let chars = 0
@@ -170,7 +200,7 @@ export function fitToBudget(text, budget) {
       rescued += rescue ? 1 : 0
     }
     else {
-      ranges.push(span)
+      ranges.push({ ...span, drop: true })
       full = true
     }
   }
@@ -302,32 +332,39 @@ export function openerOf(text) {
   return letters.slice(0, 2).join('')
 }
 
-export function shapeReply(text, cues, budget) {
+export function shapeReply(text, cues, budget, acts = []) {
   const fixed = []
-  const fixRanges = []
-  for (const fix of FIXES) {
-    for (const match of text.matchAll(fix.pattern)) {
-      fixRanges.push({ start: match.index, end: match.index + match[0].length })
-      if (!fixed.includes(fix.id))
-        fixed.push(fix.id)
+  let current = { text, cues, acts }
+  for (let pass = 0; pass < MAX_FIX_PASSES; pass++) {
+    const fixRanges = []
+    for (const fix of FIXES) {
+      for (const match of current.text.matchAll(fix.pattern)) {
+        fixRanges.push({ start: match.index, end: match.index + match[0].length })
+        if (!fixed.includes(fix.id))
+          fixed.push(fix.id)
+      }
     }
+    if (!fixRanges.length)
+      break
+    current = removeRanges(current.text, current.cues, fixRanges, current.acts)
   }
-  let current = removeRanges(text, cues, fixRanges)
 
   const hits = lintStyle(current.text)
-  current = removeRanges(current.text, current.cues, hits.filter(hit => hit.dropped).map(({ start, end, replace }) => ({ start, end, replace })))
+  current = removeRanges(current.text, current.cues, hits.filter(hit => hit.dropped).map(({ start, end, replace }) => ({ start, end, replace, drop: true })), current.acts)
   // A dropped middle sentence can leave a leading space or doubled newline.
   const trimmedStart = current.text.length - current.text.trimStart().length
   if (trimmedStart)
-    current = removeRanges(current.text, current.cues, [{ start: 0, end: trimmedStart }])
+    current = removeRanges(current.text, current.cues, [{ start: 0, end: trimmedStart }], current.acts)
 
   const fitted = fitToBudget(current.text, budget)
-  current = removeRanges(current.text, current.cues, fitted.ranges)
+  current = removeRanges(current.text, current.cues, fitted.ranges, current.acts)
   const finalText = current.text.trimEnd()
   const finalCues = current.cues.filter(cue => cue.start < finalText.length)
+  const finalActs = current.acts.filter(cue => cue.start < finalText.length && hasWordsAfter(finalText, cue.start))
   return {
     text: finalText,
     cues: finalCues,
+    acts: finalActs,
     report: {
       charsBefore: countChars(text),
       charsAfter: countChars(finalText),
@@ -344,6 +381,9 @@ export function shapeReply(text, cues, budget) {
       opener: openerOf(finalText),
       metaWords: META_WORDS.test(finalText),
       senseClaim: SENSE_CLAIMS.test(finalText),
+      // The acts left to perform, and how many went with removed words.
+      acts: finalActs.map(cue => cue.act),
+      actsDropped: acts.length - finalActs.length,
     },
   }
 }

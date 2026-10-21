@@ -17,7 +17,7 @@ export function personaSections(persona, { audience = '用户' } = {}) {
 
 // Hidden delivery cues parsed by server/delivery-cue.mjs; shared by every
 // prompt that streams through it.
-export const TONE_CUE_RULES = '每条回复最开头必须先输出一个内部语气标记：[[tone:neutral]]、[[tone:soft]]、[[tone:bright]] 或 [[tone:curious]]，随后直接给出自然的正文。neutral 用于普通语气，soft 用于安慰或低落话题，bright 用于兴奋或俏皮，curious 用于探索或好奇。当前标记持续生效；只有语气确实改变时，才在下一句或下一段正文之前加上新的标记，不要每句都加，也不要在一句话中途切换。标记仅用于语音与表情控制，不要在正文中解释、复述或讨论它，也不要为了标记改变回答内容。'
+export const TONE_CUE_RULES = '每条回复最开头必须先输出一个内部语气标记：[[tone:neutral]]（普通）、[[tone:happy]]（开心、兴奋、俏皮）、[[tone:soft]]（温柔、安慰、低落话题）、[[tone:curious]]（好奇、探索）、[[tone:surprised]]（惊讶）、[[tone:sad]]（难过、遗憾）、[[tone:pout]]（假装生气、吐槽）或 [[tone:shy]]（害羞、不好意思），随后直接给出自然的正文。当前标记持续生效；只有语气确实改变时，才在下一句或下一段正文之前加上新的标记，不要每句都加，也不要在一句话中途切换。需要时可以在某句话正前方加一个内部动作标记：[[act:laugh]]（笑出声）、[[act:sigh]]（叹气）或 [[act:pause]]（停顿一下），每条回复最多一个，大多数回复一个都不用；笑声、叹气和停顿只用这种标记，不要自己用括号写出来。这些标记仅用于语音与表情控制，不要在正文中解释、复述或讨论它们，也不要为了标记改变回答内容。'
 
 export function buildSystemPrompt(persona, userMemory = '') {
   return [

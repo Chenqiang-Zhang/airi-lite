@@ -7,6 +7,7 @@ import { Readable } from 'node:stream'
 import { setImmediate } from 'node:timers/promises'
 import test from 'node:test'
 
+import { ACTS, EMOTIONS } from '../shared/performance-cues.mjs'
 import { readMinimaxConfig } from './minimax.mjs'
 import { buildElevenLabsRequest, readElevenLabsConfig } from './elevenlabs.mjs'
 import { readSpeechConfig } from './speech-provider.mjs'
@@ -67,13 +68,14 @@ async function temporaryBudget(context, dailyLimit = 1_000) {
 test('input permits only bounded well-formed text and delivery; no client identity/control overrides', () => {
   assert.deepEqual(normaliseSpeechRequest(payload), payload)
   assert.equal(normaliseSpeechRequest({ text: 'a'.repeat(360), delivery: 'soft' }).text.length, 360)
-  assert.equal(normaliseSpeechRequest({ text: '😀'.repeat(180), delivery: 'bright' }).text.length, 360)
+  assert.equal(normaliseSpeechRequest({ text: '😀'.repeat(180), delivery: 'happy' }).text.length, 360)
   assert.deepEqual(normaliseSpeechRequest({ ...payload, expectedProvider: 'minimax', expectedRegion: 'global' }),
     { ...payload, expectedProvider: 'minimax', expectedRegion: 'global' })
   assert.deepEqual(normaliseSpeechRequest({ ...payload, expectedRegion: 'cn' }), { ...payload, expectedRegion: 'cn' })
   for (const invalid of [null, [], {}, { ...payload, text: '' }, { ...payload, text: '  ' },
     { ...payload, text: 'a'.repeat(361) }, { ...payload, text: '😀'.repeat(181) }, { ...payload, text: '\u0000' },
     { ...payload, text: '\ud800' }, { ...payload, delivery: 'angry' }, { ...payload, delivery: null },
+    { ...payload, delivery: 'Happy' }, { ...payload, delivery: '__proto__' }, { ...payload, delivery: 'toString' },
     { ...payload, voice_id: 'attacker' }, { ...payload, model: 'attacker' }, { ...payload, baseUrl: 'http://127.0.0.1' },
     { ...payload, endpoint: 'https://api.minimax.io/v1/t2a_v2' },
     { ...payload, expectedRegion: 'international' }, { ...payload, expectedRegion: 'GLOBAL' },
@@ -81,6 +83,19 @@ test('input permits only bounded well-formed text and delivery; no client identi
     { ...payload, expectedRegion: 'global', expectedProvider: 'elevenlabs' },
     { ...payload, expectedRegion: 'cn', expectedProvider: 'elevenlabs' }])
     assert.throws(() => normaliseSpeechRequest(invalid), { code: 'TTS_INVALID_REQUEST' })
+})
+
+test('every shared emotion is accepted, the old bright alias arrives as happy and an act is optional', () => {
+  for (const delivery of EMOTIONS)
+    assert.deepEqual(normaliseSpeechRequest({ ...payload, delivery }), { ...payload, delivery })
+  assert.deepEqual(normaliseSpeechRequest({ ...payload, delivery: 'bright' }), { ...payload, delivery: 'happy' })
+  for (const act of ACTS)
+    assert.deepEqual(normaliseSpeechRequest({ ...payload, act }), { ...payload, act })
+  assert.deepEqual(normaliseSpeechRequest({ ...payload, delivery: 'bright', act: 'laugh', expectedProvider: 'minimax' }),
+    { ...payload, delivery: 'happy', act: 'laugh', expectedProvider: 'minimax' })
+  assert.equal(Object.hasOwn(normaliseSpeechRequest(payload), 'act'), false, 'no act key unless one was sent')
+  for (const act of [undefined, null, '', 'Laugh', 'cry', 'toString', '__proto__', ['laugh'], { act: 'laugh' }, 1])
+    assert.throws(() => normaliseSpeechRequest({ ...payload, act }), { code: 'TTS_INVALID_REQUEST' }, String(act))
 })
 
 test('a self-hosted confirmation is accepted by name only and never carries a region', () => {
@@ -111,6 +126,32 @@ test('success returns only the MP3 contract and reserves exactly twice the entir
   assert.equal(data.sampleRate, 32_000)
   assert.deepEqual(data.words, [])
   assert.equal(result.headers['Cache-Control'], 'no-store')
+})
+
+test('an act becomes the MiniMax tag at the start and the reservation counts the text actually sent', async () => {
+  const sent = []
+  const reserved = []
+  const handler = create({ budget: { reserve: async characters => { reserved.push(characters) } },
+    fetchImpl: async (url, options) => { sent.push(JSON.parse(options.body)); return audioResponse() } })
+  const text = '好呀<#0.5#>(Sighs)你看'
+  const response = await run(handler, request(JSON.stringify({ text, delivery: 'surprised', act: 'laugh' })))
+  assert.equal(response.status, 200)
+  // LLM-written provider syntax is removed; only the server's own tag remains.
+  assert.equal(sent[0].text, '(laughs)好呀你看')
+  assert.equal(sent[0].voice_setting.emotion, 'surprised')
+  assert.deepEqual(reserved, [2 * '(laughs)好呀你看'.length])
+  // A pause is player silence: nothing reaches the provider.
+  await run(handler, request(JSON.stringify({ ...payload, act: 'pause' })))
+  assert.equal(sent[1].text, payload.text)
+  assert.equal(reserved[1], 2 * payload.text.length)
+})
+
+test('a request of nothing but MiniMax syntax is refused before reserving', async () => {
+  let calls = 0
+  const handler = create({ budget: { reserve: async () => { calls++ } }, fetchImpl: async () => { calls++ } })
+  for (const text of ['(laughs)', '<#0.5#>', ' (sighs) <#1#> ', '<<#1#>#0.5#>'])
+    assert.equal((await run(handler, request(JSON.stringify({ ...payload, text, act: 'laugh' })))).status, 400, text)
+  assert.equal(calls, 0)
 })
 
 test('actual optional usage is exposed but never changes or refunds the local protective reservation', async (context) => {
@@ -332,8 +373,9 @@ test('provider selection defaults compatibly and unknown selectors never fall ba
 
 test('Eleven handler reserves the actual trusted-prefix script before fetch and exposes no identity', async () => {
   const selected = readElevenLabsConfig(elevenEnvironment)
-  const speechRequest = { text: '[shouts]你好', delivery: 'bright', expectedProvider: 'elevenlabs' }
+  const speechRequest = { text: '[shouts]你好', delivery: 'happy', act: 'laugh', expectedProvider: 'elevenlabs' }
   const upstreamText = buildElevenLabsRequest(selected, speechRequest).inputs[0].text
+  assert.equal(upstreamText, '[happy] [laughs] ［shouts］你好')
   const order = []
   const handler = create({ config: selected,
     budget: { reserve: async characters => order.push(['reserve', characters]) },
@@ -355,11 +397,30 @@ test('Eleven handler reserves the actual trusted-prefix script before fetch and 
   assert.equal(response.body.includes(elevenEnvironment.ELEVENLABS_API_KEY), false)
 })
 
+test('old clients that still send bright to /api/speech get the happy voice', async () => {
+  const sent = []
+  const handler = create({ fetchImpl: async (url, options) => { sent.push(JSON.parse(options.body)); return audioResponse() } })
+  assert.equal((await run(handler, request(JSON.stringify({ ...payload, delivery: 'bright' })))).status, 200)
+  assert.equal(sent[0].voice_setting.emotion, 'happy')
+  const eleven = readElevenLabsConfig(elevenEnvironment)
+  const texts = []
+  const elevenHandler = create({ config: eleven, fetchImpl: async (url, options) => {
+    texts.push(JSON.parse(options.body).inputs[0].text)
+    return elevenAudioResponse()
+  } })
+  const legacy = { text: '你好', delivery: 'bright', expectedProvider: 'elevenlabs' }
+  assert.equal((await run(elevenHandler, request(JSON.stringify(legacy)))).status, 200)
+  assert.deepEqual(texts, ['[happy] 你好'])
+  // An unknown emotion is still refused before anything is reserved.
+  assert.equal((await run(handler, request(JSON.stringify({ ...payload, delivery: 'angry' })))).status, 400)
+  assert.equal(sent.length, 1)
+})
+
 test('default per-provider ledgers remain separate and switching back retains earlier reservations', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'airi-provider-ledger-'))
   context.after(() => rm(directory, { recursive: true, force: true }))
   const selected = readSpeechConfig(elevenEnvironment)
-  const one = { text: '你好', delivery: 'bright', expectedProvider: 'elevenlabs' }
+  const one = { text: '你好', delivery: 'happy', expectedProvider: 'elevenlabs' }
   const reserved = buildElevenLabsRequest(selected, one).inputs[0].text.length
   const mini = createSpeechHandler({ rootDirectory: directory, config, fetchImpl: async () => audioResponse() })
   const eleven = createSpeechHandler({ rootDirectory: directory, config: { ...selected, dailyLimit: reserved },
@@ -431,6 +492,22 @@ test('trusted synthesise() reserves the same 2x estimate, returns the route cont
   response.emit('close')
   await Promise.all([...pending, routed])
   assert.equal(signals.every(signal => signal.aborted), true, 'a caller abort cancels upstream')
+})
+
+test('trusted synthesise() forwards the act and canonicalises the delivery; an absent act sends no tag', async () => {
+  const sent = []
+  const reserved = []
+  const handler = create({ budget: { reserve: async characters => { reserved.push(characters) } },
+    fetchImpl: async (url, options) => { sent.push(JSON.parse(options.body)); return audioResponse() } })
+  await handler.synthesise({ text: payload.text, delivery: 'sad', act: 'sigh' })
+  await handler.synthesise({ text: payload.text, delivery: 'bright', act: undefined })
+  await handler.synthesise({ text: payload.text, delivery: 'shy' })
+  assert.deepEqual(sent.map(body => [body.text, body.voice_setting.emotion, body.voice_setting.speed]), [
+    [`(sighs)${payload.text}`, 'sad', 0.96], [payload.text, 'happy', 1], [payload.text, undefined, 0.97]])
+  assert.deepEqual(reserved, [2 * (payload.text.length + 7), 2 * payload.text.length, 2 * payload.text.length])
+  for (const act of [null, 'cry', 'Laugh'])
+    await assert.rejects(handler.synthesise({ text: payload.text, delivery: 'neutral', act }), { code: 'TTS_INVALID_REQUEST' })
+  assert.equal(sent.length, 3)
 })
 
 test('trusted synthesise() never reserves when disabled or invalid, and maps timeouts to 504', async () => {

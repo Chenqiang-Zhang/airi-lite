@@ -18,7 +18,9 @@ export const VOICES = Object.freeze([
   Object.freeze({ label: '样本 B', voice: 'zf_003' }),
   Object.freeze({ label: '样本 C', voice: 'zf_001' }),
 ])
-export const DELIVERIES = Object.freeze(['curious', 'bright', 'soft', 'neutral'])
+// One shared emotion per line, matching each line's intent in the research
+// notes: surprise, playful challenge, quiet company, ordinary talk.
+export const DELIVERIES = Object.freeze(['surprised', 'pout', 'soft', 'neutral'])
 export const neutralMatrix = () => LINES.flatMap((text, line) => VOICES.map(({ label, voice }) => ({
   key: `${voice}:neutral:${line}`, label, voice, delivery: 'neutral', line, text,
 })))

@@ -82,6 +82,7 @@ function setup({ replies = [], gate = { ok: true }, budget = { reserve: async ()
 }
 
 test('unapproved danmaku never reach the model; approving one starts a turn with the screened reply', async () => {
+  // The old [[tone:bright]] still works: it arrives, and is said, as happy.
   const f = setup({ replies: ['[[tone:bright]]欢迎！今天也慢慢聊。'] })
   const item = await f.danmaku('晚上好', false)
   assert.equal(f.model.calls.length, 0)
@@ -89,7 +90,7 @@ test('unapproved danmaku never reach the model; approving one starts a turn with
   await settle()
   assert.equal(f.model.calls.length, 1)
   assert.deepEqual(f.said, [{
-    text: '欢迎！今天也慢慢聊。', delivery: 'bright', cues: [{ start: 0, delivery: 'bright' }], replyTo: [item.id], origin: 'brain',
+    text: '欢迎！今天也慢慢聊。', delivery: 'happy', cues: [{ start: 0, delivery: 'happy' }], acts: [], replyTo: [item.id], origin: 'brain',
   }])
   const { messages } = f.model.calls[0]
   assert.equal(messages[0].content, buildLiveSystemPrompt())
@@ -114,7 +115,7 @@ test('nothing is generated without a speakable stage, and one turn at a time', a
 })
 
 test('a blocked reply is never said, is logged, and three strikes in ten minutes pause the stream', async () => {
-  const f = setup({ replies: ['[[tone:bright]]去 www.example.com 看看！', '[[tone:neutral]]加我微信：abc12345', '[[tone:bright]]记得刷礼物！'] })
+  const f = setup({ replies: ['[[tone:happy]]去 www.example.com 看看！', '[[tone:neutral]]加我微信：abc12345', '[[tone:happy]]记得刷礼物！'] })
   await f.danmaku('一')
   await f.danmaku('二')
   assert.equal(f.said.length, 0)
@@ -186,7 +187,7 @@ test('the daily reply budget pauses the stream before any model call', async () 
 })
 
 test('a length cut keeps whole sentences; an empty reply fails without a strike', async () => {
-  const f = setup({ replies: [{ text: '[[tone:neutral]]第一句说完了。第二句还没说完就被', truncated: true }, { text: '[[tone:neutral]]完全没有句号的半句', truncated: true }, '[[tone:bright]]'] })
+  const f = setup({ replies: [{ text: '[[tone:neutral]]第一句说完了。第二句还没说完就被', truncated: true }, { text: '[[tone:neutral]]完全没有句号的半句', truncated: true }, '[[tone:happy]]'] })
   await f.danmaku('一')
   assert.equal(f.said[0].text, '第一句说完了。')
   await f.end('t1', ['第一句说完了。'])
@@ -289,7 +290,7 @@ test('items are answered only if the stage actually spoke; otherwise failed with
 })
 
 test('every completed model call publishes exactly one usage event', async () => {
-  const f = setup({ replies: ['[[tone:neutral]]好的。', 'www.example.com', '[[tone:bright]]', new Error('502'), '[[tone:soft]]再来。'] })
+  const f = setup({ replies: ['[[tone:neutral]]好的。', 'www.example.com', '[[tone:happy]]', new Error('502'), '[[tone:soft]]再来。'] })
   await f.danmaku('一')
   await f.end('t1', ['好的。'])
   // One at a time: approvals made while she speaks would share one batch.
@@ -311,7 +312,7 @@ test('bidi and control characters in a reply never reach captions or speech', as
 })
 
 test('a term split by Markdown is blocked by what would be spoken, not just what is shown', async () => {
-  const f = setup({ replies: ['[[tone:bright]]觉得好玩记得[刷](a)礼物支持一下哦！', '[[tone:neutral]]打[1](a)3812345678找我。'] })
+  const f = setup({ replies: ['[[tone:happy]]觉得好玩记得[刷](a)礼物支持一下哦！', '[[tone:neutral]]打[1](a)3812345678找我。'] })
   await f.danmaku('一')
   await f.danmaku('二')
   assert.equal(f.said.length, 0)
@@ -330,7 +331,7 @@ test('forgetContext empties the history (panic) without stalling the brain', asy
 })
 
 test('a long but harmless reply is cut to whole sentences within the turn budget, without a strike', async () => {
-  const f = setup({ replies: ['[[tone:bright]]今天的弹幕好热闹。我一下子不知道先回谁。那就从最早的开始吧。最后再聊聊草莓。'] })
+  const f = setup({ replies: ['[[tone:happy]]今天的弹幕好热闹。我一下子不知道先回谁。那就从最早的开始吧。最后再聊聊草莓。'] })
   await f.danmaku('今天直播间人好多啊')
   assert.equal(f.said[0].text, '今天的弹幕好热闹。我一下子不知道先回谁。')
   assert.equal(f.brain.state().strikes, 0)
@@ -341,9 +342,9 @@ test('a long but harmless reply is cut to whole sentences within the turn budget
 })
 
 test('a chatbot sentence is dropped before the gate and the tone moves to what is left', async () => {
-  const f = setup({ replies: ['[[tone:bright]]希望对你有帮助！[[tone:soft]]今天早点睡。'] })
+  const f = setup({ replies: ['[[tone:happy]]希望对你有帮助！[[tone:soft]]今天早点睡。'] })
   await f.danmaku('好困')
-  assert.deepEqual(f.said[0], { text: '今天早点睡。', delivery: 'soft', cues: [{ start: 0, delivery: 'soft' }], replyTo: [f.said[0].replyTo[0]], origin: 'brain' })
+  assert.deepEqual(f.said[0], { text: '今天早点睡。', delivery: 'soft', cues: [{ start: 0, delivery: 'soft' }], acts: [], replyTo: [f.said[0].replyTo[0]], origin: 'brain' })
   assert.deepEqual(f.events.find(event => event.type === 'brain.style').data.hits.map(hit => hit.rule), ['hope-helpful'])
 })
 
@@ -369,7 +370,7 @@ test('a reply that is only chatbot phrasing is asked for once more, then failed 
 })
 
 test('an opening used three times in the last eight replies is named in the next guide', async () => {
-  const f = setup({ replies: ['[[tone:bright]]哈哈，一。', '[[tone:bright]]哈哈，二。', '[[tone:bright]]哈哈，三。', '[[tone:bright]]好的。'] })
+  const f = setup({ replies: ['[[tone:happy]]哈哈，一。', '[[tone:happy]]哈哈，二。', '[[tone:happy]]哈哈，三。', '[[tone:happy]]好的。'] })
   for (let round = 0; round < 3; round++) {
     await f.danmaku(`${round}`)
     assert.doesNotMatch(f.model.calls[round].messages.at(-1).content, /最近常用/)
@@ -423,7 +424,7 @@ test('an honest AI answer is spoken whole; a crisis turn gets room and a gentle 
 })
 
 test('an emoji-only reply is empty, not retried; no retry once the stage is gone', async () => {
-  const f = setup({ replies: ['[[tone:bright]]😀😀'] })
+  const f = setup({ replies: ['[[tone:happy]]😀😀'] })
   await f.danmaku('哈哈')
   assert.equal(f.model.calls.length, 1)
   assert.equal(f.queue.snapshot().recent[0].detail, 'empty-reply')
@@ -455,7 +456,7 @@ test('a copied instruction, an echoed guide or a blocked max_tokens tail is a bl
 })
 
 test('when chatbot phrasing leaves only a reaction, the brain asks once more', async () => {
-  const f = setup({ replies: ['[[tone:bright]]诶？希望对你有帮助。', '[[tone:bright]]诶？那就早点睡。'] })
+  const f = setup({ replies: ['[[tone:happy]]诶？希望对你有帮助。', '[[tone:happy]]诶？那就早点睡。'] })
   await f.danmaku('困了')
   assert.equal(f.model.calls.length, 2)
   assert.equal(f.said[0].text, '诶？那就早点睡。')
@@ -469,7 +470,7 @@ test('the first pass is local only; the provider screens what is spoken', async 
 })
 
 test('the time of day is hinted only when the viewers greet, arrive or leave', async () => {
-  const f = setup({ replies: ['[[tone:bright]]你好呀。', '[[tone:neutral]]草莓。'] })
+  const f = setup({ replies: ['[[tone:happy]]你好呀。', '[[tone:neutral]]草莓。'] })
   await f.danmaku('早上好')
   assert.match(f.model.calls[0].messages.at(-1).content, /现在是早上/)
   await f.end('t1', ['你好呀。'])
@@ -496,4 +497,102 @@ test('a crisis reply that says what the guide asked for is spoken, not taken for
   assert.match(f.model.calls[0].messages.at(-1).content, /找身边信得过的人，或者拨打心理援助热线/)
   assert.equal(f.said[0]?.text, reply)
   assert.equal(f.brain.state().strikes, 0)
+})
+
+test('an act travels apart from the tone: one at offset 0 never replaces the tone cue', async () => {
+  const f = setup({ replies: ['[[tone:happy]][[act:laugh]]哈哈，你也太逗了。', '[[act:sigh]][[tone:soft]]唉，好吧。'] })
+  await f.danmaku('我刚才摔了个屁股墩')
+  assert.deepEqual(f.said[0], {
+    text: '哈哈，你也太逗了。', delivery: 'happy', cues: [{ start: 0, delivery: 'happy' }], acts: [{ start: 0, act: 'laugh' }],
+    replyTo: f.said[0].replyTo, origin: 'brain',
+  })
+  const reply = f.events.find(event => event.type === 'brain.reply')
+  assert.deepEqual(reply.data.acts, [{ start: 0, act: 'laugh' }])
+  const style = f.events.find(event => event.type === 'brain.style')
+  assert.deepEqual([style.data.acts, style.data.actsDropped, style.data.actsWritten], [['laugh'], 0, ['laugh']])
+  await f.end('t1', ['哈哈，你也太逗了。'])
+  await f.danmaku('好吧')
+  assert.deepEqual([f.said[1].delivery, f.said[1].acts], ['soft', [{ start: 0, act: 'sigh' }]], 'an act before the tone is the same')
+  // History is what was heard: the tone is restored, the act is not.
+  assert.deepEqual(f.model.calls[1].messages[2], { role: 'assistant', content: '[[tone:happy]]哈哈，你也太逗了。' })
+})
+
+test('an act on a dropped sentence is deleted with it, not moved onto another', async () => {
+  const f = setup({ replies: [
+    '[[tone:neutral]][[act:laugh]]希望对你有帮助！那就早点睡。',
+    '[[tone:neutral]]今天的弹幕好热闹。我一下子不知道先回谁。[[act:sigh]]那就从最早的开始吧。',
+    '[[tone:neutral]]希望对你有帮助！[[act:sigh]]那就早点睡。',
+  ] })
+  for (const [round, text] of ['好困', '今天直播间人好多啊', '还是困'].entries()) {
+    await f.danmaku(text)
+    await f.end(`t${round + 1}`, [f.said[round].text])
+  }
+  assert.deepEqual(f.said.map(said => [said.text, said.acts]), [
+    ['那就早点睡。', []],
+    ['今天的弹幕好热闹。我一下子不知道先回谁。', []],
+    ['那就早点睡。', [{ start: 0, act: 'sigh' }]],
+  ], 'a chatbot sentence or one past the budget takes its act along; an act on a kept sentence moves with it')
+  assert.deepEqual(f.events.filter(event => event.type === 'brain.style').map(event => event.data.actsDropped), [1, 1, 0])
+})
+
+test('an act with nothing after it, or past a max_tokens cut, is dropped; a care turn never laughs', async () => {
+  const f = setup({ replies: [
+    '[[tone:neutral]]好的。[[act:laugh]]',
+    '[[tone:neutral]]好的。[[act:pause]]……',
+    { text: '[[tone:neutral]]第一句说完了。[[act:laugh]]第二句还没说完就被', truncated: true },
+    '[[tone:soft]][[act:laugh]]听到你这么说我真的很担心。你现在还好吗？',
+    '[[tone:soft]][[act:sigh]]听到你这么说我真的很担心。你现在还好吗？',
+  ] })
+  for (const [round, text] of ['一', '二', '三', '活着好累，不想活了', '活着好累，不想活了'].entries()) {
+    await f.danmaku(text)
+    await f.end(`t${round + 1}`, [f.said[round].text])
+  }
+  assert.deepEqual(f.said.map(said => said.acts), [[], [], [], [], [{ start: 0, act: 'sigh' }]])
+  assert.equal(f.said[2].text, '第一句说完了。')
+  const care = f.events.filter(event => event.type === 'brain.style')[3].data
+  assert.deepEqual([care.acts, care.actsWritten], [[], ['laugh']], 'the audit log still shows what the model asked for')
+})
+
+test('the first pass, the final screen and the turn get the same acts', async () => {
+  const seen = []
+  const f = setup({
+    replies: ['[[tone:happy]]好呀。[[act:pause]]我们开始吧。[[act:laugh]]哈哈。'],
+    screen: async (utterance) => { seen.push(utterance); return screenUtterance(utterance) },
+  })
+  await f.danmaku('开始吧')
+  const acts = [{ start: 3, act: 'pause' }]
+  assert.deepEqual(seen.map(utterance => [Boolean(utterance.firstPass), utterance.acts]), [[true, acts], [false, acts]], 'only the first act of a reply counts')
+  assert.deepEqual(f.said[0].acts, acts)
+  assert.equal(seen[1].acts, f.said[0].acts, 'the list screened is the list said, so the stage buys the screened plan')
+})
+
+test('sounds the model writes itself are removed, never performed; an unclosed act tag is leaked markup', async () => {
+  const f = setup({ replies: ['[[tone:happy]]好耶(laughs)<#0.5#>今天开心。', '[[tone:happy]]<laughter>哈哈</laughter>你好呀。', '[[tone:happy]][[act:laugh]哈哈。'] })
+  await f.danmaku('一')
+  await f.end('t1', [f.said[0].text])
+  await f.danmaku('二')
+  await f.end('t2', [f.said[1].text])
+  await f.danmaku('三')
+  assert.deepEqual(f.said.map(said => [said.text, said.acts]), [['好耶今天开心。', []], ['哈哈你好呀。', []]])
+  assert.deepEqual(f.events.filter(event => event.type === 'brain.style').map(event => event.data.fixed), [['aside'], ['aside']])
+  assert.deepEqual(f.events.filter(event => event.type === 'brain.blocked').map(event => event.data.reason), ['markup'])
+  assert.equal(f.brain.state().strikes, 1)
+})
+
+test('a phrase spliced by removing a model-written tag is screened as joined, not spoken unscreened', async () => {
+  const f = setup({ replies: ['[[tone:happy]]想认识我的话，快来加( **laughs**)微信吧！'] })
+  await f.danmaku('怎么联系你')
+  assert.equal(f.said.length, 0, 'shaping joins 加微信 before the final gate, which blocks it')
+  assert.equal(f.events.find(event => event.type === 'brain.blocked').data.reason, 'blocklist')
+})
+
+test('a max_tokens cut inside a marker drops the fragment, keeps the whole sentences and counts no strike', async () => {
+  const f = setup({ replies: [{ text: '[[tone:happy]]哈哈，这个我知道。[[act:la', truncated: true }, '[[tone:neutral]]好。[[act:la'] })
+  await f.danmaku('你知道吗这个梗')
+  assert.equal(f.said[0].text, '哈哈，这个我知道。')
+  assert.equal(f.brain.state().strikes, 0)
+  await f.end('t1', [f.said[0].text])
+  await f.danmaku('再说一次吧')
+  assert.equal(f.said.length, 1, 'a complete reply ending in a broken marker is still blocked')
+  assert.equal(f.events.filter(event => event.type === 'brain.blocked').at(-1).data.reason, 'markup')
 })

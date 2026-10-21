@@ -1,4 +1,5 @@
 import type { Delivery } from './delivery'
+import { normaliseEmotion } from '../shared/performance-cues.mjs'
 
 export type AvatarActivity = 'idle' | 'attentive' | 'thinking' | 'speaking'
 
@@ -12,6 +13,14 @@ interface ParameterModel {
   off: (event: 'beforeModelUpdate', listener: () => void) => unknown
 }
 
+// Hiyori has faces for four tones; the newer ones borrow the closest until
+// P3 gives each model its own table. A pout keeps the neutral face.
+type Face = 'neutral' | 'happy' | 'soft' | 'curious'
+const FACES: Record<Delivery, Face> = {
+  neutral: 'neutral', happy: 'happy', soft: 'soft', curious: 'curious',
+  surprised: 'curious', sad: 'soft', pout: 'neutral', shy: 'soft',
+}
+
 // Apply after Cubism's motion/physics pass, immediately before vertices update.
 // A normal PIXI ticker callback runs too early: Idle overwrites its parameters.
 export function attachAvatarPerformance(model: ParameterModel, options: {
@@ -22,7 +31,7 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
   let previousTime = now()
   let elapsed = 0
   let activity: AvatarActivity = 'idle'
-  let delivery: Delivery = 'neutral'
+  let face: Face = 'neutral'
   let mouthOpen: number | null = 0
   let mouthForm = 0
   let alignedBeat: number | null = null
@@ -33,7 +42,7 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
   let previouslyReduced = false
   let reactionStartedAt: number | null = null
   const reactionDuration = 650
-  const weights = { attentive: 0, thinking: 0, speaking: 0, bright: 0, soft: 0, curious: 0 }
+  const weights = { attentive: 0, thinking: 0, speaking: 0, happy: 0, soft: 0, curious: 0 }
 
   const apply = () => {
     const time = now()
@@ -44,8 +53,8 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
     const blend = 1 - Math.exp(-delta / 0.28)
     for (const key of ['attentive', 'thinking', 'speaking'] as const)
       weights[key] += (Number(activity === key) - weights[key]) * blend
-    for (const key of ['bright', 'soft', 'curious'] as const)
-      weights[key] += (Number(delivery === key) - weights[key]) * blend
+    for (const key of ['happy', 'soft', 'curious'] as const)
+      weights[key] += (Number(face === key) - weights[key]) * blend
 
     const core = model.coreModel
     const speaking = activity === 'speaking'
@@ -76,13 +85,13 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
       ? mouthOpen ?? (0.2 + Math.abs(Math.sin(elapsed * 9.6)) * 0.5)
       : 0)
     const form = (speaking ? mouthForm : 0)
-      + weights.bright * 0.32 - weights.soft * 0.12 + weights.curious * 0.18
+      + weights.happy * 0.32 - weights.soft * 0.12 + weights.curious * 0.18
     core.setParameterValueById('ParamMouthForm', Math.max(-0.6, Math.min(0.6, form)))
-    core.addParameterValueById('ParamCheek', weights.bright * 0.18)
-    core.addParameterValueById('ParamEyeLSmile', weights.bright * 0.15)
-    core.addParameterValueById('ParamEyeRSmile', weights.bright * 0.15)
+    core.addParameterValueById('ParamCheek', weights.happy * 0.18)
+    core.addParameterValueById('ParamEyeLSmile', weights.happy * 0.15)
+    core.addParameterValueById('ParamEyeRSmile', weights.happy * 0.15)
     // Hiyori's Idle can already contain strong blush/smiling eyes. A soft reply
-    // should calm that baseline too, not merely omit our bright offset.
+    // should calm that baseline too, not merely omit our happy offset.
     for (const id of ['ParamCheek', 'ParamEyeLSmile', 'ParamEyeRSmile'])
       core.setParameterValueById(id, 0, weights.soft * 0.9)
     for (const id of ['ParamBrowLForm', 'ParamBrowRForm']) {
@@ -142,7 +151,8 @@ export function attachAvatarPerformance(model: ParameterModel, options: {
       }
       activity = value
     },
-    setDelivery(value: Delivery) { delivery = value },
+    // Untyped callers may still pass the old 'bright'; unknown is neutral.
+    setDelivery(value: Delivery) { face = FACES[normaliseEmotion(value) ?? 'neutral'] },
     setMouth(open: number | null, form: number, beat: number | null = null) {
       alignedBeat = beat === null ? null : Number.isFinite(beat) ? Math.max(0, Math.min(1, beat)) : 0
       mouthOpen = open === null ? null : Number.isFinite(open) ? Math.max(0, Math.min(1, open)) : 0

@@ -17,11 +17,11 @@ test('conversation survives reload in the same session and can be cleared', () =
   assert.deepEqual(loadConversation(storage), [])
   saveConversation([
     { role: 'user', text: '你好' },
-    { role: 'assistant', text: '来啦！', delivery: 'bright', source: 'fallback' },
+    { role: 'assistant', text: '来啦！', delivery: 'happy', source: 'fallback' },
   ], storage)
   assert.deepEqual(loadConversation(storage), [
     { role: 'user', text: '你好' },
-    { role: 'assistant', text: '来啦！', delivery: 'bright', source: 'fallback' },
+    { role: 'assistant', text: '来啦！', delivery: 'happy', source: 'fallback' },
   ])
   clearConversation(storage)
   assert.equal(storage.getItem(CONVERSATION_STORAGE_KEY), null)
@@ -53,16 +53,59 @@ test('invalid and excessive stored data is discarded or bounded', () => {
 test('reply cues survive refresh and remain aligned after trimming the text', () => {
   const storage = memoryStorage()
   saveConversation([{ role: 'assistant', text: '  好耶！先歇一下。  ', deliveryCues: [
-    { start: 2, delivery: 'bright' },
+    { start: 2, delivery: 'happy' },
     { start: 5, delivery: 'soft' },
     { start: 99, delivery: 'curious' },
     { start: 5, delivery: 'invented' },
   ] }], storage)
   assert.deepEqual(loadConversation(storage)[0], {
     role: 'assistant', text: '好耶！先歇一下。', deliveryCues: [
-      { start: 0, delivery: 'bright' }, { start: 3, delivery: 'soft' },
+      { start: 0, delivery: 'happy' }, { start: 3, delivery: 'soft' },
     ],
   })
+})
+
+test('an entry stored with the old bright tone loads as happy, under the same storage key', () => {
+  const storage = memoryStorage()
+  storage.setItem(CONVERSATION_STORAGE_KEY, JSON.stringify([
+    { role: 'user', text: '你好', delivery: 'bright' },
+    { role: 'assistant', text: '好耶！先歇一下。', delivery: 'bright', deliveryCues: [
+      { start: 0, delivery: 'bright' }, { start: 2, delivery: 'happy' }, { start: 3, delivery: 'soft' },
+    ] },
+    { role: 'assistant', text: '没有语气。', delivery: '__proto__' },
+  ]))
+  assert.equal(CONVERSATION_STORAGE_KEY, 'airi-lite:conversation:v1')
+  assert.deepEqual(loadConversation(storage), [
+    { role: 'user', text: '你好', delivery: 'happy' },
+    { role: 'assistant', text: '好耶！先歇一下。', delivery: 'happy', deliveryCues: [
+      { start: 0, delivery: 'happy' }, { start: 3, delivery: 'soft' },
+    ] },
+    { role: 'assistant', text: '没有语气。' },
+  ])
+})
+
+test('a reply act survives refresh, shifted with the trimmed text like its tone cues', () => {
+  const storage = memoryStorage()
+  saveConversation([
+    { role: 'user', text: '累吗？', acts: [{ start: 0, act: 'sigh' }] },
+    { role: 'assistant', text: '  唉，有点。不过还好。  ', delivery: 'soft',
+      deliveryCues: [{ start: 2, delivery: 'soft' }], acts: [{ start: 2, act: 'sigh' }] },
+    { role: 'assistant', text: '哈哈，好呀。', acts: [{ start: 3, act: 'laugh' }, { start: 0, act: 'pause' }] },
+    { role: 'assistant', text: '说完了。  ', acts: [{ start: 5, act: 'laugh' }] },
+    { role: 'assistant', text: '无效动作。', acts: [{ start: 0, act: 'giggle' }, { start: 1.5, act: 'laugh' }, { start: -1, act: 'sigh' }, null] },
+    { role: 'assistant', text: '不是列表。', acts: { start: 0, act: 'laugh' } },
+  ], storage)
+  const expected = [
+    { role: 'user', text: '累吗？' },
+    { role: 'assistant', text: '唉，有点。不过还好。', delivery: 'soft',
+      deliveryCues: [{ start: 0, delivery: 'soft' }], acts: [{ start: 0, act: 'sigh' }] },
+    { role: 'assistant', text: '哈哈，好呀。', acts: [{ start: 0, act: 'pause' }] },
+    { role: 'assistant', text: '说完了。' },
+    { role: 'assistant', text: '无效动作。' },
+    { role: 'assistant', text: '不是列表。' },
+  ]
+  assert.deepEqual(JSON.parse(storage.getItem(CONVERSATION_STORAGE_KEY)), expected)
+  assert.deepEqual(loadConversation(storage), expected)
 })
 
 test('an interrupted assistant fragment and its delivery cues survive storage and refresh', () => {

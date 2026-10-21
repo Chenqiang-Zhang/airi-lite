@@ -2,20 +2,24 @@ import type { Delivery } from './delivery'
 import { normaliseDeliveryCues } from './speech-sentences.ts'
 import type { DeliveryCue } from './speech-sentences'
 import { MAX_CHAT_MESSAGES, MAX_MESSAGE_CHARS } from '../shared/chat-request.mjs'
+import { normaliseActCues, normaliseEmotion } from '../shared/performance-cues.mjs'
+import type { ActCue } from '../shared/performance-cues.mjs'
 
 export interface ConversationMessage {
   role: 'assistant' | 'user'
   text: string
   delivery?: Delivery
   deliveryCues?: DeliveryCue[]
+  acts?: ActCue[]
   source?: 'deepseek' | 'fallback'
   interrupted?: true
 }
 
+// Still v1: the normaliser reads older entries (a stored 'bright' loads as
+// happy, a message without acts has none), so no migration is needed.
 export const CONVERSATION_STORAGE_KEY = 'airi-lite:conversation:v1'
 export const CONVERSATION_STORAGE_BYTES = 512_000
 
-const deliveries = new Set<Delivery>(['neutral', 'soft', 'bright', 'curious'])
 const encoder = new TextEncoder()
 
 function normaliseMessages(value: unknown): ConversationMessage[] {
@@ -29,19 +33,22 @@ function normaliseMessages(value: unknown): ConversationMessage[] {
         role: item.role,
         text: item.text.trim().slice(0, MAX_MESSAGE_CHARS),
       }
-      if (deliveries.has(item.delivery))
-        message.delivery = item.delivery
+      const delivery = normaliseEmotion(item.delivery)
+      if (delivery)
+        message.delivery = delivery
       if (item.role === 'assistant') {
         if (item.interrupted === true)
           message.interrupted = true
+        // Offsets are into the stored text; shift them with the trim and drop
+        // any that now fall past the end. Tone cues and acts follow one rule.
         const leading = item.text.length - item.text.trimStart().length
-        const cues = normaliseDeliveryCues(
-          normaliseDeliveryCues(item.deliveryCues, item.text.length)
-            .map(cue => ({ ...cue, start: Math.max(0, cue.start - leading) })),
-          message.text.length,
-        )
+        const shift = <T extends { start: number }>(cue: T): T => ({ ...cue, start: Math.max(0, cue.start - leading) })
+        const cues = normaliseDeliveryCues(normaliseDeliveryCues(item.deliveryCues, item.text.length).map(shift), message.text.length)
         if (cues.length)
           message.deliveryCues = cues
+        const acts = normaliseActCues(normaliseActCues(item.acts, item.text.length).map(shift), message.text.length)
+        if (acts.length)
+          message.acts = acts
       }
       if (item.source === 'deepseek' || item.source === 'fallback')
         message.source = item.source

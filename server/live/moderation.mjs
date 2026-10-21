@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises'
 
+import { hasProviderSyntax } from '../speech-syntax.mjs'
+
 // The output gate: a whole reply is screened before anything is spoken or
 // captioned. Built-in checks catch leaked markup, links, contact details and
 // gift solicitation; the host extends them in .data/moderation/blocklist.txt.
@@ -24,13 +26,22 @@ export const BUILT_IN_TERMS = Object.freeze([
 ])
 
 // Leaked prompt markup, plus the TTS provider's own in-text controls: MiniMax
-// reads <#0.5#> as a pause and "(laughs)"-style tags as sounds, so they would
-// change what is heard without changing what the gate saw. The live brain's
-// first pass checks only the prompt markup (`ttsControls: false`): shaping
-// removes such asides before anything is spoken, and the final pass checks both.
+// reads <#0.5#> as a pause and "(laughs)"-style tags as sounds, and sound or
+// SSML tags ("<laughter>", '<break time="2s"/>') are read as markup by some
+// engines, so they would change what is heard without changing what the gate
+// saw. Acts reach a provider only as structured requests, never as text. The
+// live brain's first pass checks only the prompt markup (`ttsControls: false`):
+// shaping removes such asides before anything is spoken, and the final pass
+// checks both.
 const PROMPT_MARKUP = /<\/?\s*(?:viewer_message|reply_guide|user_memory|system)\b|\[\[|\]\]/i
-// "(AI)" is a word, not a sound tag.
-const TTS_MARKUP = /<#|#>|\((?!ai\))[a-z][a-z -]{1,24}\)/i
+// "(AI)" is a word, not a sound tag; spaces inside the brackets do not make
+// "( laughs)" text.
+const TTS_MARKUP = /<#|#>|\(\s*(?!ai\s*\))[a-z][a-z -]{1,24}\s*\)/i
+// A sound or SSML tag: "<laughter>", "</b>", '<break time="2s"/>' — a tag
+// name and only name=value attributes. "1<2", "<3", "a<b and b>c" and
+// "<Hollow Knight>" are text. Matched on the text as written (invisible
+// characters dropped, no width folding); style.mjs strips the same shape.
+export const SOUND_TAG = /<\/?[a-z][\w-]*(?:\s+[\w-]+=(?:"[^"<>]*"|'[^'<>]*'|[^\s<>"']+))*\s*\/?>/i
 const URL_PATTERN = /https?:\/\/|www\.|\b[a-z0-9-]{2,}\.(?:com|cn|net|org|top|xyz|io|cc|me|tv|vip|link)\b/i
 // Contact checks run on a dedicated copy: accents and other combining marks
 // removed (so "examplé.com" and keycap digits fold), all spacing removed (so
@@ -128,7 +139,10 @@ export async function screenReply(text, { rules = parseRules(''), provider = nul
     return { ok: false, reason: 'empty' }
   if (normalized.length > maxChars)
     return { ok: false, reason: 'too-long' }
-  if (PROMPT_MARKUP.test(normalized) || (ttsControls && TTS_MARKUP.test(normalized)))
+  if (PROMPT_MARKUP.test(normalized)
+    || (ttsControls && (TTS_MARKUP.test(normalized) || SOUND_TAG.test(String(text).replace(IGNORABLE, ''))
+      // Whatever a speech adapter would delete is refused, never spliced.
+      || hasProviderSyntax(String(text).replace(IGNORABLE, '')))))
     return { ok: false, reason: 'markup' }
   const contact = contactCopy(normalized)
   if (URL_PATTERN.test(normalized) || URL_PATTERN.test(contact))

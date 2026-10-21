@@ -1,6 +1,7 @@
+import { isAct, MAX_ACTS_PER_REPLY } from '../../shared/performance-cues.mjs'
 import { TtsBudgetError } from '../tts-budget.mjs'
 import { buildLiveSystemPrompt, formatViewerBatch, GUIDE_MARKERS, leaksPrompt, needsTimeOfDay, partOfDay, promptLeakCorpus, replyGuide, replyLengthBudget, speakName, topicHints } from './live-prompt.mjs'
-import { openerOf, repeatedPhrases, shapeReply } from './style.mjs'
+import { hasWordsAfter, openerOf, repeatedPhrases, shapeReply } from './style.mjs'
 import { REPLY_CONTROL } from './text.mjs'
 
 // Decides what the character says. One turn at a time: take approved
@@ -9,6 +10,7 @@ import { REPLY_CONTROL } from './text.mjs'
 // stage and wait until the stage has finished before the next turn. Nothing
 // is generated without a ready primary stage, while paused, or past the
 // daily reply budget; nothing unscreened is ever spoken or captioned.
+const UNCLOSED_MARKER = /\[(?:\[(?:[a-z]+(?::[^\]\n]*)?)?)?$/
 const SENTENCE_END = /[。！？!?…](?=[^。！？!?…]*$)/u
 
 // A max_tokens cut leaves a dangling clause; keep only complete sentences.
@@ -17,14 +19,22 @@ export function cutToLastSentence(text) {
   return match ? text.slice(0, match.index + 1) : ''
 }
 
+// The acts this text can still perform: each before words that are still
+// there (not past the end or a cut, not before punctuation alone). A turn
+// that needs care (a viewer in distress or low) never laughs, whatever the
+// model wrote; a sigh or a pause may stay.
+function performableActs(acts, text, budget) {
+  return acts.filter(cue => cue.start < text.length && hasWordsAfter(text, cue.start) && !(budget.care && cue.act === 'laugh'))
+}
+
 export function createLiveBrain({
   hub,
   queue,
   turns, // { canSpeak(): {ok, reason}, say(request): Promise<{ok, turnId?, code?}>, activity(state) }
   control, // { pause(reason) }
   deepseek, // { configured: boolean, open(messages, signal): Promise<{relay}> }
-  // async ({text, delivery, cues}) => {ok, reason, ...}: screens both the
-  // caption text and the sentences the stage will actually speak.
+  // async ({text, delivery, cues, acts}) => {ok, reason, ...}: screens both
+  // the caption text and the sentences the stage will actually speak.
   screen,
   replyBudget, // { reserve(count, signal) }
   systemPrompt = buildLiveSystemPrompt(),
@@ -117,6 +127,8 @@ export function createLiveBrain({
     for (const round of history.slice(-historyRounds)) {
       messages.push({ role: 'user', content: round.user })
       // Keep the tone cue on our own lines so the model keeps emitting it.
+      // Acts are not put back: history is what was heard, and an act in
+      // every past line would teach the model to add one every time.
       messages.push({ role: 'assistant', content: `[[tone:${round.delivery}]]${round.assistant}` })
     }
     messages.push({ role: 'user', content: batchText })
@@ -158,6 +170,7 @@ export function createLiveBrain({
 
     let text = ''
     let kept = []
+    let keptActs = []
     let result
     const drop = (reason, extra = {}) => {
       hub.publish('brain.dropped', { itemIds: ids, reason, text, ...extra }, { source: 'brain' })
@@ -206,12 +219,16 @@ export function createLiveBrain({
 
       text = ''
       const cues = []
+      // Offsets like the cues', in the text after per-delta stripping.
+      const acts = []
       const guide = replyGuide(lengthBudget, { timeOfDay, topics, openers, habits, phrases, retry: attempt > 0 })
       try {
         const stream = await deepseek.open(messagesFor(`${batchText}\n${guide}`), abort.signal)
         result = await stream.relay((event) => {
           if (event.type === 'delivery')
             cues.push({ start: text.length, delivery: event.value })
+          else if (event.type === 'act' && isAct(event.value) && acts.length < MAX_ACTS_PER_REPLY)
+            acts.push({ start: text.length, act: event.value })
           // Stripped per delta, so cue offsets, the gate, captions and speech
           // all see the same text (no bidi tricks in captions).
           else if (event.type === 'delta')
@@ -248,7 +265,17 @@ export function createLiveBrain({
 
       if (abort.signal.aborted)
         return drop('stopped')
+      // A max_tokens cut can land inside a marker ("…[[act:la"): the parser
+      // then hands the fragment back as text. It is a dangling cut, not
+      // leaked markup, so it goes before the first screen (which would count
+      // a strike for it); a complete reply ending in a broken marker is
+      // still screened as markup.
+      if (result.truncated)
+        text = text.replace(UNCLOSED_MARKER, '')
       text = text.trimEnd()
+      // One list from here to the stage: what the first pass screens is what
+      // shaping starts from, and shaping's result is screened and said.
+      let replyActs = performableActs(acts, text, lengthBudget)
       // The reply as the model wrote it, a max_tokens tail included, is
       // screened first: what the cut or shaping would remove still counts (a
       // strike, the audit log), and the host's blocklist sees emoji before
@@ -261,7 +288,7 @@ export function createLiveBrain({
         if (leaksPrompt(text, promptCorpus) || GUIDE_MARKERS.test(text))
           return block({ reason: 'prompt-leak' })
         const wholeCues = cues.filter(cue => cue.start < text.length)
-        const whole = await screen({ text, delivery: wholeCues[0]?.start === 0 ? wholeCues[0].delivery : 'neutral', cues: wholeCues, firstPass: true })
+        const whole = await screen({ text, delivery: wholeCues[0]?.start === 0 ? wholeCues[0].delivery : 'neutral', cues: wholeCues, acts: replyActs, firstPass: true })
         // Nothing speakable (only a code block) is not harmful: no strike;
         // the final screen drops it.
         if (!whole.ok && whole.reason !== 'empty')
@@ -269,8 +296,10 @@ export function createLiveBrain({
         if (abort.signal.aborted)
           return drop('stopped')
       }
-      if (result.truncated)
+      if (result.truncated) {
         text = cutToLastSentence(text).trimEnd()
+        replyActs = performableActs(replyActs, text, lengthBudget)
+      }
       // Nothing usable (only a tone cue, or no complete sentence before the
       // cut) is a failed generation, not harmful output: no strike.
       if (!text.trim()) {
@@ -280,8 +309,10 @@ export function createLiveBrain({
       }
       // Fit the turn's length and drop chatbot phrasing, so a long but
       // harmless reply is shortened rather than counted a strike.
-      const shaped = shapeReply(text, cues.filter(cue => cue.start < text.length), lengthBudget)
-      hub.publish('brain.style', { itemIds: ids, attempt, ...shaped.report }, { source: 'brain' })
+      const shaped = shapeReply(text, cues.filter(cue => cue.start < text.length), lengthBudget, replyActs)
+      // `acts` are those left to perform; `actsWritten` what the model asked
+      // for (a laugh dropped on a care turn shows up only here).
+      hub.publish('brain.style', { itemIds: ids, attempt, ...shaped.report, actsWritten: acts.map(cue => cue.act) }, { source: 'brain' })
       // Ask again only when chatbot phrasing took the answer and left at
       // most a reaction ("诶？").
       if (!shaped.report.answered && shaped.report.droppedByStyle && attempt === 0)
@@ -295,12 +326,14 @@ export function createLiveBrain({
       }
       text = shaped.text
       kept = shaped.cues
+      keptActs = shaped.acts
       break
     }
     const delivery = kept[0]?.start === 0 ? kept[0].delivery : 'neutral'
 
-    // And again as it will be spoken and captioned.
-    const verdict = await screen({ text, delivery, cues: kept })
+    // And again as it will be spoken and captioned. The stage buys the plan
+    // of exactly these cues and acts, so the screen and the turn share them.
+    const verdict = await screen({ text, delivery, cues: kept, acts: keptActs })
     if (!verdict.ok && verdict.reason === 'empty')
       return drop('empty-reply')
     if (!verdict.ok)
@@ -311,10 +344,10 @@ export function createLiveBrain({
     if (!gate.ok)
       return gate.reason === 'paused' ? drop('not-speakable', { gate: gate.reason }) : release(gate.reason)
 
-    const said = await turns.say({ text, delivery, cues: kept, replyTo: ids, origin: 'brain' })
+    const said = await turns.say({ text, delivery, cues: kept, acts: keptActs, replyTo: ids, origin: 'brain' })
     if (!said.ok)
       return ['LIVE_TURN_ACTIVE', 'LIVE_NO_STAGE'].includes(said.code) ? release(said.code) : drop(said.code ?? 'say-refused')
-    hub.publish('brain.reply', { itemIds: ids, turnId: said.turnId, text, usage: result.usage ?? null }, { source: 'brain' })
+    hub.publish('brain.reply', { itemIds: ids, turnId: said.turnId, text, acts: keptActs, usage: result.usage ?? null }, { source: 'brain' })
     openings.push(openerOf(text))
     openingShapes.push(openingShape(text, batch))
     recentReplies.push(text)

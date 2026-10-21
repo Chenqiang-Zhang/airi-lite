@@ -15,6 +15,8 @@ import type { MouthSegment } from './mouth'
 import { deliveryAtTime, replySentenceStream, SpeechSentenceStream } from './speech-sentences.ts'
 import type { DeliveryCue, PlaybackCue, SpokenSentence } from './speech-sentences'
 import { DEFAULT_VOICE } from './voice.ts'
+import { ACT_PAUSE_SECONDS, isAct, normaliseEmotion } from '../shared/performance-cues.mjs'
+import type { Act, ActCue } from '../shared/performance-cues.mjs'
 
 export type VoiceState = 'idle' | 'loading' | 'ready' | 'fallback' | 'browser' | 'cloud'
 
@@ -25,6 +27,8 @@ export type SpeechRunOutcome = 'played' | 'partial' | 'failed' | 'cancelled' | '
 
 export interface SpeakOptions {
   onEnded?: (outcome: SpeechRunOutcome) => void
+  // The reply's laugh/sigh/pause as [{start, act}] offsets into the text.
+  acts?: ActCue[]
 }
 
 // Policy deadline for an unconfirmed native start, not a browser guarantee or
@@ -35,6 +39,7 @@ interface AudioClip {
   samples: Float32Array
   sampleRate: number
   delivery: Delivery
+  act?: Act // Only on the first clip of the sentence that carries it.
   words?: readonly SpeechWord[]
   wordAlignmentAvailable?: true
   characters?: readonly SpeechCharacter[]
@@ -45,6 +50,7 @@ interface PreparedAudioClip {
   sampleCount: number
   sampleRate: number
   delivery: Delivery
+  act?: Act
   mouth: MouthSegment
   beats: SpeechBeatSegment
 }
@@ -99,6 +105,23 @@ function forChineseVoice(text: string): string {
 
 type SpeechModel = Pick<KokoroTTS, 'stream'>
 
+function withLeadingSilence(samples: Float32Array, count: number): Float32Array {
+  const padded = new Float32Array(count + samples.length)
+  padded.set(samples, count)
+  return padded
+}
+
+// Provider timings are clip-relative, so leading silence moves every interval.
+function delayAlignment(clip: AudioClip, seconds: number): Pick<AudioClip, 'words' | 'wordAlignmentAvailable' | 'characters'> {
+  const delay = <T extends { start: number, end: number }>(items: readonly T[]) =>
+    items.map(item => ({ ...item, start: item.start + seconds, end: item.end + seconds }))
+  return {
+    ...(clip.words ? { words: delay(clip.words) } : {}),
+    ...(clip.wordAlignmentAvailable ? { wordAlignmentAvailable: true as const } : {}),
+    ...(clip.characters ? { characters: delay(clip.characters) } : {}),
+  }
+}
+
 export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   onState: (state: VoiceState) => void
   onPlaying: (playing: boolean) => void
@@ -107,6 +130,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   onMouth: (opening: number | null, form: number, beat: number | null) => void
   onAudioReady: (ready: boolean) => void
   onProblem: (message: string) => void
+  // A laugh, sigh or pause is being performed now: once per act as playback
+  // reaches it (again after a backward seek), or at the start of a system
+  // voice utterance. The avatar's hook; the sound itself is in the audio.
+  onAct?: (act: Act) => void
 }, dependencies: {
   loadModel?: () => Promise<SpeechModel>
   synthesizeCloud?: (sentence: SpokenSentence, signal: AbortSignal) => Promise<CloudSpeechClip>
@@ -132,6 +159,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   let activeInput: SpeechSentenceStream | null = null
   let playbackTimeline: PlaybackCue[] = []
   let reportedDelivery: Delivery | null = null
+  // Acts already performed in this source, and the media time before which
+  // acts are skipped (null: take it from the next frame after a seek).
+  let performedActs = new Set<PlaybackCue>()
+  let actFloor: number | null = 0
   let releaseUtterance: (() => void) | null = null
   let activeVoiceAbort: AbortController | null = null
   let playbackStarted = false
@@ -162,6 +193,12 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   const resetPlaybackClock = () => {
     playbackClock.reset()
     playbackClockStalled = false
+  }
+  // A new source starts from 0. A seek starts from wherever it lands, so a
+  // forward seek never performs the acts it skipped.
+  const resetActs = (floor: number | null) => {
+    performedActs = new Set()
+    actFloor = floor
   }
   const scheduleMouthFrame = () => {
     const revision = ++mouthFrameRevision
@@ -199,8 +236,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     // A media seek/wait can leave paused=false while no sound is advancing.
     // Read current state too, before a queued media event has been delivered.
     if (!playableCurrentSource()) {
-      if (currentSource() && audio.seeking)
+      if (currentSource() && audio.seeking) {
         seekingSource = objectUrl
+        resetActs(null)
+      }
       suspendPlayback(currentSource() && !audio.paused && !audio.ended && !audio.error)
       return
     }
@@ -234,6 +273,16 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     if (delivery !== reportedDelivery) {
       reportedDelivery = delivery
       callbacks.onDelivery(delivery)
+      if (!owns()) return
+    }
+    actFloor ??= audio.currentTime
+    for (const cue of playbackTimeline) {
+      if (cue.time > audio.currentTime)
+        break
+      if (!cue.act || cue.time < actFloor || performedActs.has(cue))
+        continue
+      performedActs.add(cue)
+      callbacks.onAct?.(cue.act)
       if (!owns()) return
     }
     const mouth = mouthAtTime(playbackMouth, audio.currentTime)
@@ -281,6 +330,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     if (!currentSource() || !audio.seeking)
       return
     seekingSource = objectUrl
+    resetActs(null)
     suspendPlayback(!audio.paused && !audio.ended && !audio.error)
   }
   const onSeeked = () => {
@@ -345,6 +395,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     playbackBeats = beatTimeline
     playbackTimeline = timeline
     reportedDelivery = null
+    resetActs(0)
     audio.src = objectUrl
     const installedSource = objectUrl
     audio.load()
@@ -380,15 +431,20 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       }
       const mouth: MouthSegment[] = []
       const beats: SpeechBeatSegment[] = []
+      // One entry per clip, at its own offset: the tone is shared, but an act
+      // on a later clip must still be performed when that clip is reached.
+      const timeline: PlaybackCue[] = []
       let offset = 0
       for (const clip of ready) {
-        mouth.push({ ...clip.mouth, time: offset / next.sampleRate })
-        beats.push({ ...clip.beats, time: offset / next.sampleRate })
+        const time = offset / next.sampleRate
+        mouth.push({ ...clip.mouth, time })
+        beats.push({ ...clip.beats, time })
+        timeline.push({ time, delivery: clip.delivery, ...(clip.act ? { act: clip.act } : {}) })
         offset += clip.sampleCount
       }
       session.playingChunk = true
       session.chunkStarted = false
-      if (!replaceAudioSource(ready.map(clip => clip.pcm), next.sampleRate, [{ time: 0, delivery: next.delivery }], mouth, beats, session.token)) return
+      if (!replaceAudioSource(ready.map(clip => clip.pcm), next.sampleRate, timeline, mouth, beats, session.token)) return
       const source = objectUrl
       callbacks.onPreparing(false)
       if (session !== activeRun || session.token !== run || source !== objectUrl) return
@@ -526,6 +582,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     playbackBeats = []
     playbackTimeline = []
     reportedDelivery = null
+    resetActs(0)
     callbacks.onAudioReady(false)
     callbacks.onMouth(0, 0, null)
     callbacks.onPlaying(false)
@@ -576,6 +633,9 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
           retireStartDeadline()
           callbacks.onPreparing(false)
           callbacks.onDelivery(sentence.delivery)
+          // The system voice has no laugh/sigh and no pause: only the hook.
+          if (sentence.act)
+            callbacks.onAct?.(sentence.act)
           callbacks.onMouth(null, 0, null)
           callbacks.onPlaying(true)
         }
@@ -671,7 +731,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         // never rewrite a cloud provider's input. No retries of paid requests.
         const clip = await dependencies.synthesizeCloud(sentence, controller.signal)
         if (token !== run || controller.signal.aborted) return
-        yield { ...clip, delivery: sentence.delivery }
+        yield { ...clip, delivery: sentence.delivery, ...(sentence.act ? { act: sentence.act } : {}) }
       }
     }
     finally {
@@ -686,6 +746,8 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     for await (const sentence of input) {
       if (token !== run) return
       let segments: ReturnType<SpeechModel['stream']> | null = null
+      // The act goes on this sentence's first chunk only, never into its text.
+      let act = sentence.act
       try {
         while (true) {
           if (!await waitForLocalCapacity(session)) return
@@ -699,11 +761,14 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
           const next = await segments.next()
           if (token !== run || session !== activeRun) return
           if (next.done) break
-          yield {
+          const chunk: AudioClip = {
             samples: new Float32Array(next.value.audio.data as Float32Array),
             sampleRate: next.value.audio.sampling_rate,
             delivery: sentence.delivery,
           }
+          if (act) chunk.act = act
+          act = undefined
+          yield chunk
         }
       }
       finally { await segments?.return(undefined) }
@@ -771,11 +836,13 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       lastBeatPeak: -Infinity,
     }
     activeRun = session
+    // An act whose local chunk was dropped as silent moves to the next chunk.
+    let carriedAct: Act | undefined
     try {
       for await (const segment of source) {
         if (token !== run)
           return
-        const data = segment.samples
+        const samples = segment.samples
         const sampleRate = segment.sampleRate
         if (session.sampleRate && sampleRate !== session.sampleRate)
           throw new Error('Speech sample rate changed during synthesis')
@@ -783,30 +850,39 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
           throw new Error('Speech returned an invalid sample rate')
         let energy = 0
         let peak = 0
-        for (const sample of data) {
+        for (const sample of samples) {
           if (!Number.isFinite(sample))
             throw new Error('Speech returned invalid audio samples')
           energy += sample * sample
           peak = Math.max(peak, Math.abs(sample))
         }
-        if (!data.length || peak < 0.001 || Math.sqrt(energy / data.length) < 0.0001) {
+        if (!samples.length || peak < 0.001 || Math.sqrt(energy / samples.length) < 0.0001) {
           // Do not pay for more cloud sentences when the initial result cannot
           // produce a playable current clip. Local chunk filtering is unchanged.
           if (state === 'cloud')
             throw new Error('Cloud speech returned silent audio')
+          carriedAct ??= segment.act
           continue
         }
+        const act = segment.act ?? carriedAct
+        carriedAct = undefined
+        // A pause is silence at the start of its sentence's first clip, the
+        // same for every engine. Never a clip of its own: silent clips are
+        // dropped or rejected above, and a join would add a gap.
+        const pause = act === 'pause' ? Math.round(ACT_PAUSE_SECONDS * sampleRate) : 0
+        const data = pause ? withLeadingSilence(samples, pause) : samples
+        const alignment = pause ? delayAlignment(segment, pause / sampleRate) : segment
         const duration = data.length / sampleRate
         // Check aggregate RIFF dimensions before accepting another part, not
         // later in an ended callback while installing the completed replay.
         createWavHeader(sampleRate, session.total + data.length)
         const frames = mouthFrames(data, sampleRate)
         const start = session.total / sampleRate
-        const events = speechBeats(segment, frames, duration, session.lastBeatPeak - start)
+        const events = speechBeats(alignment, frames, duration, session.lastBeatPeak - start)
         if (events?.length) session.lastBeatPeak = start + events.at(-1)!.peak
         const pcm = createPcm16Blob(data)
         session.sampleRate = sampleRate
-        session.timeline.push({ time: start, delivery: segment.delivery })
+        session.timeline.push({ time: start, delivery: segment.delivery, ...(act ? { act } : {}) })
         session.mouthTimeline.push({ time: start, duration, frames })
         session.beatTimeline.push({ time: start, duration, events })
         session.pcmParts.push(pcm)
@@ -814,7 +890,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         // Construct explicitly: spreading segment would retain historical
         // Float32 PCM even though both playback paths need only encoded parts.
         session.queue.push({ pcm, sampleCount: data.length, sampleRate, delivery: segment.delivery,
-          mouth: { time: 0, duration, frames }, beats: { time: 0, duration, events } })
+          ...(act ? { act } : {}), mouth: { time: 0, duration, frames }, beats: { time: 0, duration, events } })
         advance(session)
       }
       if (token !== run)
@@ -859,13 +935,14 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     cancel()
     const token = run
     const onEnded = options.onEnded
+    const acts = options.acts ?? []
     if (onEnded)
       pendingEnd = { token, fire: outcome => queueMicrotask(() => onEnded(outcome)) }
     if (!text.trim()) {
       settle(token, 'empty')
       return
     }
-    const input = replySentenceStream(text, delivery, cues)
+    const input = replySentenceStream(text, delivery, cues, '', acts)
     activeInput = input
     callbacks.onProblem('')
     try {
@@ -880,7 +957,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         return
       }
       console.warn('Speech synthesis failed; using browser speech', error)
-      const fallbackInput = replySentenceStream(text, delivery, cues)
+      const fallbackInput = replySentenceStream(text, delivery, cues, '', acts)
       activeInput = fallbackInput
       settle(token, await browserSpeech(fallbackInput, token, fallbackProblem(engine, error)) ? 'played' : 'failed')
     }
@@ -893,8 +970,11 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   function beginStream(userText: string, preferredDelivery?: Delivery, voice: VoiceId = DEFAULT_VOICE, engine: SpeechEngine = 'local') {
     cancel()
     const token = run
-    const input = new SpeechSentenceStream(userText, preferredDelivery)
-    const cues: DeliveryCue[] = preferredDelivery ? [{ start: 0, delivery: preferredDelivery }] : []
+    // Untyped callers (preview pages) may still pass the old 'bright'.
+    const opening = normaliseEmotion(preferredDelivery) ?? undefined
+    const input = new SpeechSentenceStream(userText, opening)
+    const cues: DeliveryCue[] = opening ? [{ start: 0, delivery: opening }] : []
+    const acts: ActCue[] = []
     activeInput = input
     callbacks.onProblem('')
 
@@ -919,7 +999,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
           return
         }
         console.warn('Speech streaming synthesis failed; using browser speech', error)
-        const fallbackInput = replySentenceStream(input.text, preferredDelivery, cues, userText)
+        const fallbackInput = replySentenceStream(input.text, opening, cues, userText, acts)
         activeInput = fallbackInput
         await browserSpeech(fallbackInput, token, fallbackProblem(engine, error))
       }
@@ -933,9 +1013,16 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     return {
       push(delta: string) { if (token === run) input.push(delta) },
       setDelivery(delivery: Delivery) {
-        if (token !== run) return
-        cues.push({ start: input.text.length, delivery })
-        input.setDelivery(delivery)
+        const value = normaliseEmotion(delivery)
+        if (token !== run || !value) return
+        cues.push({ start: input.text.length, delivery: value })
+        input.setDelivery(value)
+      },
+      // Before the text pushed next. Only a reply's first act counts.
+      setAct(act: Act) {
+        if (token !== run || acts.length || !isAct(act)) return
+        acts.push({ start: input.text.length, act })
+        input.setAct(act)
       },
       finish() { input.finish() },
       cancel: cancelStream,

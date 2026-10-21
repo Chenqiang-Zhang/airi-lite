@@ -36,19 +36,19 @@ test('chatbot phrasing is found per sentence', () => {
 
 test('removing spans moves each cue with its text; collapsed cues keep the latest tone', () => {
   const text = '一二。三四。五六。'
-  const cues = [{ start: 0, delivery: 'bright' }, { start: 3, delivery: 'soft' }, { start: 6, delivery: 'curious' }]
+  const cues = [{ start: 0, delivery: 'happy' }, { start: 3, delivery: 'soft' }, { start: 6, delivery: 'curious' }]
   assert.deepEqual(removeRanges(text, cues, [{ start: 0, end: 3 }]), {
-    text: '三四。五六。', cues: [{ start: 0, delivery: 'soft' }, { start: 3, delivery: 'curious' }],
+    text: '三四。五六。', cues: [{ start: 0, delivery: 'soft' }, { start: 3, delivery: 'curious' }], acts: [],
   })
   assert.deepEqual(removeRanges(text, cues, [{ start: 3, end: 6 }]).cues,
-    [{ start: 0, delivery: 'bright' }, { start: 3, delivery: 'curious' }])
+    [{ start: 0, delivery: 'happy' }, { start: 3, delivery: 'curious' }])
   assert.deepEqual(removeRanges(text, cues, [{ start: 6, end: 9 }]).cues,
-    [{ start: 0, delivery: 'bright' }, { start: 3, delivery: 'soft' }], 'a cue past the end is dropped')
+    [{ start: 0, delivery: 'happy' }, { start: 3, delivery: 'soft' }], 'a cue past the end is dropped')
 })
 
 test('shaping drops tells, strips markdown and emoji, fits the budget and reports what changed', () => {
   const text = '希望对你有帮助！**今天**早点睡😴。明天见。顺便一说。再说一句。'
-  const cues = [{ start: 0, delivery: 'bright' }, { start: 8, delivery: 'soft' }]
+  const cues = [{ start: 0, delivery: 'happy' }, { start: 8, delivery: 'soft' }]
   const shaped = shapeReply(text, cues, DANMAKU)
   assert.equal(shaped.text, '今天早点睡。明天见。')
   assert.deepEqual(shaped.cues, [{ start: 0, delivery: 'soft' }])
@@ -93,7 +93,7 @@ test('backstage words and claims to hear or play are reported, never removed', (
 
 test('an AI admission or a pointer to help is never dropped, whatever the budget or phrasing', async () => {
   const { withoutProtected, repeatedPhrases } = await import('./style.mjs')
-  const honest = shapeReply('不是真人哦，我是个AI助手。不过陪你聊天是认真的！', [{ start: 0, delivery: 'bright' }], DANMAKU)
+  const honest = shapeReply('不是真人哦，我是个AI助手。不过陪你聊天是认真的！', [{ start: 0, delivery: 'happy' }], DANMAKU)
   assert.equal(honest.text, '不是真人哦，我是个AI助手。不过陪你聊天是认真的！')
   assert.deepEqual(honest.report.hits, [{ rule: 'assistant', sentence: '不是真人哦，我是个AI助手。', dropped: false }])
   assert.equal(honest.report.droppedByStyle, 0)
@@ -156,4 +156,64 @@ test('asides and TTS controls are removed; "（AI）" and countdowns stay; Chine
   assert.equal(shapeReply('好耶(laughs)<#0.5#>开始。', [], DANMAKU).text, '好耶开始。')
   assert.equal(shapeReply('我是日和（AI）。', [], DANMAKU).text, '我是日和（AI）。')
   assert.equal(shapeReply('1、先喝水\n2、再睡觉', [], DANMAKU).text, '先喝水\n再睡觉')
+})
+
+test('sound and SSML tags are removed as asides; "<" in ordinary text is not a tag', () => {
+  for (const [text, expected] of [
+    ['<laughter>哈哈</laughter>你好。', '哈哈你好。'],
+    ['好呀<break time="2s"/>开始吧。', '好呀开始吧。'],
+    ['<strong>重点</strong>来了。', '重点来了。'],
+    ['1<2，所以选二。', '1<2，所以选二。'],
+    ['我爱你<3', '我爱你<3'],
+    ['<-看这里。', '<-看这里。'],
+    ['>_<好吧。', '>_<好吧。'],
+    ['A<B，B>C 这个顺序。', 'A<B，B>C 这个顺序。'],
+  ])
+    assert.equal(shapeReply(text, [], DANMAKU).text, expected, text)
+  assert.deepEqual(shapeReply('<laughter>哈哈</laughter>你好。', [], DANMAKU).report.fixed, ['aside'])
+})
+
+test('a dropped span deletes the acts inside it; other spans move acts like cues; acts never collapse with cues', () => {
+  const text = '一二。三四。五六。'
+  const cues = [{ start: 0, delivery: 'happy' }]
+  const drop = range => ({ ...range, drop: true })
+  assert.deepEqual(removeRanges(text, cues, [drop({ start: 0, end: 3 })], [{ start: 0, act: 'laugh' }]).acts, [], 'its own sentence went')
+  assert.deepEqual(removeRanges(text, cues, [drop({ start: 0, end: 3 })], [{ start: 3, act: 'laugh' }]).acts, [{ start: 0, act: 'laugh' }], 'the next sentence stays, and so does its act')
+  assert.deepEqual(removeRanges(text, cues, [drop({ start: 6, end: 9 })], [{ start: 9, act: 'sigh' }]).acts, [], 'nothing follows the dropped end')
+  assert.deepEqual(removeRanges(text, cues, [{ start: 0, end: 3 }], [{ start: 1, act: 'pause' }]).acts, [{ start: 0, act: 'pause' }], 'markup removal moves it')
+  const both = removeRanges(text, [{ start: 0, delivery: 'happy' }, { start: 3, delivery: 'soft' }], [{ start: 0, end: 3 }], [{ start: 0, act: 'laugh' }])
+  assert.deepEqual([both.cues, both.acts], [[{ start: 0, delivery: 'soft' }], [{ start: 0, act: 'laugh' }]])
+  assert.deepEqual(removeRanges(text, cues, [drop({ start: 0, end: 2 }), { start: 1, end: 3 }], [{ start: 2, act: 'laugh' }]).acts, [], 'overlapping spans drop if either does')
+})
+
+test('shaping keeps each act with its words and reports what it did with them', () => {
+  const cues = [{ start: 0, delivery: 'happy' }]
+  const laughFirst = shapeReply('哈哈，好耶。', cues, DANMAKU, [{ start: 0, act: 'laugh' }])
+  assert.deepEqual([laughFirst.text, laughFirst.cues, laughFirst.acts], ['哈哈，好耶。', cues, [{ start: 0, act: 'laugh' }]], 'the tone at 0 stays beside it')
+  assert.deepEqual([laughFirst.report.acts, laughFirst.report.actsDropped], [['laugh'], 0])
+
+  const tell = shapeReply('希望对你有帮助！早点睡。', cues, DANMAKU, [{ start: 0, act: 'sigh' }])
+  assert.deepEqual([tell.text, tell.acts, tell.report.actsDropped], ['早点睡。', [], 1], 'a chatbot sentence takes its act along')
+  const next = shapeReply('希望对你有帮助！早点睡。', cues, DANMAKU, [{ start: 8, act: 'sigh' }])
+  assert.deepEqual(next.acts, [{ start: 0, act: 'sigh' }], 'the act of a kept sentence moves with it')
+
+  const budget = shapeReply('诶？真的假的！我也想去。不过今天太晚了。', [], DANMAKU, [{ start: 12, act: 'sigh' }])
+  assert.deepEqual([budget.text, budget.acts, budget.report.actsDropped], ['诶？真的假的！我也想去。', [], 1], 'past the budget')
+
+  const clause = shapeReply('我是AI哦，有什么可以帮你的吗？', [], DANMAKU, [{ start: 6, act: 'laugh' }])
+  assert.deepEqual([clause.text, clause.acts], ['我是AI哦。', []], 'a clause cut out takes its act along')
+
+  const aside = shapeReply('好耶(laughs)开始。', [], DANMAKU, [{ start: 2, act: 'pause' }])
+  assert.deepEqual([aside.text, aside.acts], ['好耶开始。', [{ start: 2, act: 'pause' }]], 'an aside removed in place moves it')
+  assert.deepEqual(shapeReply('好耶(laughs)开始。', [], DANMAKU).acts, [], 'a written laugh is removed, not turned into an act')
+
+  const emojiOnly = shapeReply('好。😀！', [], DANMAKU, [{ start: 2, act: 'laugh' }])
+  assert.deepEqual([emojiOnly.text, emojiOnly.acts, emojiOnly.report.actsDropped], ['好。！', [], 1], 'nothing to say after it')
+})
+
+test('clean-up passes repeat until nothing changes, so nested or disguised tags are removed', () => {
+  assert.equal(shapeReply('快来加( **laughs**)微信吧！', [], DANMAKU).text, '快来加微信吧！')
+  assert.equal(shapeReply('哼，<laughter​>才没有呢。', [], DANMAKU).text, '哼，才没有呢。')
+  assert.equal(shapeReply('哼，<laugh😂ter>才没有呢。', [], DANMAKU).text, '哼，才没有呢。')
+  assert.equal(shapeReply('if a<b and b>c then 就对了。', [], DANMAKU).text, 'if a<b and b>c then 就对了。')
 })

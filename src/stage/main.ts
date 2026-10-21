@@ -55,6 +55,9 @@ const speech = createSpeechController(audio, {
   onAudioReady: () => {},
   // Includes "autoplay blocked": the host sees it in the console.
   onProblem: message => client?.reportProblem(message),
+  // A laugh/sigh/pause is being performed: the hook P3's per-model motions
+  // attach to. The sound (or silence) is already in the audio.
+  onAct: () => {},
 }, {
   synthesizeCloud: (sentence, signal) => client!.synthesizeCloud(sentence, signal),
   // OBS's browser source may have no audible system voice; skip instead.

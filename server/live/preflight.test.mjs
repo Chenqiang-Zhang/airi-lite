@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
+import { STAGE_PROTOCOL } from '../../shared/performance-cues.mjs'
+
 import { createRequestHandler } from '../app.mjs'
 import { parseRules } from './moderation.mjs'
 import { countRuleTerms, resolveProfile, runPreflight, STALE_LOCK_MS } from './preflight.mjs'
@@ -299,7 +301,7 @@ async function openStage(context, base) {
 
 async function readyStage(context, base, { obs = { active: true, visible: true, streaming: true } } = {}) {
   const stage = await openStage(context, base)
-  assert.equal((await stage.report({ type: 'ready' })).status, 204)
+  assert.equal((await stage.report({ type: 'ready', protocol: STAGE_PROTOCOL })).status, 204)
   assert.equal((await stage.report({ type: 'avatar', status: 'ready' })).status, 204)
   if (obs)
     assert.equal((await stage.report({ type: 'obs', ...obs })).status, 204)

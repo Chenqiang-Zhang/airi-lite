@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { deliveryAtTime, replySentenceStream, SpeechSentenceStream } from './speech-sentences.ts'
+import { deliveryAtTime, normaliseDeliveryCues, replySentenceStream, SpeechSentenceStream } from './speech-sentences.ts'
 
 test('a tone change flushes an unfinished clause without changing queued speech', async () => {
-  const stream = new SpeechSentenceStream('', 'bright')
+  const stream = new SpeechSentenceStream('', 'happy')
   stream.push('太好啦！不过')
   stream.setDelivery('soft')
   stream.push('今天先休息。')
@@ -13,8 +13,8 @@ test('a tone change flushes an unfinished clause without changing queued speech'
   const sentences = []
   for await (const sentence of stream) sentences.push(sentence)
   assert.deepEqual(sentences, [
-    { text: '太好啦！', delivery: 'bright' },
-    { text: '不过', delivery: 'bright' },
+    { text: '太好啦！', delivery: 'happy' },
+    { text: '不过', delivery: 'happy' },
     { text: '今天先休息。', delivery: 'soft' },
     { text: '明天呢？', delivery: 'curious' },
   ])
@@ -40,26 +40,26 @@ test('cancel wakes an empty consumer both before the first sentence and between 
 test('saved reply offsets reproduce tone changes when speech is generated again', async () => {
   const text = '好耶！先歇一下。明天呢？'
   const stream = replySentenceStream(text, 'neutral', [
-    { start: 0, delivery: 'bright' },
+    { start: 0, delivery: 'happy' },
     { start: 3, delivery: 'soft' },
     { start: 8, delivery: 'curious' },
   ])
   const sentences = []
   for await (const sentence of stream) sentences.push(sentence)
-  assert.deepEqual(sentences.map(sentence => sentence.delivery), ['bright', 'soft', 'curious'])
+  assert.deepEqual(sentences.map(sentence => sentence.delivery), ['happy', 'soft', 'curious'])
   assert.equal(sentences.map(sentence => sentence.text).join(''), text)
 })
 
 test('audio time selects the right cue again after seeking backward', () => {
   const cues = [
-    { time: 0, delivery: 'bright' },
+    { time: 0, delivery: 'happy' },
     { time: 2.4, delivery: 'soft' },
     { time: 4.1, delivery: 'curious' },
   ]
-  assert.equal(deliveryAtTime(cues, 0), 'bright')
+  assert.equal(deliveryAtTime(cues, 0), 'happy')
   assert.equal(deliveryAtTime(cues, 2.4), 'soft')
   assert.equal(deliveryAtTime(cues, 5), 'curious')
-  assert.equal(deliveryAtTime(cues, 1), 'bright')
+  assert.equal(deliveryAtTime(cues, 1), 'happy')
 })
 
 const collect = async stream => {
@@ -71,37 +71,37 @@ const collect = async stream => {
 test('repeated explicit delivery is idempotent and matches replay without cutting a clause', async () => {
   const prefix = '我刚才还'
   const text = `${prefix}在想，要不要换个话题。`
-  for (const preferred of [undefined, 'bright']) {
+  for (const preferred of [undefined, 'happy']) {
     const stream = new SpeechSentenceStream('', preferred)
-    stream.setDelivery('bright')
+    stream.setDelivery('happy')
     stream.push(prefix)
-    stream.setDelivery('bright')
-    stream.setDelivery('bright')
+    stream.setDelivery('happy')
+    stream.setDelivery('happy')
     stream.push(text.slice(prefix.length))
     stream.finish()
     const actual = await collect(stream)
-    assert.deepEqual(actual, [{ text, delivery: 'bright' }])
+    assert.deepEqual(actual, [{ text, delivery: 'happy' }])
     assert.deepEqual(actual, await collect(replySentenceStream(text, preferred, [
-      { start: 0, delivery: 'bright' },
-      { start: prefix.length, delivery: 'bright' },
+      { start: 0, delivery: 'happy' },
+      { start: prefix.length, delivery: 'happy' },
     ])))
   }
 })
 
 test('duplicate requested cues preserve a deferred keycap boundary and a newer reversion replaces it', async () => {
   for (const suffix of ['个步骤。', '\uFE0F\u20E3下一句。']) {
-    const stream = new SpeechSentenceStream('', 'bright')
+    const stream = new SpeechSentenceStream('', 'happy')
     stream.push('嗨1')
     stream.setDelivery('soft')
     stream.setDelivery('soft')
-    stream.setDelivery('bright')
-    stream.setDelivery('bright')
+    stream.setDelivery('happy')
+    stream.setDelivery('happy')
     stream.push(suffix)
     stream.finish()
     const actual = await collect(stream)
     assert.deepEqual(actual, [{
       text: suffix.startsWith('\uFE0F') ? '嗨下一句。' : '嗨1个步骤。',
-      delivery: 'bright',
+      delivery: 'happy',
     }], 'a reverted pending cue neither survives nor cuts the original clause')
   }
 })
@@ -109,7 +109,7 @@ test('duplicate requested cues preserve a deferred keycap boundary and a newer r
 test('streaming and replay omit code/destinations while retaining visible cue offsets', async () => {
   const text = '太好啦！\n```python\nprint("不该念出来。")\n```\n[先歇一下。](https://example.invalid/a_(b))\n明天呢？'
   const cues = [
-    { start: 0, delivery: 'bright' },
+    { start: 0, delivery: 'happy' },
     { start: text.indexOf('print') + 2, delivery: 'soft' },
     { start: text.indexOf('明天'), delivery: 'curious' },
   ]
@@ -123,27 +123,27 @@ test('streaming and replay omit code/destinations while retaining visible cue of
   assert.equal(streaming.text, text)
   assert.deepEqual(spoken, await collect(replySentenceStream(text, undefined, cues)))
   assert.deepEqual(spoken, [
-    { text: '太好啦！', delivery: 'bright' },
+    { text: '太好啦！', delivery: 'happy' },
     { text: '先歇一下。', delivery: 'soft' },
     { text: '明天呢？', delivery: 'curious' },
   ])
 })
 
 test('a cue in a link label does not retroactively change already streamed words', async () => {
-  const stream = new SpeechSentenceStream('', 'bright')
+  const stream = new SpeechSentenceStream('', 'happy')
   stream.push('[真的好耶。')
   stream.setDelivery('soft')
   stream.push('先歇一下。](https://example.invalid)')
   stream.finish()
   assert.deepEqual(await collect(stream), [
-    { text: '真的好耶。', delivery: 'bright' },
+    { text: '真的好耶。', delivery: 'happy' },
     { text: '先歇一下。', delivery: 'soft' },
   ])
 })
 
 test('only code, images, emoji or punctuation produce no spoken sentences', async () => {
   for (const text of ['```python\n[x * 2 for x in [1,2,3]]\n```', '~~~js\nalert("。")', '![日和](https://example.invalid/a.png)', '😊✨！！！…']) {
-    const stream = new SpeechSentenceStream('', 'bright')
+    const stream = new SpeechSentenceStream('', 'happy')
     for (const fragment of text) stream.push(fragment)
     stream.finish()
     assert.deepEqual(await collect(stream), [])
@@ -153,10 +153,10 @@ test('only code, images, emoji or punctuation produce no spoken sentences', asyn
 
 test('emoji decoration is removed from mixed speech without changing the visible reply', async () => {
   const text = '好耶😊👩‍💻🇯🇵！1️⃣ 接着说42。'
-  const stream = replySentenceStream(text, 'bright')
+  const stream = replySentenceStream(text, 'happy')
   assert.deepEqual(await collect(stream), [
-    { text: '好耶！', delivery: 'bright' },
-    { text: '接着说42。', delivery: 'bright' },
+    { text: '好耶！', delivery: 'happy' },
+    { text: '接着说42。', delivery: 'happy' },
   ])
   assert.equal(stream.text, text)
 })
@@ -165,25 +165,25 @@ test('forced length and tone boundaries cannot turn a keycap into a spoken digit
   assert.deepEqual(await collect(replySentenceStream('😊'.repeat(89) + '1️⃣')), [])
   const longText = '哈'.repeat(179) + '1️⃣' + '😊'
   assert.equal((await collect(replySentenceStream(longText))).map(sentence => sentence.text).join(''), '哈'.repeat(179))
-  const stream = new SpeechSentenceStream('', 'bright')
+  const stream = new SpeechSentenceStream('', 'happy')
   stream.push('嗨1')
   stream.setDelivery('soft')
   stream.push('\uFE0F')
   stream.push('\u20E3')
   stream.finish()
-  assert.deepEqual(await collect(stream), [{ text: '嗨', delivery: 'bright' }])
+  assert.deepEqual(await collect(stream), [{ text: '嗨', delivery: 'happy' }])
   assert.equal(stream.text, '嗨1️⃣')
 })
 
 test('a real final digit belongs wholly to its original tone, including a numeric line start', async () => {
   for (const prefix of ['实际有42', '42']) {
-    const stream = new SpeechSentenceStream('', 'bright')
+    const stream = new SpeechSentenceStream('', 'happy')
     stream.push(prefix)
     stream.setDelivery('soft')
     stream.push('个步骤。')
     stream.finish()
     assert.deepEqual(await collect(stream), [
-      { text: prefix, delivery: 'bright' },
+      { text: prefix, delivery: 'happy' },
       { text: '个步骤。', delivery: 'soft' },
     ])
   }
@@ -191,14 +191,14 @@ test('a real final digit belongs wholly to its original tone, including a numeri
 
 test('multiple cues on one candidate flush the old tone once and use the newest next tone', async () => {
   for (const suffix of ['个步骤。', '\uFE0F\u20E3下一句。']) {
-    const stream = new SpeechSentenceStream('', 'bright')
+    const stream = new SpeechSentenceStream('', 'happy')
     stream.push('嗨1')
     stream.setDelivery('soft')
     stream.setDelivery('curious')
     stream.push(suffix)
     stream.finish()
     assert.deepEqual(await collect(stream), [
-      { text: suffix.startsWith('\uFE0F') ? '嗨' : '嗨1', delivery: 'bright' },
+      { text: suffix.startsWith('\uFE0F') ? '嗨' : '嗨1', delivery: 'happy' },
       { text: suffix.startsWith('\uFE0F') ? '下一句。' : suffix, delivery: 'curious' },
     ])
   }
@@ -206,13 +206,13 @@ test('multiple cues on one candidate flush the old tone once and use the newest 
 
 test('finish preserves a real incomplete candidate under the old tone; cancel emits nothing', async () => {
   for (const tail of ['42', '42\uFE0F']) {
-    const stream = new SpeechSentenceStream('', 'bright')
+    const stream = new SpeechSentenceStream('', 'happy')
     stream.push(`实际有${tail}`)
     stream.setDelivery('soft')
     stream.finish()
-    assert.deepEqual(await collect(stream), [{ text: '实际有42', delivery: 'bright' }])
+    assert.deepEqual(await collect(stream), [{ text: '实际有42', delivery: 'happy' }])
   }
-  const canceled = new SpeechSentenceStream('', 'bright')
+  const canceled = new SpeechSentenceStream('', 'happy')
   canceled.push('实际有42')
   canceled.setDelivery('soft')
   const waiting = canceled[Symbol.asyncIterator]().next()
@@ -226,7 +226,7 @@ test('finish preserves a real incomplete candidate under the old tone; cancel em
 test('streaming and replay agree when a cue falls after a real digit or inside a keycap', async () => {
   for (const [prefix, suffix] of [['实际有42', '个步骤。'], ['嗨1', '\uFE0F\u20E3下一句。']]) {
     const text = prefix + suffix
-    const cues = [{ start: 0, delivery: 'bright' }, { start: prefix.length, delivery: 'soft' }]
+    const cues = [{ start: 0, delivery: 'happy' }, { start: prefix.length, delivery: 'soft' }]
     const stream = new SpeechSentenceStream()
     for (let index = 0; index < text.length; index++) {
       for (const cue of cues.filter(cue => cue.start === index)) stream.setDelivery(cue.delivery)
@@ -297,12 +297,12 @@ test('a pending ASCII ending uses the newest tone request only for later words',
     const stream = new SpeechSentenceStream('', 'curious')
     stream.push(prefix)
     stream.setDelivery('soft')
-    stream.setDelivery('bright')
+    stream.setDelivery('happy')
     stream.push('下一句。')
     stream.finish()
     assert.deepEqual(await collect(stream), [
       { text: prefix, delivery: 'curious' },
-      { text: '下一句。', delivery: 'bright' },
+      { text: '下一句。', delivery: 'happy' },
     ])
   }
 })
@@ -420,4 +420,48 @@ test('cancel releases a consumer during a silent fenced continuation after an al
   stream.push('\n```\n不能再念。')
   stream.finish()
   assert.deepEqual(await collect(stream), [])
+})
+
+test('an act starts a new sentence, belongs to the next one with words, and only the first counts', async () => {
+  const plan = async (...args) => {
+    const sentences = []
+    for await (const sentence of replySentenceStream(...args)) sentences.push(sentence)
+    return sentences
+  }
+  // At the start of a reply: no split, the first sentence carries it.
+  assert.deepEqual(await plan('哈哈，真的假的。我也想去。', 'happy', [], '', [{ start: 0, act: 'laugh' }]),
+    [{ text: '哈哈，真的假的。', delivery: 'happy', act: 'laugh' }, { text: '我也想去。', delivery: 'happy' }])
+  // Mid-sentence: the clause before it stays its own sentence.
+  assert.deepEqual(await plan('这个嘛我想想，应该可以。', 'curious', [], '', [{ start: 3, act: 'pause' }]),
+    [{ text: '这个嘛', delivery: 'curious' }, { text: '我想想，应该可以。', delivery: 'curious', act: 'pause' }])
+  // A trailing act has nothing to go before, so it is dropped (before the
+  // final 。 it still splits it off; the live brain drops such acts first).
+  assert.deepEqual(await plan('好的。', 'neutral', [], '', [{ start: 2, act: 'sigh' }]), [{ text: '好的', delivery: 'neutral' }])
+  // A tone change and an act at one offset: the act's sentence has the new tone.
+  assert.deepEqual(await plan('还行吧。真的太好了！', 'neutral', [{ start: 4, delivery: 'happy' }], '', [{ start: 4, act: 'laugh' }]),
+    [{ text: '还行吧。', delivery: 'neutral' }, { text: '真的太好了！', delivery: 'happy', act: 'laugh' }])
+  // Only one act per reply; sentences without one have no act key at all.
+  const two = await plan('一句。两句。', 'neutral', [], '', [{ start: 0, act: 'laugh' }, { start: 3, act: 'sigh' }])
+  assert.deepEqual(two, [{ text: '一句。', delivery: 'neutral', act: 'laugh' }, { text: '两句。', delivery: 'neutral' }])
+  assert.equal(Object.hasOwn(two[1], 'act'), false)
+})
+
+test('a tone change and an act at one deferred boundary both apply', async () => {
+  // "1" may start a keycap, so the boundary is deferred until it resolves.
+  const stream = new SpeechSentenceStream('', 'neutral')
+  stream.push('好的1')
+  stream.setDelivery('happy')
+  stream.setAct('laugh')
+  stream.push('就这样。')
+  stream.finish()
+  const sentences = []
+  for await (const sentence of stream) sentences.push(sentence)
+  assert.deepEqual(sentences, [{ text: '好的1', delivery: 'neutral' }, { text: '就这样。', delivery: 'happy', act: 'laugh' }])
+})
+
+test('old bright cues are read as happy and merged with a following happy cue', async () => {
+  assert.deepEqual(normaliseDeliveryCues([{ start: 0, delivery: 'bright' }, { start: 3, delivery: 'happy' }], 6), [{ start: 0, delivery: 'happy' }])
+  const sentences = []
+  for await (const sentence of replySentenceStream('好耶好耶。', 'bright')) sentences.push(sentence)
+  assert.deepEqual(sentences, [{ text: '好耶好耶。', delivery: 'happy' }])
 })

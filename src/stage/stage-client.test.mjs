@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { STAGE_PROTOCOL } from '../../shared/performance-cues.mjs'
+
 import { SpeechApiError } from '../cloud-speech.ts'
 import { createStageClient, isStageProblem, resolveStageRole } from './stage-client.ts'
 
@@ -82,7 +84,7 @@ test('the primary reports ready (and known avatar/OBS state), speaks on cloud an
   f.emit('hello', { leaseId: 'lease-1', role: 'obs', primary: true, mode: 'live' })
   await settle()
   assert.deepEqual(f.reports(), [
-    { leaseId: 'lease-1', type: 'ready' },
+    { leaseId: 'lease-1', type: 'ready', protocol: STAGE_PROTOCOL },
     { leaseId: 'lease-1', type: 'avatar', status: 'ready' },
     { leaseId: 'lease-1', type: 'obs', active: true, visible: true, streaming: false },
   ])
@@ -187,7 +189,7 @@ test('a lost stream drops the lease immediately and reconnects with backoff for 
   f.emit('hello', { leaseId: 'lease-2', primary: true, mode: 'brb' })
   await settle()
   assert.equal(f.view.brb.at(-1), true, 'a reconnect lands on the current screen mode')
-  assert.deepEqual(f.reports().at(-1), { leaseId: 'lease-2', type: 'ready' })
+  assert.deepEqual(f.reports().at(-1), { leaseId: 'lease-2', type: 'ready', protocol: STAGE_PROTOCOL })
   f.disconnect()
   assert.ok([...f.timers.values()].some(timer => timer.ms === 1_000), 'a successful hello resets the backoff')
   f.client.stop()
@@ -217,4 +219,48 @@ test('a lost event stream drops the thinking pose; the next hello restores the s
   f.emit('hello', { leaseId: 'lease-2', primary: true, mode: 'live', activity: 'thinking' })
   assert.deepEqual(f.view.thinking, [false, true, false, true])
   f.client.stop()
+})
+
+test('a say carries its acts to speech, and a purchase names the act only for the sentence that has one', async () => {
+  const f = fixture()
+  f.client.start()
+  f.emit('hello', { leaseId: 'lease-1', primary: true, mode: 'live' })
+  const acts = [{ start: 3, act: 'laugh' }]
+  f.emit('say', { turnId: 't1', text: '谢谢！哈哈真好。', delivery: 'bright', cues: [], acts })
+  assert.equal(f.spoken.length, 1)
+  assert.equal(f.spoken[0].delivery, 'happy', 'an old server\'s bright is spoken as happy')
+  assert.equal(f.spoken[0].options.acts, acts, 'the raw list goes to the planner, which validates it')
+  f.emit('say', { turnId: 't2', text: '没有动作。', delivery: 'sad', cues: [] })
+  assert.deepEqual(f.spoken[1].options.acts, [])
+
+  await f.client.synthesizeCloud({ text: '哈哈真好。', delivery: 'happy', act: 'laugh' }, new AbortController().signal)
+  assert.equal(JSON.stringify(f.posts.at(-1).body),
+    JSON.stringify({ leaseId: 'lease-1', turnId: 't2', text: '哈哈真好。', delivery: 'happy', act: 'laugh' }))
+  await f.client.synthesizeCloud({ text: '没有动作。', delivery: 'sad' }, new AbortController().signal)
+  assert.equal(JSON.stringify(f.posts.at(-1).body),
+    JSON.stringify({ leaseId: 'lease-1', turnId: 't2', text: '没有动作。', delivery: 'sad' }))
+})
+
+test('a tone this page does not know is reported and ends the turn at once instead of waiting for the watchdog', async () => {
+  for (const role of ['obs', 'preview']) {
+    const f = fixture({ role })
+    f.client.start()
+    f.emit('hello', role === 'obs' ? { leaseId: 'lease-1', primary: true, mode: 'live' } : { leaseId: null, primary: false, mode: 'live' })
+    await settle()
+    const before = f.reports().length
+    f.emit('say', { turnId: 't1', text: '新语气。', delivery: 'ecstatic', cues: [] })
+    await settle()
+    assert.equal(f.spoken.length, 0)
+    assert.deepEqual(f.view.captions, [])
+    const reports = f.reports().slice(before)
+    if (role === 'preview') {
+      assert.deepEqual(reports, [], 'a preview never reports')
+      continue
+    }
+    assert.equal(reports.length, 2)
+    assert.equal(reports[0].type, 'problem')
+    assert.match(reports[0].message, /ecstatic/)
+    assert.ok(reports[0].message.length <= 120)
+    assert.deepEqual(reports[1], { leaseId: 'lease-1', type: 'ended', turnId: 't1', outcome: 'failed' })
+  }
 })

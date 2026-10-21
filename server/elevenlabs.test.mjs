@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { ACTS, EMOTIONS } from '../shared/performance-cues.mjs'
 import { buildElevenLabsRequest, estimateElevenLabsReservation, readElevenLabsConfig, synthesiseElevenLabs } from './elevenlabs.mjs'
 import { SpeechProviderError } from './speech-error.mjs'
 
@@ -65,30 +66,57 @@ test('OFF by default; explicit switch, supported model, credentials and integer 
   assert.equal(readElevenLabsConfig({ ...env, ELEVENLABS_ENDPOINT: 'https://attacker.invalid' }).endpoint, endpoint)
 })
 
+// The v4 tag table, one row per shared emotion and act: a new shared value
+// fails here until Eleven has a row for it.
+const EMOTION_TAG = { neutral: '', happy: '[happy] ', soft: '[softly] ', curious: '[curious] ',
+  surprised: '[surprised] ', sad: '[sad] ', pout: '[playful] ', shy: '[shyly] ' }
+const ACT_TAG = { laugh: '[laughs] ', sigh: '[sighs] ', pause: '' }
+
 test('fixed model/voice/language; only trusted delivery adds tags; ASCII tags and controls are literalized', () => {
   assert.deepEqual(buildElevenLabsRequest(config, { ...request, model: 'injected', voiceId: 'injected' }), {
     inputs: [{ text: '你好！', voice_id: 'test_private_voice' }], model_id: 'eleven_v4', language_code: 'zh',
   })
-  for (const [delivery, prefix] of [['neutral', ''], ['soft', ''], ['bright', '[happy] '], ['curious', '[curious] ']]) {
-    const body = buildElevenLabsRequest(config, { text: '[laughs]你\u0000\n好[[tone:bright]]', delivery })
-    assert.equal(body.inputs[0].text, prefix + '［laughs］你\n好［［tone:bright］］')
-    assert.equal(estimateElevenLabsReservation(config, { text: '[laughs]你\u0000\n好[[tone:bright]]', delivery }), body.inputs[0].text.length)
+  const literalInput = '[laughs]你\u0000\n好[[tone:happy]]<break time="1s"/><#0.5#>'
+  const literal = '［laughs］你\n好［［tone:happy］］＜break time="1s"/＞＜#0.5#＞'
+  for (const delivery of EMOTIONS) {
+    const body = buildElevenLabsRequest(config, { text: literalInput, delivery })
+    assert.equal(body.inputs[0].text, EMOTION_TAG[delivery] + literal)
+    assert.equal(estimateElevenLabsReservation(config, { text: literalInput, delivery }), body.inputs[0].text.length)
   }
   assert.equal(estimateElevenLabsReservation(config, { text: '你好😀', delivery: 'neutral' }), 4)
-  assert.equal(estimateElevenLabsReservation(config, { text: '你好', delivery: 'bright' }), 10)
+  assert.equal(estimateElevenLabsReservation(config, { text: '你好', delivery: 'happy' }), 10)
   for (const bad of [{ text: '', delivery: 'neutral' }, { text: '\u0000', delivery: 'neutral' },
     { text: '\ud800', delivery: 'neutral' }, { text: 'a'.repeat(361), delivery: 'neutral' },
-    { text: '你好', delivery: '[laughs]' }, {}])
+    { text: '你好', delivery: '[laughs]' }, { text: '你好', delivery: 'angry' }, { text: '你好', delivery: 'toString' },
+    { text: '你好', delivery: 'neutral', act: 'cry' }, { text: '你好', delivery: 'neutral', act: null },
+    { text: '你好', delivery: 'neutral', act: '[laughs]' }, {}])
     assert.throws(() => buildElevenLabsRequest(config, bad), { code: 'TTS_INVALID_REQUEST' })
+})
+
+test('every shared emotion and act has a v4 tag row; the act tag follows the emotion tag, before the escaped words', () => {
+  assert.deepEqual(Object.keys(EMOTION_TAG).sort(), [...EMOTIONS].sort())
+  assert.deepEqual(Object.keys(ACT_TAG).sort(), [...ACTS].sort())
+  for (const delivery of EMOTIONS) {
+    for (const act of ACTS) {
+      const input = { text: '[sighs]好<呀>', delivery, act }
+      const submitted = buildElevenLabsRequest(config, input).inputs[0].text
+      assert.equal(submitted, EMOTION_TAG[delivery] + ACT_TAG[act] + '［sighs］好＜呀＞', `${delivery} ${act}`)
+      // The reservation counts the whole outgoing script, tags included.
+      assert.equal(estimateElevenLabsReservation(config, input), submitted.length)
+    }
+  }
+  assert.equal(buildElevenLabsRequest(config, { text: '你好', delivery: 'neutral', act: 'laugh' }).inputs[0].text, '[laughs] 你好')
+  // The old name still means happy wherever it arrives.
+  assert.equal(buildElevenLabsRequest(config, { text: '你好', delivery: 'bright' }).inputs[0].text, '[happy] 你好')
 })
 
 test('normal newline/tab separators preserve word boundaries and match the exact submitted reservation', () => {
   const text = 'hello\nworld\t你好\r好呀\r\nnext\u0000\u000b\u0085end'
   const literal = 'hello\nworld\t你好\r好呀\r\nnextend'
-  for (const [delivery, prefix] of [['neutral', ''], ['soft', ''], ['bright', '[happy] '], ['curious', '[curious] ']]) {
+  for (const delivery of EMOTIONS) {
     const input = { text, delivery }
     const submitted = buildElevenLabsRequest(config, input).inputs[0].text
-    assert.equal(submitted, prefix + literal)
+    assert.equal(submitted, EMOTION_TAG[delivery] + literal)
     assert.equal(estimateElevenLabsReservation(config, input), submitted.length)
   }
 })

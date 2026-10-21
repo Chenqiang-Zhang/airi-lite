@@ -2,11 +2,12 @@ import type { CloudSpeechClip } from '../cloud-speech'
 import type { Delivery } from '../delivery'
 import type { SpeakOptions, SpeechRunOutcome } from '../speech'
 import type { SpeechEngine } from '../speech-mode'
-import type { DeliveryCue, SpokenSentence } from '../speech-sentences'
+import type { ActCue, DeliveryCue, SpokenSentence } from '../speech-sentences'
 import type { VoiceId } from '../voice'
 
 import { decodeCloudSpeechResponse, SpeechApiError } from '../cloud-speech.ts'
 import { DEFAULT_VOICE } from '../voice.ts'
+import { normaliseEmotion, STAGE_PROTOCOL } from '../../shared/performance-cues.mjs'
 
 // DOM-free stage logic, so Node tests can drive it with fakes. main.ts binds
 // it to EventSource, fetch, the real speech controller and the page.
@@ -59,9 +60,6 @@ export function isStageProblem(message: string): boolean {
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
-
-const DELIVERIES: readonly Delivery[] = ['neutral', 'soft', 'bright', 'curious']
-const isDelivery = (value: unknown): value is Delivery => DELIVERIES.includes(value as Delivery)
 
 export function createStageClient(options: StageClientOptions) {
   const timers = options.timers ?? {
@@ -126,17 +124,28 @@ export function createStageClient(options: StageClientOptions) {
     options.view.setThinking?.(data.activity === 'thinking' && data.mode !== 'brb')
     options.view.setConnection(options.role === 'preview' ? 'preview' : primary ? 'live' : 'standby')
     if (primary) {
-      report({ type: 'ready' })
+      report({ type: 'ready', protocol: STAGE_PROTOCOL })
       if (avatar) report({ type: 'avatar', status: avatar })
       if (obs) report({ type: 'obs', ...obs })
     }
   }
 
   function onSay(data: Record<string, unknown>) {
-    const { turnId, text, delivery } = data
-    if (typeof turnId !== 'string' || typeof text !== 'string' || !isDelivery(delivery))
+    const { turnId, text } = data
+    if (typeof turnId !== 'string' || typeof text !== 'string')
       return
+    const delivery: Delivery | null = normaliseEmotion(data.delivery)
+    if (!delivery) {
+      // A newer server's tone this page does not know: say so and end the
+      // turn now, rather than leave the server waiting for its watchdog.
+      report({ type: 'problem', message: `舞台不认识语气「${String(data.delivery).slice(0, 24)}」，本轮已跳过。请刷新舞台页。` })
+      report({ type: 'ended', turnId, outcome: 'failed' })
+      return
+    }
+    // Raw lists: the sentence planner validates both, exactly as the server's
+    // allowance does, so the two plans match.
     const cues = Array.isArray(data.cues) ? data.cues as DeliveryCue[] : []
+    const acts = Array.isArray(data.acts) ? data.acts as ActCue[] : []
     clearCaptionTimer()
     captionTurn = turnId
     options.view.setThinking?.(false)
@@ -148,6 +157,7 @@ export function createStageClient(options: StageClientOptions) {
     }
     speakingTurn = turnId
     void options.speech.speak(text, delivery, DEFAULT_VOICE, cues, 'cloud', {
+      acts,
       onEnded: (outcome: SpeechRunOutcome) => {
         if (speakingTurn === turnId)
           speakingTurn = null
@@ -236,8 +246,11 @@ export function createStageClient(options: StageClientOptions) {
       throw new SpeechApiError('unavailable')
     let response: Response
     try {
-      response = await options.post('api/live/stage/speech',
-        { leaseId, turnId, text: sentence.text, delivery: sentence.delivery }, signal)
+      // The server checks [delivery, act, text] against its own plan.
+      response = await options.post('api/live/stage/speech', {
+        leaseId, turnId, text: sentence.text, delivery: sentence.delivery,
+        ...(sentence.act ? { act: sentence.act } : {}),
+      }, signal)
     }
     catch (error) {
       if (signal.aborted)

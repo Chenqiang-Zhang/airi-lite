@@ -6,9 +6,10 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { createMockLocalTts, sineWav } from '../scripts/mock-local-tts.mjs'
+import { ACTS, EMOTIONS } from '../shared/performance-cues.mjs'
 import { createRequestHandler } from './app.mjs'
-import { buildLocalRequest, checkLocalMp3, DEFAULT_LOCAL_DAILY_CHAR_LIMIT, isPrivateTtsHost, readLocalTtsConfig,
-  readLocalWav, synthesiseLocal } from './local-tts.mjs'
+import { buildLocalRequest, checkLocalMp3, DEFAULT_LOCAL_DAILY_CHAR_LIMIT, estimateLocalReservation, isPrivateTtsHost,
+  readLocalTtsConfig, readLocalWav, synthesiseLocal } from './local-tts.mjs'
 import { SpeechProviderError } from './speech-error.mjs'
 import { readSpeechConfig, resolveSpeechProvider } from './speech-provider.mjs'
 import { createSpeechHandler } from './speech.mjs'
@@ -145,26 +146,66 @@ test('TTS_PROVIDER=local selects only this provider, with its own ledger and ide
   }
 })
 
+// The local table, one row per shared emotion and act: a new shared value
+// fails here until self-hosted engines have a row for it.
+const LOCAL_SPEED = { neutral: 1, happy: 1.03, soft: 0.96, curious: 1, surprised: 1.03, sad: 0.94, pout: 1, shy: 0.96 }
+const ACT_CLAUSE = { laugh: '开头轻轻笑一声。', sigh: '开头轻轻叹一口气。', pause: '' }
+
 test('the request body is OpenAI-compatible and maps delivery through the one table', () => {
   assert.deepEqual(buildLocalRequest(config, speech),
     { model: 'cosyvoice2', input: speech.text, voice: '中文女', response_format: 'wav', speed: 1 })
   assert.equal(buildLocalRequest(config, { ...speech, delivery: 'soft' }).speed, 0.96)
-  for (const delivery of ['neutral', 'soft', 'bright', 'curious'])
+  for (const delivery of EMOTIONS)
     assert.equal('instructions' in buildLocalRequest(config, { ...speech, delivery }), false)
   const instructed = { ...config, instructions: true }
   assert.equal('instructions' in buildLocalRequest(instructed, speech), false)
-  for (const delivery of ['soft', 'bright', 'curious'])
+  for (const delivery of EMOTIONS.filter(value => value !== 'neutral'))
     assert.match(buildLocalRequest(instructed, { ...speech, delivery }).instructions, /^用.+语气说。$/)
+  // The old name still means happy wherever it arrives.
+  assert.deepEqual(buildLocalRequest(instructed, { ...speech, delivery: 'bright' }),
+    buildLocalRequest(instructed, { ...speech, delivery: 'happy' }))
   for (const bad of [{ ...speech, text: '' }, { ...speech, text: '  ' }, { ...speech, text: 'a'.repeat(361) },
     { ...speech, text: '\ud800' }, { ...speech, text: 42 }, { ...speech, delivery: 'angry' },
-    { ...speech, delivery: 'toString' }, { ...speech, delivery: undefined }])
+    { ...speech, delivery: 'toString' }, { ...speech, delivery: undefined }, { ...speech, act: 'cry' },
+    { ...speech, act: null }, { ...speech, act: 'toString' }])
     assert.throws(() => buildLocalRequest(config, bad), { code: 'TTS_INVALID_REQUEST' })
+})
+
+test('every shared emotion and act has a local row; acts only ever reach the engine as instructions', () => {
+  assert.deepEqual(Object.keys(LOCAL_SPEED).sort(), [...EMOTIONS].sort())
+  assert.deepEqual(Object.keys(ACT_CLAUSE).sort(), [...ACTS].sort())
+  const instructed = { ...config, instructions: true }
+  for (const delivery of EMOTIONS) {
+    const plain = buildLocalRequest(config, { ...speech, delivery })
+    assert.equal(plain.speed, LOCAL_SPEED[delivery], delivery)
+    assert.ok(plain.speed >= 0.9 && plain.speed <= 1.05, delivery)
+    const style = buildLocalRequest(instructed, { ...speech, delivery }).instructions ?? ''
+    for (const act of ACTS) {
+      // Instructions off: an act changes nothing at all (a pause is player silence).
+      assert.deepEqual(buildLocalRequest(config, { ...speech, delivery, act }), plain, `${delivery} ${act}`)
+      const body = buildLocalRequest(instructed, { ...speech, delivery, act })
+      assert.equal(body.instructions ?? '', ACT_CLAUSE[act] + style, `${delivery} ${act}`)
+      assert.equal(body.input, speech.text, 'no sound tag is ever added to the words')
+      assert.equal(body.speed, plain.speed)
+    }
+  }
+  assert.equal(buildLocalRequest(instructed, { ...speech, act: 'laugh' }).instructions, '开头轻轻笑一声。')
+  assert.equal(buildLocalRequest(instructed, { ...speech, delivery: 'sad', act: 'sigh' }).instructions,
+    '开头轻轻叹一口气。用低落、有点难过的语气说。')
+})
+
+test('literal angle and square brackets reach the engine full-width, so no engine markup is executed', () => {
+  const body = buildLocalRequest(config, { ...speech, text: '[laughter]好<strong>呀</strong>[[tone:happy]]' })
+  assert.equal(body.input, '［laughter］好＜strong＞呀＜/strong＞［［tone:happy］］')
+  // A one-for-one swap: the reservation still counts the submitted characters.
+  const text = '<#0.5#>[breath]'
+  assert.equal(estimateLocalReservation(config, { ...speech, text }), text.length)
 })
 
 test('synthesis posts once to the pinned endpoint and returns the shared clip shape', async () => {
   const calls = []
   const audio = sineWav({ sampleRate: 22_050, seconds: 0.25 })
-  const result = await synthesiseLocal({ ...config, apiKey: 'local-dev-key' }, { ...speech, delivery: 'bright' }, {
+  const result = await synthesiseLocal({ ...config, apiKey: 'local-dev-key' }, { ...speech, delivery: 'happy', act: 'laugh' }, {
     fetchImpl: async (...args) => { calls.push(args); return wavResponse(audio) },
   })
   assert.equal(calls.length, 1)
@@ -175,7 +216,7 @@ test('synthesis posts once to the pinned endpoint and returns the shared clip sh
   assert.deepEqual(init.headers, { 'Content-Type': 'application/json', Accept: 'audio/wav',
     Authorization: 'Bearer local-dev-key' })
   assert.deepEqual(JSON.parse(init.body),
-    { model: 'cosyvoice2', input: speech.text, voice: '中文女', response_format: 'wav', speed: 1 })
+    { model: 'cosyvoice2', input: speech.text, voice: '中文女', response_format: 'wav', speed: 1.03 })
   // wordAlignmentAvailable is true-only on the wire; false would be rejected.
   assert.deepEqual(result, { audio: audio.toString('base64'), format: 'wav', sampleRate: 22_050, words: [] })
   await synthesiseLocal(config, speech, { fetchImpl: async (_url, options) => {
@@ -371,11 +412,17 @@ test('POST /api/speech returns decodable WAV for the confirmed local provider on
   assert.equal(audio.toString('latin1', 0, 4), 'RIFF')
   assert.ok(audio.length > 44 && audio.length < 2 * 1_024 * 1_024)
 
+  // An old client's bright is happy; an act without instructions adds nothing.
+  assert.equal((await post({ ...speech, delivery: 'bright', act: 'sigh', expectedProvider: 'local' })).status, 200)
+  assert.deepEqual(engine.requests[1].body,
+    { model: 'cosyvoice2', input: speech.text, voice: '中文女', response_format: 'wav', speed: 1.03 })
+
   // Legacy and other-vendor confirmations never send text to this engine.
   assert.equal((await post(speech)).status, 409)
   assert.equal((await post({ ...speech, expectedProvider: 'minimax' })).status, 409)
   assert.equal((await post({ ...speech, expectedProvider: 'local', expectedRegion: 'cn' })).status, 400)
-  assert.equal(engine.requests.length, 1)
+  assert.equal((await post({ ...speech, expectedProvider: 'local', act: 'cry' })).status, 400)
+  assert.equal(engine.requests.length, 2)
 })
 
 test('a LOCAL_TTS_URL that already ends in the speech path is not doubled; refusals are explained', async () => {

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 
+import { isAct, normaliseActCues, normaliseEmotion, STAGE_PROTOCOL } from '../../shared/performance-cues.mjs'
 import { openDeepSeekStream } from '../deepseek.mjs'
 import { SpeechProviderError } from '../speech-error.mjs'
 import { speechErrorResponse } from '../speech.mjs'
@@ -17,12 +18,12 @@ import { createStageBus, STAGE_ROLES } from './stage-bus.mjs'
 import { HOST_CONTROL } from './text.mjs'
 import { createSentenceAllowance, planUtterance, screenUtterance } from './utterance.mjs'
 
-const DELIVERIES = new Set(['neutral', 'soft', 'bright', 'curious'])
 const OUTCOMES = new Set(['played', 'partial', 'failed', 'cancelled', 'empty'])
 const AVATAR_STATES = new Set(['loading', 'ready', 'failed'])
 const INPUT_KINDS = { 'input.danmaku': 'danmaku', 'input.superchat': 'superchat', 'input.host': 'host' }
 const MAX_SAY_CHARS = 200
 const MAX_PROBLEM_CHARS = 120
+const OUTDATED_RELOAD_INTERVAL_MS = 30_000
 
 // A process-local daily counter for tests and runs without a data directory.
 export function createMemoryReplyBudget({ dailyLimit, now = Date.now }) {
@@ -88,6 +89,7 @@ export function createLiveRuntime({
   let turn = null
   let lastOutcome = null
   let lastProblem = null
+  let lastOutdatedReload = -Infinity
   let lastHostBlock = null
   let stopped = false
   let activeRules = rules ?? parseRules('')
@@ -240,8 +242,9 @@ export function createLiveRuntime({
   }
 
   // Starts a turn for already-screened text. Returns {ok, turnId} or a
-  // stable refusal code; callers decide how to surface it.
-  async function startTurn({ text, delivery = 'neutral', cues = [], replyTo = null, origin = 'host' }) {
+  // stable refusal code; callers decide how to surface it. `acts` travel
+  // apart from the tone cues, to the stage and into the sentence plan.
+  async function startTurn({ text, delivery = 'neutral', cues = [], acts = [], replyTo = null, origin = 'host' }) {
     const refuse = (status, code) => ({ ok: false, status, code })
     if (control !== 'running')
       return refuse(409, 'LIVE_PAUSED')
@@ -249,7 +252,10 @@ export function createLiveRuntime({
       return refuse(409, 'LIVE_NO_STAGE')
     if (turn)
       return refuse(409, 'LIVE_TURN_ACTIVE')
-    const sentences = await planUtterance({ text, delivery, cues })
+    // What the planner keeps anyway (at most one, inside the text), so the
+    // stage is sent the very list the allowance was planned from.
+    acts = normaliseActCues(acts, text.length)
+    const sentences = await planUtterance({ text, delivery, cues, acts })
     if (!sentences.length)
       return refuse(400, 'LIVE_EMPTY')
     // Re-check after the await: a concurrent say may have started a turn,
@@ -267,6 +273,7 @@ export function createLiveRuntime({
       turnId,
       text,
       delivery,
+      acts,
       origin,
       replyTo,
       startedAt: now(),
@@ -278,8 +285,8 @@ export function createLiveRuntime({
     }
     turn.watchdog.unref?.()
     activity = 'idle'
-    hub.publish('turn.started', { turnId, text, delivery, cues, origin, replyTo, sentences: sentences.length })
-    bus.publish('say', { turnId, text, delivery, cues, replyTo })
+    hub.publish('turn.started', { turnId, text, delivery, cues, acts, origin, replyTo, sentences: sentences.length })
+    bus.publish('say', { turnId, text, delivery, cues, acts, replyTo })
     // Publishing can drop a stalled primary, which cancels this very turn
     // (its lease handover runs one microtask later). Never report success
     // for it, and leave every page's last word "stop".
@@ -348,8 +355,10 @@ export function createLiveRuntime({
         const text = hostText(body.text)
         if (!text)
           return sendJson(response, 400, { code: 'LIVE_INVALID_TEXT' })
-        const delivery = body.delivery ?? 'neutral'
-        if (!DELIVERIES.has(delivery))
+        // Canonical, so a console still sending the old 'bright' says happy.
+        // The host's lines carry no acts (and hostText refuses "[[").
+        const delivery = normaliseEmotion(body.delivery ?? 'neutral')
+        if (!delivery)
           return sendJson(response, 400, { code: 'LIVE_INVALID_DELIVERY' })
         // The host's own words pass the same output gate (without a strike).
         const verdict = await screen({ text, delivery })
@@ -440,6 +449,18 @@ export function createLiveRuntime({
       return sendJson(response, 403, { code: 'LIVE_NOT_PRIMARY' })
     switch (body.type) {
       case 'ready':
+        // A page from before the current say payload would drop new tones or
+        // buy sentences the server never planned: it reloads instead (at
+        // most every 30 s, so a page that cannot update does not loop).
+        if (body.protocol !== STAGE_PROTOCOL) {
+          if (now() - lastOutdatedReload >= OUTDATED_RELOAD_INTERVAL_MS) {
+            lastOutdatedReload = now()
+            bus.publish('reload', {})
+          }
+          lastProblem = { message: '舞台页面版本过旧，已请它刷新。', at: now() }
+          hub.publish('stage.outdated', { protocol: Number.isInteger(body.protocol) ? body.protocol : null }, { source: 'stage' })
+          return sendJson(response, 409, { code: 'LIVE_STAGE_OUTDATED' })
+        }
         bus.updatePrimaryStatus(body.leaseId, { ready: true })
         brain.schedule()
         break
@@ -482,14 +503,19 @@ export function createLiveRuntime({
 
   // The only route the stage uses to buy audio: the server decides which
   // sentences exist, each is bought at most once, and only by the primary.
+  // The stage names an act, never its sound: each provider's own syntax,
+  // and the pause length, are the server's and the player's.
   async function handleStageSpeech(request, response) {
     const body = await readSmallJson(request, 4_096)
     if (!bus.isPrimary(body.leaseId))
       return sendJson(response, 403, { code: 'LIVE_NOT_PRIMARY' })
     if (!turn || body.turnId !== turn.turnId)
       return sendJson(response, 409, { code: 'LIVE_TURN_MISMATCH' })
-    if (typeof body.text !== 'string' || !DELIVERIES.has(body.delivery)
-      || !turn.allowance.take({ text: body.text, delivery: body.delivery }))
+    const text = body.text
+    const delivery = normaliseEmotion(body.delivery)
+    const act = body.act ?? null
+    if (typeof text !== 'string' || !delivery || (act !== null && !isAct(act))
+      || !turn.allowance.take({ text, delivery, act }))
       return sendJson(response, 409, { code: 'LIVE_SENTENCE_NOT_ALLOWED' })
     const owner = turn
     owner.bought++
@@ -498,9 +524,9 @@ export function createLiveRuntime({
     const abort = () => cancelled.abort()
     response.once('close', abort)
     try {
-      const result = await speech.synthesise({ text: body.text, delivery: body.delivery }, { signal: cancelled.signal })
+      const result = await speech.synthesise({ text, delivery, ...(act ? { act } : {}) }, { signal: cancelled.signal })
       // Only audio that was actually produced enters the brain's history.
-      owner.spoken.push(body.text)
+      owner.spoken.push(text)
       if (!response.destroyed && !response.writableEnded)
         sendJson(response, 200, result)
     }

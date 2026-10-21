@@ -1,15 +1,26 @@
-// Delivery is a small performance cue, not a claim that the model has emotions.
-export type Delivery = 'neutral' | 'soft' | 'bright' | 'curious'
+import { normaliseEmotion } from '../shared/performance-cues.mjs'
+import type { Emotion } from '../shared/performance-cues.mjs'
 
+// Delivery is a small performance cue, not a claim that the model has emotions.
+// The vocabulary lives in shared/performance-cues.mjs; 'bright' is read as
+// happy where old data comes in.
+export type Delivery = Emotion
+
+// Local and browser speech only; cloud voices get their own tables server-side.
 const SPEED: Record<Delivery, number> = {
   neutral: 0.98,
+  happy: 1.04,
   soft: 0.93,
-  bright: 1.04,
   curious: 0.99,
+  surprised: 1.02,
+  sad: 0.92,
+  pout: 1,
+  shy: 0.95,
 }
 
+// Untyped callers (preview pages, old stored data) may still pass 'bright'.
 export function deliverySpeed(delivery: Delivery): number {
-  return SPEED[delivery]
+  return SPEED[normaliseEmotion(delivery) ?? 'neutral']
 }
 
 export function chooseDelivery(userText: string, replyText: string): Delivery {
@@ -21,7 +32,7 @@ export function chooseDelivery(userText: string, replyText: string): Delivery {
   if (reply.length > 180)
     return 'neutral'
   if (/[!！]|哈哈|好耶|太好啦/.test(reply))
-    return 'bright'
+    return 'happy'
   if (/[?？]$/.test(reply))
     return 'curious'
   return 'neutral'

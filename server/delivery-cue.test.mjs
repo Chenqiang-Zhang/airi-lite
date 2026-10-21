@@ -54,7 +54,7 @@ function readChunks(chunks) {
 test('orders sentence-level cues with their text and preserves paragraph breaks', () => {
   const parser = createDeliveryCueParser()
   assert.deepEqual(parser.push('[[tone:bright]]好耶！\n\n[[tone:soft]] 但你累了就休息。\n[[tone:curious]]想聊什么？'), [
-    { type: 'delivery', value: 'bright' },
+    { type: 'delivery', value: 'happy' },
     { type: 'delta', content: '好耶！\n\n' },
     { type: 'delivery', value: 'soft' },
     { type: 'delta', content: ' 但你累了就休息。\n' },
@@ -66,7 +66,7 @@ test('orders sentence-level cues with their text and preserves paragraph breaks'
 test('recognizes multiple cues at every possible split and in single-character deltas', () => {
   const reply = '  [[tone:bright]]\n好耶！\n\n[[tone:soft]]别急。[[tone:unknown]]\n[[tone:curious]]为什么？'
   const expected = [
-    { type: 'delivery', value: 'bright' },
+    { type: 'delivery', value: 'happy' },
     { type: 'delta', content: '好耶！\n\n' },
     { type: 'delivery', value: 'soft' },
     { type: 'delta', content: '别急。\n' },
@@ -132,4 +132,37 @@ test('keeps malformed candidates literal and removes bounded unknown labels anyw
   ]
   assert.deepEqual(readChunks([reply]), expected)
   assert.deepEqual(readChunks([...reply]), expected)
+})
+
+test('an old bright tone arrives as happy; acts are events, at most one per reply', () => {
+  const parser = createDeliveryCueParser()
+  assert.deepEqual(parser.push('[[tone:bright]][[act:laugh]] 哈哈，'), [
+    { type: 'delivery', value: 'happy' },
+    { type: 'act', value: 'laugh' },
+    { type: 'delta', content: '哈哈，' },
+  ])
+  assert.deepEqual(parser.push('真的[[act:sigh]]假的[[act:cry]]。'), [{ type: 'delta', content: '真的假的。' }], 'later and unknown acts vanish')
+  assert.deepEqual(parser.finish(), [])
+})
+
+test('an act alone at the start, mid-sentence, or split across deltas', () => {
+  const start = createDeliveryCueParser()
+  assert.deepEqual(start.push(' [[act:pause]]\n嗯'), [{ type: 'act', value: 'pause' }, { type: 'delta', content: '嗯' }])
+  const middle = createDeliveryCueParser()
+  assert.deepEqual(middle.push('[[tone:curious]]这个嘛[[act:pause]]我想想。'), [
+    { type: 'delivery', value: 'curious' },
+    { type: 'delta', content: '这个嘛' },
+    { type: 'act', value: 'pause' },
+    { type: 'delta', content: '我想想。' },
+  ])
+  const split = createDeliveryCueParser()
+  const events = ['[[tone:happy]]好', '[[ac', 't:la', 'ugh]]耶'].flatMap(part => split.push(part))
+  assert.deepEqual(events, [
+    { type: 'delivery', value: 'happy' },
+    { type: 'delta', content: '好' },
+    { type: 'act', value: 'laugh' },
+    { type: 'delta', content: '耶' },
+  ])
+  const unclosed = createDeliveryCueParser()
+  assert.deepEqual([...unclosed.push('好[[act:laugh]'), ...unclosed.finish()].map(event => event.content ?? event.value).join(''), '好[[act:laugh]', 'an unclosed act stays text, so the gate sees it')
 })

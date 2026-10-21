@@ -19,7 +19,8 @@ Authorization: Bearer …      (only when LOCAL_TTS_API_KEY is set)
 ```
 
 - `input` is at most 360 UTF-16 characters (the same limit as the cloud providers).
-- `speed` comes from the sentence's delivery: `soft` is 0.96 and everything else is 1. With `LOCAL_TTS_INSTRUCTIONS=1`, `soft`/`bright`/`curious` also send a short Chinese `instructions` string such as 「用轻柔、平静的语气说。」. Leave it off unless your wrapper understands that field. The mapping lives in one table, `DELIVERY_STYLE` in `server/local-tts.mjs`.
+- `speed` comes from the sentence's emotion (0.94–1.03, see [Emotions and acts](#emotions-and-acts)). `instructions` is sent only with `LOCAL_TTS_INSTRUCTIONS=1`.
+- ASCII `< > [ ]` in the sentence are sent as full-width `＜ ＞ ［ ］`. An engine's own markup is never trusted from text: Kokoro-FastAPI would read brackets aloud, and CosyVoice would act on `[laughter]` or `<strong>`.
 - The reply must be raw audio bytes with an `audio/*` or `application/octet-stream` content type, at most **2 MiB** and **30 s**. Anything else, including a JSON error body, becomes a stable `TTS_UPSTREAM_INVALID` / `TTS_UPSTREAM_FAILED` code. Engine messages are never relayed to the browser or the logs.
 - **WAV** (the default): the sample rate is read from the RIFF header. 8/16/24/32-bit integer PCM or 32-bit float, mono or stereo, 8–96 kHz. Headers from streaming encoders, which write a length of 0 or 0xFFFFFFFF, are patched to the real length.
 - **MP3**: set `LOCAL_TTS_SAMPLE_RATE`. Every Layer III frame must carry that rate, so a wrong value fails loudly instead of playing at the wrong pitch.
@@ -35,7 +36,7 @@ TTS_PROVIDER=local
 LOCAL_TTS_ENABLED=1
 LOCAL_TTS_URL=http://192.168.1.20:50000   # base URL; a URL ending in /v1/audio/speech also works
 LOCAL_TTS_MODEL=cosyvoice2                # whatever your wrapper expects
-LOCAL_TTS_VOICE=中文女                     # a speaker name your engine knows
+LOCAL_TTS_VOICE="Chinese Female"          # a speaker name your engine knows (vox-box: English aliases)
 LOCAL_TTS_FORMAT=wav
 # LOCAL_TTS_API_KEY=                      # if your wrapper checks a bearer key
 # LOCAL_TTS_SAMPLE_RATE=24000             # required only for mp3
@@ -54,6 +55,27 @@ The configuration fails closed. The provider is reported `configured: false` and
 `GET /airi/api/health` then reports `speech: {configured: true, provider: "local", model: "…"}`. The chat page shows the engine as 「云端 · 自托管语音」. A visitor must confirm it in the voice settings like any cloud vendor: an earlier MiniMax/ElevenLabs consent does not carry over.
 
 The ledger `.data/tts-budget-local.json` counts reserved characters per UTC day, separately from the cloud ledgers. It exists only to stop a runaway loop: a local engine costs nothing per character. Each request also has the shared 30 s timeout, so **warm the engine up first**. Many engines load their model on the first request and would time out on it.
+
+## Emotions and acts
+
+Each sentence carries one of the shared emotions in `shared/performance-cues.mjs`, and sometimes one act (`laugh`, `sigh` or `pause`) to perform just before its words. This is all that reaches a local engine. The mapping is one table, `DELIVERY_STYLE` (plus `ACT_INSTRUCTIONS`) in `server/local-tts.mjs`:
+
+| Emotion | `speed` | `instructions` (only with `LOCAL_TTS_INSTRUCTIONS=1`) |
+| --- | --- | --- |
+| neutral | 1 | none |
+| happy | 1.03 | 用开心、明亮的语气说。 |
+| soft | 0.96 | 用轻柔、平静的语气说。 |
+| curious | 1 | 用好奇、略带疑问的语气说。 |
+| surprised | 1.03 | 用惊讶、意外的语气说。 |
+| sad | 0.94 | 用低落、有点难过的语气说。 |
+| pout | 1 | 用假装生气、带点撒娇的语气说。 |
+| shy | 0.96 | 用害羞、小声的语气说。 |
+
+- **laugh / sigh**: with `LOCAL_TTS_INSTRUCTIONS=1`, a clause goes before the emotion's instructions: 「开头轻轻笑一声。」 or 「开头轻轻叹一口气。」. With instructions off (the default), an act changes nothing in the request.
+- **pause**: the player puts 0.4 s of silence before the sentence's audio, the same for every engine. Nothing is sent.
+- **No bracket tags are sent.** The words go unchanged apart from the full-width brackets above. airi-lite never adds `[laughter]`, `<breath>` or any other engine syntax, so an engine that ignores `instructions` hears only the speed.
+
+An old client may still send the earlier name `bright`. It is read as `happy`.
 
 ## Try it with the mock engine
 
@@ -80,9 +102,14 @@ Check every licence yourself before you stream with an engine: the code, the **w
 
 | Candidate | Where | Notes |
 | --- | --- | --- |
-| **CosyVoice family** (FunAudioLLM: CosyVoice 2 / Fun-CosyVoice 3, 0.5B) | Windows or Linux PC with an NVIDIA GPU | First choice for Mandarin. The code is Apache-2.0, and the [CosyVoice2-0.5B model card](https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B) lists Apache-2.0 at the time of writing. Confirm the weights and built-in speakers again when you download them. The official repo ships its own servers. Whether they speak the OpenAI route was not verified, so you may need a wrapper such as [vox-box](https://github.com/gpustack/vox-box), which lists CosyVoice behind `POST /v1/audio/speech`. Verify its licence and current behaviour before use. |
+| **CosyVoice family** (FunAudioLLM: CosyVoice 2 / Fun-CosyVoice 3, 0.5B) | Windows or Linux PC with an NVIDIA GPU | First choice for Mandarin. The code is Apache-2.0, and the [CosyVoice2-0.5B model card](https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B) lists Apache-2.0 at the time of writing. Confirm the weights and built-in speakers again when you download them. The official repo ships its own servers. Whether they speak the OpenAI route was not verified, so you may need a wrapper such as [vox-box](https://github.com/gpustack/vox-box), which lists CosyVoice behind `POST /v1/audio/speech`. Verify its licence and current behaviour before use. See the vox-box notes below. |
 | Kokoro behind an OpenAI-compatible server (for example Kokoro-FastAPI) | This Mac (Apple Silicon) | Apache-2.0 weights. Useful to prove the network path on the Mac, but its Mandarin is limited, and airi-lite already runs Kokoro in the browser. |
 | Fish-Speech / OpenAudio | — | **Not recommended.** The published weights are CC-BY-NC-SA-4.0 (non-commercial), and a Bilibili stream with gifts or Super Chats is plausibly commercial use. |
+
+### vox-box with CosyVoice: check two things first
+
+- **Voice names.** vox-box exposes the CosyVoice built-in speakers under English aliases such as `Chinese Female`, and it rejects the original Chinese names such as `中文女`. Use the alias in `LOCAL_TTS_VOICE` (quoted, because of the space).
+- **Sample rate.** vox-box writes a 22050 Hz WAV header, but CosyVoice2-0.5B produces 24000 Hz audio. airi-lite trusts the RIFF header, so that audio would play slow and low. Before you use it, play a `test.wav` from the `curl` step below. If the voice sounds slow and deep, the header is wrong: fix it in the wrapper. `LOCAL_TTS_SAMPLE_RATE` cannot help, because for WAV the header always wins.
 
 For a Windows GPU box on the home network:
 

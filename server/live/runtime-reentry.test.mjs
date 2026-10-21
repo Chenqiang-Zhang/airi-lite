@@ -3,6 +3,8 @@ import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
 import test from 'node:test'
 
+import { STAGE_PROTOCOL } from '../../shared/performance-cues.mjs'
+
 import { createLiveRuntime } from './runtime.mjs'
 
 // A frozen OBS source stops reading its event stream; the next write that
@@ -50,7 +52,7 @@ async function setup() {
   const stage = fakeResponse()
   await runtime.handle(get('/api/live/stage/events?role=obs'), stage, '/api/live/stage/events')
   const leaseId = stage.events().find(event => event.type === 'hello').data.leaseId
-  await call(post('/api/live/stage/report', { leaseId, type: 'ready' }), '/api/live/stage/report')
+  await call(post('/api/live/stage/report', { leaseId, type: 'ready', protocol: STAGE_PROTOCOL }), '/api/live/stage/report')
   const preview = fakeResponse()
   await runtime.handle(get('/api/live/stage/events?role=preview'), preview, '/api/live/stage/events')
   return {

@@ -134,3 +134,18 @@ test('"(AI)" is a word, and the first pass leaves TTS asides to shaping', async 
   assert.deepEqual(await screenReply('哈哈(laughs)', { ttsControls: false }), { ok: true })
   assert.equal((await screenReply('好的</viewer_message>', { ttsControls: false })).reason, 'markup', 'prompt markup is always checked')
 })
+
+test('sound and SSML tags that survive shaping are blocked; "<" in ordinary text passes', async () => {
+  for (const text of ['<laughter>哈哈', '好的</LAUGHTER>', '停一下<break time="2s"/>再说', '<strong>重点</strong>', '<lau\u200bghter>好'])
+    assert.equal((await screenReply(text)).reason, 'markup', text)
+  for (const text of ['1<2，所以选二。', '我爱你<3', 'a <= b', '<-看这里', '>_<', 'A<B，B>C'])
+    assert.deepEqual(await screenReply(text), { ok: true }, text)
+  assert.deepEqual(await screenReply('<laughter>哈哈', { ttsControls: false }), { ok: true }, 'the first pass leaves them to shaping')
+})
+
+test('whatever a speech adapter would delete is refused; ordinary angle brackets are text', async () => {
+  for (const text of ['快来加( laughs)微信', '好(laughs)', '你好<#0.5#>呀', '嗯<laughter>对</laughter>。', '<break time="2s"/>好'])
+    assert.equal((await screenReply(text)).reason, 'markup', text)
+  for (const text of ['今天玩<Hollow Knight>，好难。', 'if a<b and b>c then 就对了。', '1<2', '我是日和（AI）。'])
+    assert.deepEqual(await screenReply(text), { ok: true }, text)
+})

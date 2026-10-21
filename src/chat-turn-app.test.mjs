@@ -50,7 +50,7 @@ function createAppProbe({ streamChat, modules: overrides = {} } = {}) {
       streamChat: streamChat ?? (async (options) => {
         requests.push(options)
         await gate
-        options.onDelivery('bright')
+        options.onDelivery('happy')
         options.onDelta('不应写入的迟到内容。')
         return { text: '不应写入的迟到内容。', truncated: false }
       }),
@@ -242,3 +242,73 @@ test('actual App setup, unlock and persona edits survive browser storage whose g
     globalThis.window = previousWindow
   }
 })
+
+for (const actFirst of [true, false]) {
+  test(`actual App ${actFirst ? 'holds an act sent before any text until the speech stream exists' : 'passes an act straight to a running speech stream'}, keeps only the first and replays it`, async () => {
+    const mounted = []
+    const streamCalls = []
+    const spoken = []
+    const cloudRequests = []
+    let dependencies
+    const controller = {
+      beginStream(...args) {
+        streamCalls.push(['begin', args[1]])
+        return {
+          push: text => streamCalls.push(['push', text]),
+          setDelivery: delivery => streamCalls.push(['delivery', delivery]),
+          setAct: act => streamCalls.push(['act', act]),
+          finish: () => streamCalls.push(['finish']),
+          cancel: () => streamCalls.push(['cancel']),
+        }
+      },
+      speak: (...args) => spoken.push(args),
+      cancel() {},
+      dispose() {},
+    }
+    const probe = createAppProbe({
+      streamChat: async (options) => {
+        options.onDelivery('soft')
+        if (actFirst) options.onAct('sigh')
+        options.onDelta('好吧。')
+        if (!actFirst) options.onAct('sigh')
+        options.onAct('laugh')
+        options.onDelta('下次再说。')
+        return { text: '好吧。下次再说。', truncated: false }
+      },
+      modules: {
+        vue: { ...vue, onMounted: callback => mounted.push(callback), onUnmounted: () => {} },
+        './speech': { createSpeechController: (_audio, _callbacks, deps) => { dependencies = deps; return controller } },
+        './cloud-speech': { fetchCloudSpeech: async (options) => { cloudRequests.push(options); return { samples: new Float32Array(1), sampleRate: 24000, words: [] } } },
+      },
+    })
+    try {
+      const { app } = probe
+      app.speechPlayer.value = {}
+      await mounted[0]()
+      app.input.value = '今天累吗？'
+      await app.sendMessage()
+      const start = actFirst ? 0 : 3
+      assert.deepEqual(streamCalls, [
+        ['begin', 'soft'],
+        ...(actFirst ? [['act', 'sigh'], ['push', '好吧。']] : [['push', '好吧。'], ['act', 'sigh']]),
+        ['push', '下次再说。'],
+        ['finish'],
+      ], 'the act is applied before the text that follows it, and a second act is ignored')
+      const reply = app.messages.value.at(-1)
+      assert.deepEqual(reply.acts, [{ start, act: 'sigh' }])
+      assert.deepEqual(probe.saved.at(-1).at(-1).acts, [{ start, act: 'sigh' }])
+
+      app.replayLastResponse()
+      assert.equal(spoken.length, 1)
+      assert.deepEqual(spoken[0][5], { acts: [{ start, act: 'sigh' }] })
+
+      // The cloud request names the act only for the sentence carrying it.
+      const signal = new AbortController().signal
+      await dependencies.synthesizeCloud({ text: '好吧。', delivery: 'soft', act: 'sigh' }, signal)
+      await dependencies.synthesizeCloud({ text: '下次再说。', delivery: 'soft' }, signal)
+      assert.equal(cloudRequests[0].act, 'sigh')
+      assert.equal(Object.hasOwn(cloudRequests[1], 'act'), false)
+    }
+    finally { probe.dispose() }
+  })
+}

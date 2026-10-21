@@ -1,10 +1,11 @@
 import { join } from 'node:path'
 
+import { isAct, normaliseEmotion } from '../shared/performance-cues.mjs'
 import { SpeechProviderError } from './speech-error.mjs'
 import { readSpeechConfig, resolveSpeechProvider } from './speech-provider.mjs'
 import { createTtsBudget, TtsBudgetError } from './tts-budget.mjs'
 
-const DELIVERIES = new Set(['neutral', 'soft', 'bright', 'curious'])
+const REQUEST_KEYS = ['text', 'delivery', 'act', 'expectedProvider', 'expectedRegion']
 const MAX_REQUEST_BYTES = 4_096
 const MESSAGES = {
   TTS_NOT_CONFIGURED: '云端语音未启用或配置不完整。',
@@ -20,17 +21,22 @@ const MESSAGES = {
   TTS_UPSTREAM_INVALID: '云端语音响应不完整或格式无效。',
 }
 
+// delivery is canonicalised here (an old client's 'bright' arrives as happy),
+// so providers and ledgers only ever see shared emotion names. act is an
+// optional one-off sound before the words; the key exists only when it does.
 export function normaliseSpeechRequest(value) {
+  const delivery = value && typeof value === 'object' ? normaliseEmotion(value.delivery) : null
   if (!value || typeof value !== 'object' || Array.isArray(value)
-    || Object.keys(value).some(key => !['text', 'delivery', 'expectedProvider', 'expectedRegion'].includes(key))
+    || Object.keys(value).some(key => !REQUEST_KEYS.includes(key))
     || typeof value.text !== 'string' || !value.text.trim() || value.text.length > 360
     || !value.text.isWellFormed() || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.text)
-    || !DELIVERIES.has(value.delivery)
+    || !delivery || (Object.hasOwn(value, 'act') && !isAct(value.act))
     || (Object.hasOwn(value, 'expectedProvider') && !['minimax', 'elevenlabs', 'local'].includes(value.expectedProvider))
     || (Object.hasOwn(value, 'expectedRegion') && (!['cn', 'global'].includes(value.expectedRegion)
       || ['elevenlabs', 'local'].includes(value.expectedProvider))))
     throw new SpeechProviderError('TTS_INVALID_REQUEST')
-  return { text: value.text, delivery: value.delivery,
+  return { text: value.text, delivery,
+    ...(Object.hasOwn(value, 'act') ? { act: value.act } : {}),
     ...(Object.hasOwn(value, 'expectedProvider') ? { expectedProvider: value.expectedProvider } : {}),
     ...(Object.hasOwn(value, 'expectedRegion') ? { expectedRegion: value.expectedRegion } : {}) }
 }
@@ -74,7 +80,7 @@ export function createSpeechHandler({
   let active = 0
 
   // Provider-specific local estimates are NOT the actual account balance.
-  // Eleven's estimate includes the trusted delivery prefix it will send.
+  // MiniMax and Eleven estimates count the trusted tags they will send.
   // Keep separate durable ledgers; switching providers never resets one.
   async function reserveAndSynthesise(speechRequest, signal) {
     await selectedBudget.reserve(provider.estimateReservation(config, speechRequest), signal)
@@ -89,12 +95,12 @@ export function createSpeechHandler({
       ...(provider.provider === 'minimax' ? { region: provider.region } : {}) }),
     // Trusted in-process callers (the live stage route) that have already done
     // their own authorisation. Shares the concurrency cap and the same ledger.
-    async synthesise({ text, delivery }, { signal } = {}) {
+    async synthesise({ text, delivery, act }, { signal } = {}) {
       if (!provider.configured)
         throw new SpeechProviderError('TTS_NOT_CONFIGURED')
       if (active >= 4)
         throw new SpeechProviderError('TTS_BUSY')
-      const speechRequest = normaliseSpeechRequest({ text, delivery })
+      const speechRequest = normaliseSpeechRequest({ text, delivery, ...(act === undefined ? {} : { act }) })
       active++
       const timeout = new AbortController()
       const timer = setTimeout(() => timeout.abort(), timeoutMs)

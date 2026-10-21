@@ -42,10 +42,12 @@ const speech = createSpeechHandler({
     requests++
     const payload = JSON.parse(options.body)
     const text = provider === 'elevenlabs' ? payload.inputs[0].text : payload.text
+    // Server-owned tags only: Eleven '[emotion] [act] words', MiniMax '(act)words'.
+    const eleven = /^(?:\[(happy|softly|curious|surprised|sad|playful|shyly)\] )?(?:\[(laughs|sighs)\] )?/.exec(text)
     // Diagnostics deliberately exclude text, provider keys and experience codes.
     console.log(JSON.stringify({ mockRequest: requests, provider, region: provider === 'minimax' ? region : null, characters: text.length,
-      emotion: provider === 'elevenlabs' ? text.match(/^\[(happy|curious)\]/)?.[1] ?? 'automatic'
-        : payload.voice_setting.emotion ?? 'automatic' }))
+      emotion: provider === 'elevenlabs' ? eleven[1] ?? 'automatic' : payload.voice_setting.emotion ?? 'automatic',
+      act: (provider === 'elevenlabs' ? eleven[2] : /^\((laughs|sighs)\)/.exec(text)?.[1]) ?? null }))
     options.signal.throwIfAborted()
     if (provider === 'elevenlabs') {
       // Synthetic 1 s alignment, NOT provider timing or spoken-content evidence.
@@ -112,7 +114,7 @@ const server = createServer(async (request, response) => {
       response.once('close', () => { diagnostic.disconnected = true })
       const released = new Promise(resolve => chatReleases.set(number, resolve))
       response.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' })
-      response.write(`${JSON.stringify({ type: 'delivery', value: number === 1 ? 'soft' : 'bright' })}\n`)
+      response.write(`${JSON.stringify({ type: 'delivery', value: number === 1 ? 'soft' : 'happy' })}\n`)
       response.write(`${JSON.stringify({ type: 'delta', content: number === 1 ? '模拟旧回复：先去河边。'
         : number === 2 ? '模拟新回复：改去公园。' : '模拟第三回复：继续测试。' })}\n`)
       await released // Explicit fixture-page gate; no timer race while typing.
@@ -127,9 +129,13 @@ const server = createServer(async (request, response) => {
     }
     request.resume()
     response.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' })
+    // The same events the real chat route emits: canonical tones and at most
+    // one act, which the page performs just before the words that follow it.
     const events = [
-      { type: 'delivery', value: 'bright' }, { type: 'delta', content: '这是模拟测试，不是真实大模型或供应商声音。' },
+      { type: 'delivery', value: 'happy' }, { type: 'act', value: 'laugh' },
+      { type: 'delta', content: '这是模拟测试，不是真实大模型或供应商声音。' },
       { type: 'delivery', value: 'soft' }, { type: 'delta', content: '\n现在这句轻一点。' },
+      { type: 'delivery', value: 'surprised' }, { type: 'delta', content: '\n居然真的能听见！' },
       { type: 'delivery', value: 'curious' }, { type: 'delta', content: '\n你听到了吗？' }, { type: 'done' },
     ]
     for (const event of events) {

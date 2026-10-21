@@ -6,7 +6,8 @@ import { pathToFileURL } from 'node:url'
 import { createWavBlob, createPcm16Blob } from '../src/audio-wav.ts'
 import { DEFAULT_VOICE, VOICE_STORAGE_KEY } from '../src/voice.ts'
 import { replySentenceStream } from '../src/speech-sentences.ts'
-import { CACHE_NAME, MODEL_BASE, MODEL_FILES, RUNTIME_FILES, LINES, VOICES, neutralMatrix, deliveryMatrix, createLedger, inspectCache, cacheOnlyFetch, inspectWav } from './voice-audition.mjs'
+import { isEmotion } from '../shared/performance-cues.mjs'
+import { CACHE_NAME, DELIVERIES, MODEL_BASE, MODEL_FILES, RUNTIME_FILES, LINES, VOICES, neutralMatrix, deliveryMatrix, createLedger, inspectCache, cacheOnlyFetch, inspectWav } from './voice-audition.mjs'
 
 const page = await readFile(new URL('./voice-audition-preview.html', import.meta.url), 'utf8')
 const fixtureWav = () => createWavBlob([createPcm16Blob(Float32Array.from({ length: 2400 }, (_, index) => .1 * Math.sin(index * .1)))], 24000)
@@ -83,7 +84,10 @@ test('bounded ledger caps 12 neutral + one selected ≤4 matrix items, reuses ne
   assert.throws(() => ledger.select('样本 C'))
   const optional = deliveryMatrix('样本 B')
   assert.equal(optional.length, 4)
-  assert.deepEqual(optional.map(item => item.delivery), ['curious', 'bright', 'soft', 'neutral'])
+  assert.deepEqual(optional.map(item => item.delivery), ['surprised', 'pout', 'soft', 'neutral'])
+  // Canonical shared names only: never the old 'bright' alias.
+  assert.ok(DELIVERIES.every(isEmotion))
+  assert.equal(optional.at(-1).key, neutral.find(item => item.voice === 'zf_003' && item.line === 3).key)
   for (const item of optional) ledger.reserve(item)
   assert.equal(ledger.records.size, 15, 'neutral item uses existing baseline, not another generation')
   assert.equal(ledger.manifest().defaultVoiceChanged, false)

@@ -1,3 +1,4 @@
+import { normaliseEmotion } from '../shared/performance-cues.mjs'
 import { SpeechProviderError } from './speech-error.mjs'
 
 const MODEL = 'eleven_v4'
@@ -10,10 +11,16 @@ const MAX_CHARACTERS = 1_024
 const ID3_HEADER = Buffer.from('ID3', 'ascii')
 const ID3_FOOTER = Buffer.from('3DI', 'ascii')
 const ID3_TRAILER = Buffer.from('TAG', 'ascii')
-const DELIVERIES = new Set(['neutral', 'soft', 'bright', 'curious'])
-// Only server-owned delivery controls become executable audio tags. Do not
-// invent breath/laughter or a soft tag whose real voice behavior is unverified.
-const DELIVERY_PREFIX = { neutral: '', soft: '', bright: '[happy] ', curious: '[curious] ' }
+// One row per shared emotion. v4 audio tags are free-form words in square
+// brackets put before the words they colour; a tag carries forward through
+// the rest of the request (one sentence here). SSML is disabled on v4. Only
+// these server-owned rows ever become executable tags.
+const EMOTION_TAG = Object.freeze({ neutral: '', happy: '[happy] ', soft: '[softly] ', curious: '[curious] ',
+  surprised: '[surprised] ', sad: '[sad] ', pout: '[playful] ', shy: '[shyly] ' })
+// After the emotion tag. A pause is silence the player adds, so none is sent.
+const ACT_TAG = Object.freeze({ laugh: '[laughs] ', sigh: '[sighs] ', pause: '' })
+// Literal brackets would be read as tags; angle brackets as markup.
+const FULL_WIDTH = Object.freeze({ '[': '［', ']': '］', '<': '＜', '>': '＞' })
 const validApiKey = value => typeof value === 'string' && /^[\x21-\x7e]{1,4096}$/.test(value)
 const validVoiceId = value => typeof value === 'string' && /^[a-z\d_-]{1,256}$/i.test(value)
 
@@ -34,19 +41,22 @@ export function readElevenLabsConfig(env = process.env) {
     apiKey, voiceId, dailyLimit, endpoint: ENDPOINT })
 }
 
-export function buildElevenLabsRequest(config, { text, delivery } = {}) {
+export function buildElevenLabsRequest(config, { text, delivery, act } = {}) {
+  const emotion = normaliseEmotion(delivery)
   if (typeof text !== 'string' || !text.isWellFormed() || !text.trim()
-    || text.length > 360 || !DELIVERIES.has(delivery))
+    || text.length > 360 || !emotion || !Object.hasOwn(EMOTION_TAG, emotion)
+    || (act !== undefined && !Object.hasOwn(ACT_TAG, act)))
     throw new SpeechProviderError('TTS_INVALID_REQUEST')
   // Literal text is not trusted tag syntax. This is a syntactic barrier, not a
   // claim that a generative model can never interpret an instruction in prose.
   // Keep ordinary line/tab separators: removing them would join adjacent words
   // and erase punctuation-like pacing. Strip only forbidden C0/C1 controls.
   const literal = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '')
-    .replaceAll('[', '［').replaceAll(']', '］')
+    .replace(/[[\]<>]/g, character => FULL_WIDTH[character])
   if (!literal.trim())
     throw new SpeechProviderError('TTS_INVALID_REQUEST')
-  return { inputs: [{ text: DELIVERY_PREFIX[delivery] + literal, voice_id: config.voiceId }],
+  const tags = EMOTION_TAG[emotion] + (act === undefined ? '' : ACT_TAG[act])
+  return { inputs: [{ text: tags + literal, voice_id: config.voiceId }],
     model_id: MODEL, language_code: 'zh' }
 }
 

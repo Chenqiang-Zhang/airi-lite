@@ -5,7 +5,7 @@ import { fetchCloudSpeech as requestCloudSpeech, SpeechApiError } from './cloud-
 const ENDPOINT = '/airi/api/speech'
 const RESPONSE_LIMIT = 4 * 1024 * 1024
 const AUDIO_LIMIT = 2 * 1024 * 1024
-const options = overrides => ({ text: '你好，Hello OpenAI 2026。', delivery: 'bright', endpoint: ENDPOINT, ...overrides })
+const options = overrides => ({ text: '你好，Hello OpenAI 2026。', delivery: 'happy', endpoint: ENDPOINT, ...overrides })
 const settle = () => new Promise(resolve => setImmediate(resolve))
 
 function decoded({ sampleRate = 32000, length = sampleRate / 10, samples } = {}) {
@@ -61,7 +61,7 @@ test('same-origin request preserves original Chinese/English text, delivery, acc
   assert.equal(init.redirect, 'error')
   assert.equal(init.cache, 'no-store')
   assert.deepEqual(init.headers, { 'Content-Type': 'application/json', 'X-Demo-Access-Code': 'Demo-2026_ABC!' })
-  assert.equal(init.body, JSON.stringify({ text: input.text, delivery: 'bright', expectedProvider: 'minimax' }))
+  assert.equal(init.body, JSON.stringify({ text: input.text, delivery: 'happy', expectedProvider: 'minimax' }))
   assert.equal(init.signal, signal)
   assert.ok(result.samples instanceof Float32Array)
   assert.equal(result.samples.length, 3200)
@@ -93,8 +93,38 @@ test('the expected provider guard defaults to MiniMax and preserves only an expl
       return response()
     } })
     assert.equal(calls, 1)
-    assert.deepEqual(body, { text: options().text, delivery: 'bright', expectedProvider: expectedProvider ?? 'minimax' })
+    assert.deepEqual(body, { text: options().text, delivery: 'happy', expectedProvider: expectedProvider ?? 'minimax' })
     assert.ok(!('provider' in body), 'the guard must not become a provider-selection override')
+  }
+})
+
+test('every emotion and an optional act travel in the request body, the act only when present', async () => {
+  for (const delivery of ['neutral', 'happy', 'soft', 'curious', 'surprised', 'sad', 'pout', 'shy']) {
+    for (const act of [undefined, 'laugh', 'sigh', 'pause']) {
+      let body
+      await fetchCloudSpeech(options({ delivery, act, expectedProvider: 'minimax', expectedRegion: 'global' }), { fetch: async (_url, init) => {
+        body = init.body
+        return response()
+      } })
+      // Exact text: key order and the absence of an act key both matter.
+      assert.equal(body, act === undefined
+        ? JSON.stringify({ text: options().text, delivery, expectedProvider: 'minimax', expectedRegion: 'global' })
+        : JSON.stringify({ text: options().text, delivery, act, expectedProvider: 'minimax', expectedRegion: 'global' }))
+    }
+  }
+})
+
+test('an unknown tone (the old bright included) or act fails before any request', async () => {
+  for (const overrides of [
+    { delivery: 'bright' }, { delivery: 'invented' }, { delivery: '__proto__' }, { delivery: undefined },
+    { act: 'giggle' }, { act: '(laughs)' }, { act: '' }, { act: null }, { act: ['laugh'] },
+  ]) {
+    let calls = 0
+    await assert.rejects(fetchCloudSpeech(options(overrides), { fetch: async () => {
+      calls++
+      return response()
+    } }), apiFailure('invalid_request'))
+    assert.equal(calls, 0)
   }
 })
 

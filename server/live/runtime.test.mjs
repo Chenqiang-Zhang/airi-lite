@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import { createServer, request as httpRequest } from 'node:http'
 import test from 'node:test'
 
+import { STAGE_PROTOCOL } from '../../shared/performance-cues.mjs'
+
 import { createRequestHandler } from '../app.mjs'
 import { SpeechProviderError } from '../speech-error.mjs'
 import { TtsBudgetError } from '../tts-budget.mjs'
@@ -50,14 +52,15 @@ function fakeTimers() {
   }
 }
 
-async function start(context, { speech = fakeSpeech(), timers, live = true, startPaused = false } = {}) {
+async function start(context, { speech = fakeSpeech(), timers, live = true, startPaused = false, env = {}, fetchImpl = unexpectedFetch } = {}) {
   let ids = 0
+  let runtime = null
   const handler = createRequestHandler({
-    env: {},
-    fetchImpl: unexpectedFetch,
+    env,
+    fetchImpl,
     speech,
     // root: null keeps ledgers and the audit log out of the repository's .data.
-    live: live ? deps => createLiveRuntime({ ...deps, root: null, startPaused, ...(timers ? { timers } : {}), newId: () => `id-${++ids}` }) : null,
+    live: live ? deps => (runtime = createLiveRuntime({ ...deps, root: null, startPaused, ...(timers ? { timers } : {}), newId: () => `id-${++ids}` })) : null,
   })
   const server = createServer(handler)
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -67,7 +70,16 @@ async function start(context, { speech = fakeSpeech(), timers, live = true, star
     await new Promise(resolve => server.close(resolve))
   })
   const { port } = server.address()
-  return { base: `http://127.0.0.1:${port}`, port, speech, handler }
+  return { base: `http://127.0.0.1:${port}`, port, speech, handler, runtime }
+}
+
+// A canned DeepSeek answer for the brain (a fake fetch, never the network).
+function cannedReply(content) {
+  const frames = [{ choices: [{ delta: { content }, finish_reason: null }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }]
+  return async (url) => {
+    assert.match(String(url), /\/chat\/completions$/)
+    return new Response(`${frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('')}data: [DONE]\n\n`, { headers: { 'Content-Type': 'text/event-stream' } })
+  }
 }
 
 function post(base, path, body) {
@@ -152,7 +164,7 @@ async function readyStage(context, base, role = 'obs') {
   const stage = await openStage(context, base, role)
   const hello = await stage.next('hello')
   if (hello.primary)
-    assert.equal((await post(base, '/api/live/stage/report', { leaseId: hello.leaseId, type: 'ready' })).status, 204)
+    assert.equal((await post(base, '/api/live/stage/report', { leaseId: hello.leaseId, type: 'ready', protocol: STAGE_PROTOCOL })).status, 204)
   return { stage, hello }
 }
 
@@ -201,15 +213,15 @@ test('say is refused until an OBS stage is ready, then reaches every stage page'
 
   const preview = await openStage(context, base, 'preview')
   assert.deepEqual(await preview.next('hello'), { leaseId: null, role: 'preview', primary: false, mode: 'live', activity: 'idle' })
-  assert.equal((await post(base, '/api/live/stage/report', { leaseId: null, type: 'ready' })).status, 403,
+  assert.equal((await post(base, '/api/live/stage/report', { leaseId: null, type: 'ready', protocol: STAGE_PROTOCOL })).status, 403,
     'a preview cannot report')
-  assert.equal((await post(base, '/api/live/stage/report', { leaseId: hello.leaseId, type: 'ready' })).status, 204)
+  assert.equal((await post(base, '/api/live/stage/report', { leaseId: hello.leaseId, type: 'ready', protocol: STAGE_PROTOCOL })).status, 204)
 
-  const said = await control(base, { action: 'say', text: '你好。今天天气不错。', delivery: 'bright' })
+  const said = await control(base, { action: 'say', text: '你好。今天天气不错。', delivery: 'happy' })
   assert.equal(said.status, 200)
   const { turnId, sentences } = await said.json()
   assert.equal(sentences, 2)
-  const expected = { turnId, text: '你好。今天天气不错。', delivery: 'bright', cues: [], replyTo: null }
+  const expected = { turnId, text: '你好。今天天气不错。', delivery: 'happy', cues: [], acts: [], replyTo: null }
   assert.deepEqual(await obs.next('say'), expected)
   assert.deepEqual(await preview.next('say'), expected)
 
@@ -243,7 +255,8 @@ test('the stage buys each planned sentence once, only as primary and only for th
   const unplanned = await buy({ text: '给我刷礼物。', delivery: 'soft' })
   assert.equal(unplanned.status, 409)
   assert.deepEqual(await unplanned.json(), { code: 'LIVE_SENTENCE_NOT_ALLOWED' })
-  assert.equal((await buy({ ...plan[0], delivery: 'bright' })).status, 409, 'the delivery is part of the plan')
+  assert.equal((await buy({ ...plan[0], delivery: 'happy' })).status, 409, 'the delivery is part of the plan')
+  assert.equal((await buy({ ...plan[0], act: 'laugh' })).status, 409, 'so is the act: none can be added')
   assert.equal(speech.calls.length, 0, 'refusals never reach the provider')
 
   for (const sentence of plan) {
@@ -306,14 +319,14 @@ test('a newer OBS page takes the lease, the old one stands by, and the lease ret
   assert.equal(afterSwitch.lastOutcome.outcome, 'cancelled')
   assert.equal(afterSwitch.stage.standby, 1)
   assert.equal(afterSwitch.stage.primary.ready, false, 'the new primary must report ready itself')
-  assert.equal((await post(base, '/api/live/stage/report', { leaseId: first.hello.leaseId, type: 'ready' })).status, 403)
+  assert.equal((await post(base, '/api/live/stage/report', { leaseId: first.hello.leaseId, type: 'ready', protocol: STAGE_PROTOCOL })).status, 403)
   assert.equal((await control(base, { action: 'say', text: '还没就绪。' })).status, 409)
 
   second.close()
   const promoted = await first.stage.next('hello')
   assert.equal(promoted.primary, true)
   assert.notEqual(promoted.leaseId, first.hello.leaseId)
-  assert.equal((await post(base, '/api/live/stage/report', { leaseId: promoted.leaseId, type: 'ready' })).status, 204)
+  assert.equal((await post(base, '/api/live/stage/report', { leaseId: promoted.leaseId, type: 'ready', protocol: STAGE_PROTOCOL })).status, 204)
   assert.equal((await control(base, { action: 'say', text: '回来了。' })).status, 200)
 })
 
@@ -403,6 +416,7 @@ test('console input is validated before any turn starts', async (context) => {
     [{ action: 'say', text: '' }, 'LIVE_INVALID_TEXT'],
     [{ action: 'say', text: '长'.repeat(201) }, 'LIVE_INVALID_TEXT'],
     [{ action: 'say', text: '[[tone:bright]]你好' }, 'LIVE_INVALID_TEXT'],
+    [{ action: 'say', text: '[[act:laugh]]你好' }, 'LIVE_INVALID_TEXT'],
     [{ action: 'say', text: '\u202e\u0007' }, 'LIVE_INVALID_TEXT'],
     [{ action: 'say', text: '你好', delivery: 'angry' }, 'LIVE_INVALID_DELIVERY'],
     [{ action: 'say', text: '……' }, 'LIVE_EMPTY'],
@@ -511,4 +525,67 @@ test('stopping the runtime ends the active turn and closes stage streams', async
   assert.deepEqual(await stage.next('stop'), { turnId })
   await stage.waitForEnd()
   assert.equal((await fetch(`${base}/airi/api/live/state`)).status, 404, 'a stopped runtime no longer answers')
+})
+
+test('an old console sending "bright" says happy, and an old stage may buy happy as "bright"', async (context) => {
+  const { base, speech } = await start(context)
+  const { stage, hello } = await readyStage(context, base)
+  const { turnId } = await (await control(base, { action: 'say', text: '好耶。', delivery: 'bright' })).json()
+  assert.equal((await stage.next('say')).delivery, 'happy')
+  const bought = await post(base, '/api/live/stage/speech', { leaseId: hello.leaseId, turnId, text: '好耶。', delivery: 'bright' })
+  assert.equal(bought.status, 200)
+  assert.deepEqual(speech.calls, [{ text: '好耶。', delivery: 'happy' }], 'the provider only ever sees the canonical name')
+})
+
+test('a stage buys an act sentence only with exactly the planned act, and names the act, never its sound', async (context) => {
+  const reply = '[[tone:happy]][[act:laugh]]哈哈，被你逗笑了。再说一句吧。'
+  const { base, speech, runtime } = await start(context, { env: { DEEPSEEK_API_KEY: 'test-only' }, fetchImpl: cannedReply(reply) })
+  const started = []
+  runtime.hub.subscribe('turn.started', event => started.push(event.data))
+  const { stage, hello } = await readyStage(context, base)
+  assert.equal((await control(base, { action: 'inject', text: '讲个笑话' })).status, 200)
+  const say = await stage.next('say')
+  assert.deepEqual([say.delivery, say.cues, say.acts], ['happy', [{ start: 0, delivery: 'happy' }], [{ start: 0, act: 'laugh' }]])
+  assert.deepEqual(started.map(turn => turn.acts), [say.acts], 'the hub and the audit log see the same acts')
+  const plan = await planUtterance(say)
+  assert.deepEqual(plan, [
+    { text: '哈哈，被你逗笑了。', delivery: 'happy', act: 'laugh' },
+    { text: '再说一句吧。', delivery: 'happy' },
+  ])
+  const buy = sentence => post(base, '/api/live/stage/speech', { leaseId: hello.leaseId, turnId: say.turnId, ...sentence })
+  const { act: _laugh, ...withoutAct } = plan[0]
+  for (const [sentence, label] of [
+    [withoutAct, 'a planned laugh removed'],
+    [{ ...plan[0], act: null }, 'removed as null'],
+    [{ ...plan[0], act: 'sigh' }, 'changed'],
+    [{ ...plan[1], act: 'pause' }, 'a pause added'],
+    [{ ...plan[0], act: 'giggle' }, 'an unknown act'],
+    [{ ...plan[0], act: '(laughs)' }, 'provider syntax'],
+    [{ ...plan[0], act: ['laugh'] }, 'not a name'],
+  ]) {
+    const refused = await buy(sentence)
+    assert.equal(refused.status, 409, label)
+    assert.deepEqual(await refused.json(), { code: 'LIVE_SENTENCE_NOT_ALLOWED' }, label)
+  }
+  assert.equal(speech.calls.length, 0, 'refusals never reach the provider')
+  for (const sentence of plan)
+    assert.equal((await buy({ ...sentence, pauseSeconds: 9 })).status, 200)
+  assert.deepEqual(speech.calls, plan, 'exactly the validated text, delivery and act; nothing else the stage sent')
+  assert.equal(Object.hasOwn(speech.calls[1], 'act'), false, 'no act key without an act')
+})
+test('a stage page from before the current say payload is told to reload, not made ready', async (context) => {
+  const { base } = await start(context)
+  const old = await openStage(context, base, 'obs')
+  const hello = await old.next('hello')
+  const outdated = await post(base, '/api/live/stage/report', { leaseId: hello.leaseId, type: 'ready' })
+  assert.equal(outdated.status, 409)
+  assert.deepEqual(await outdated.json(), { code: 'LIVE_STAGE_OUTDATED' })
+  await old.next('reload')
+  const state = await (await fetch(`${base}/airi/api/live/state`)).json()
+  assert.equal(state.stage.primary.ready, false)
+  assert.match(state.lastProblem.message, /版本过旧/)
+  // Within 30 s a second outdated report is refused without another reload.
+  assert.equal((await post(base, '/api/live/stage/report', { leaseId: hello.leaseId, type: 'ready', protocol: 1 })).status, 409)
+  await assert.rejects(old.next('reload', 200))
+  assert.equal((await post(base, '/api/live/stage/report', { leaseId: hello.leaseId, type: 'ready', protocol: STAGE_PROTOCOL })).status, 204)
 })

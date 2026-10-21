@@ -26,7 +26,7 @@ import { createSpeechController } from './speech'
 import type { VoiceState } from './speech'
 import { loadSpeechMode, readDeviceHints, resolveSpeechMode, saveSpeechMode } from './speech-mode'
 import type { SpeechEngine, SpeechMode } from './speech-mode'
-import type { DeliveryCue } from './speech-sentences'
+import type { Act, ActCue, DeliveryCue } from './speech-sentences'
 import { loadVoice, saveVoice, VOICE_OPTIONS } from './voice'
 import type { VoiceId } from './voice'
 
@@ -170,7 +170,9 @@ onMounted(async () => {
       const provider = activeCloudProvider
       const region = activeCloudRegion
       const clip = await fetchCloudSpeech({
-        text: sentence.text, delivery: sentence.delivery, accessCode: accessCode.value, signal,
+        text: sentence.text, delivery: sentence.delivery,
+        ...(sentence.act ? { act: sentence.act } : {}),
+        accessCode: accessCode.value, signal,
         expectedProvider: provider,
         ...(provider === 'minimax' ? { expectedRegion: region } : {}),
       })
@@ -255,18 +257,18 @@ async function refreshProviderStatus() {
   }
 }
 
-function speak(text: string, delivery: Delivery = 'neutral', cues: DeliveryCue[] = []) {
+function speak(text: string, delivery: Delivery = 'neutral', cues: DeliveryCue[] = [], acts: ActCue[] = []) {
   activeVoice.value = selectedVoice.value
   activeSpeechEngine.value = speechPolicy.value.engine
   if (activeSpeechEngine.value === 'cloud') pinCloudProvider()
-  void speech?.speak(text, delivery, selectedVoice.value, cues, activeSpeechEngine.value)
+  void speech?.speak(text, delivery, selectedVoice.value, cues, activeSpeechEngine.value, { acts })
 }
 
 function replayLastResponse() {
   const message = messages.value.filter(item => item.role === 'assistant').at(-1)
   if (message?.text) {
     const previousUser = messages.value.filter(item => item.role === 'user').at(-1)
-    speak(message.text, message.delivery ?? chooseDelivery(previousUser?.text ?? '', message.text), message.deliveryCues)
+    speak(message.text, message.delivery ?? chooseDelivery(previousUser?.text ?? '', message.text), message.deliveryCues, message.acts)
   }
 }
 
@@ -311,6 +313,8 @@ async function sendMessage() {
   const speechStream: { current: ReturnType<ReturnType<typeof createSpeechController>['beginStream']> | null } = { current: null }
   let chatSucceeded = false
   let latestDelivery: Delivery | undefined
+  // An act before the first text waits for the lazily created speech stream.
+  let pendingAct: Act | undefined
   const turnVoice = selectedVoice.value
   const turnSpeechEngine = speechPolicy.value.engine
   if (turnSpeechEngine === 'cloud') pinCloudProvider()
@@ -333,6 +337,16 @@ async function sendMessage() {
         assistantMessage.deliveryCues.push({ start: assistantMessage.text.length, delivery })
         speechStream.current?.setDelivery(delivery)
       },
+      onAct: (act) => {
+        // Only a reply's first act counts, as in the sentence planner.
+        if (!isCurrent() || assistantMessage.acts?.length)
+          return
+        assistantMessage.acts = [{ start: assistantMessage.text.length, act }]
+        if (speechStream.current)
+          speechStream.current.setAct(act)
+        else
+          pendingAct = act
+      },
       onDelta: (chunk) => {
         if (!isCurrent())
           return
@@ -342,6 +356,9 @@ async function sendMessage() {
           activeVoice.value = turnVoice
           activeSpeechEngine.value = turnSpeechEngine
           speechStream.current = speech.beginStream(text, latestDelivery, turnVoice, turnSpeechEngine)
+          if (pendingAct)
+            speechStream.current.setAct(pendingAct)
+          pendingAct = undefined
         }
         speechStream.current?.push(chunk)
       },
@@ -390,7 +407,7 @@ async function sendMessage() {
       assistantMessage.delivery ??= chooseDelivery(text, assistantMessage.text)
     saveConversation(messages.value)
     if (assistantMessage.text && !speechStream.current) {
-      speak(assistantMessage.text, assistantMessage.delivery, assistantMessage.deliveryCues)
+      speak(assistantMessage.text, assistantMessage.delivery, assistantMessage.deliveryCues, assistantMessage.acts)
     }
     chatTurns.finish(turn)
   }
@@ -519,7 +536,7 @@ function previewSpeechMode() {
   activeVoice.value = draftVoice.value
   activeSpeechEngine.value = engine
   if (engine === 'cloud') pinCloudProvider()
-  void speech?.speak('诶，你终于来了！我刚才还在想，今天要不要偷偷多吃一块蛋糕。', 'bright', draftVoice.value, [], engine)
+  void speech?.speak('诶，你终于来了！我刚才还在想，今天要不要偷偷多吃一块蛋糕。', 'happy', draftVoice.value, [], engine)
 }
 
 function applyVoice() {

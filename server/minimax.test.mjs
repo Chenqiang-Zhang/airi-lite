@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { buildMinimaxRequest, collectMinimaxStream, MAX_AUDIO_BYTES, MAX_USAGE_CHARACTERS, readMinimaxConfig, speechHealth, synthesiseMinimax } from './minimax.mjs'
+import { ACTS, EMOTIONS } from '../shared/performance-cues.mjs'
+import { buildMinimaxRequest, collectMinimaxStream, estimateMinimaxReservation, MAX_AUDIO_BYTES, MAX_USAGE_CHARACTERS, readMinimaxConfig, speechHealth, synthesiseMinimax } from './minimax.mjs'
 
 const env = {
   MINIMAX_TTS_ENABLED: '1', MINIMAX_API_KEY: 'test-secret-key', MINIMAX_VOICE_ID: 'test-private-voice',
@@ -91,7 +92,99 @@ test('outgoing payload fixes identity/audio and uses emotion omission for automa
   assert.equal(neutral.voice_setting.emotion, undefined)
   assert.equal(buildMinimaxRequest(config, { text: '你好', delivery: 'curious' }).voice_setting.emotion, undefined)
   assert.equal(buildMinimaxRequest(config, { text: '你好', delivery: 'soft' }).voice_setting.emotion, 'calm')
-  assert.equal(buildMinimaxRequest(config, { text: '你好', delivery: 'bright' }).voice_setting.emotion, 'happy')
+  assert.equal(buildMinimaxRequest(config, { text: '你好', delivery: 'happy' }).voice_setting.emotion, 'happy')
+  // The old name still means happy wherever it arrives.
+  assert.deepEqual(buildMinimaxRequest(config, { text: '你好', delivery: 'bright' }),
+    buildMinimaxRequest(config, { text: '你好', delivery: 'happy' }))
+})
+
+// The speech-2.8 mapping, one row per shared emotion: a new shared emotion
+// or act fails here until MiniMax has a row for it.
+const EMOTION_VOICE = {
+  neutral: { speed: 1 },
+  happy: { emotion: 'happy', speed: 1 },
+  soft: { emotion: 'calm', speed: 0.96 },
+  curious: { speed: 1 },
+  surprised: { emotion: 'surprised', speed: 1 },
+  sad: { emotion: 'sad', speed: 0.96 },
+  pout: { speed: 1 },
+  shy: { speed: 0.97 },
+}
+const ACT_TEXT = { laugh: '(laughs)你好', sigh: '(sighs)你好', pause: '你好' }
+// voice_setting.emotion values documented for speech-2.8 (checked 2026-10-20).
+const MINIMAX_28_EMOTIONS = new Set(['happy', 'sad', 'angry', 'fearful', 'disgusted', 'surprised', 'calm'])
+
+test('every shared emotion and act has a speech-2.8 mapping inside the documented ranges', () => {
+  assert.deepEqual(Object.keys(EMOTION_VOICE).sort(), [...EMOTIONS].sort())
+  assert.deepEqual(Object.keys(ACT_TEXT).sort(), [...ACTS].sort())
+  for (const delivery of EMOTIONS) {
+    const voice = buildMinimaxRequest(config, { text: '你好', delivery }).voice_setting
+    const { emotion, speed } = EMOTION_VOICE[delivery]
+    assert.deepEqual(voice, { voice_id: 'test-private-voice', speed, vol: 1, pitch: 0,
+      ...(emotion ? { emotion } : {}) }, delivery)
+    assert.ok(voice.emotion === undefined || MINIMAX_28_EMOTIONS.has(voice.emotion), delivery)
+    assert.ok(voice.speed >= 0.5 && voice.speed <= 2 && Number.isInteger(voice.pitch)
+      && voice.pitch >= -12 && voice.pitch <= 12, delivery)
+    for (const act of ACTS) {
+      const body = buildMinimaxRequest(config, { text: '你好', delivery, act })
+      assert.equal(body.text, ACT_TEXT[act], `${delivery} ${act}`)
+      assert.deepEqual(body.voice_setting, voice, 'an act never changes the voice settings')
+      assert.equal(estimateMinimaxReservation(config, { text: '你好', delivery, act }), 2 * ACT_TEXT[act].length)
+    }
+  }
+  for (const bad of [{ text: '你好', delivery: 'angry' }, { text: '你好', delivery: 'calm' }, { text: '你好', delivery: undefined },
+    { text: '你好', delivery: 'toString' }, { text: '你好', delivery: 'neutral', act: 'cry' },
+    { text: '你好', delivery: 'neutral', act: null }, { text: '你好', delivery: 'neutral', act: 'toString' },
+    { text: 42, delivery: 'neutral' }, {}])
+    assert.throws(() => buildMinimaxRequest(config, bad), { code: 'TTS_INVALID_REQUEST' }, JSON.stringify(bad))
+})
+
+test('literal MiniMax pause markers and official sound tags never reach the provider as syntax', () => {
+  const sent = text => buildMinimaxRequest(config, { text, delivery: 'neutral' }).text
+  assert.equal(sent('你好<#0.5#>呀'), '你好呀')
+  assert.equal(sent('你好<# 1.2 #>呀<#x#>'), '你好呀＜#x#>', 'only "<#seconds#>" is a marker; other "<#" keeps its words, defused')
+  // A PowerShell comment keeps its words instead of losing everything between "<#" and "#>".
+  assert.equal(sent('注释用 <# 开头、用 #> 结尾。'), '注释用 ＜# 开头、用 #> 结尾。')
+  assert.equal(sent('(laughs)真的(LAUGHS)吗( sighs )'), '真的吗')
+  for (const tag of ['laughs', 'chuckle', 'coughs', 'clear-throat', 'groans', 'breath', 'pant', 'inhale', 'exhale',
+    'gasps', 'sniffs', 'sighs', 'snorts', 'burps', 'lip-smacking', 'humming', 'hissing', 'emm', 'sneezes'])
+    assert.equal(sent(`好(${tag})的(${tag.toUpperCase()})`), '好的', tag)
+  // Removal never assembles a new working tag out of the pieces left behind.
+  assert.equal(sent('好<<#1#>#0.5#>的((laughs)laughs)呀'), '好的呀')
+  // Ordinary parentheses, other brackets and non-tag words stay as written.
+  assert.equal(sent('他(笑)说(smiles)[laughs]《书》#5#'), '他(笑)说(smiles)[laughs]《书》#5#')
+  assert.equal(sent('a<b#>c'), 'a<b#>c')
+  // The trusted tag is added after the literal is neutralised, never inside it.
+  assert.equal(buildMinimaxRequest(config, { text: '(sighs)好<#1#>', delivery: 'sad', act: 'laugh' }).text, '(laughs)好')
+  for (const text of ['(laughs)', '<#0.5#>', ' (sighs) ', '<<#1#>#2#>'])
+    assert.throws(() => buildMinimaxRequest(config, { text, delivery: 'neutral', act: 'laugh' }), { code: 'TTS_INVALID_REQUEST' })
+})
+
+test('subtitles are bounded by the text actually sent, act tag included', async () => {
+  // '(laughs)你好！' is 11 UTF-16 units; the visible sentence is only 3.
+  const tagged = { text: '(laughs)你好！', text_begin: 0, text_end: 11, time_begin: 0, time_end: 900,
+    timestamped_words: [word('(laughs)', 0, 8, 0, 300), word('你', 8, 9, 300, 500), word('好', 9, 10, 500, 700),
+      word('！', 10, 11, 700, 900)] }
+  const frames = [{ ...chunk(mp3.toString('hex'), 2, { subtitle: tagged }), extra_info: finalInfo }]
+  let body
+  const result = await synthesiseMinimax(config, { text: '你好！', delivery: 'happy', act: 'laugh' }, {
+    fetchImpl: async (url, options) => {
+      body = JSON.parse(options.body)
+      return new Response(stream(frames), { headers: { 'content-type': 'text/event-stream' } })
+    },
+  })
+  assert.equal(body.text, '(laughs)你好！')
+  assert.equal(result.words.length, 4)
+  // Without the act the same subtitle runs past the sent text and fails.
+  await assert.rejects(synthesiseMinimax(config, { text: '你好！', delivery: 'happy' }, {
+    fetchImpl: async () => new Response(stream(frames), { headers: { 'content-type': 'text/event-stream' } }),
+  }), { code: 'TTS_UPSTREAM_INVALID' })
+  // An invalid request is refused before any fetch.
+  let fetched = false
+  await assert.rejects(synthesiseMinimax(config, { text: '你好', delivery: 'angry' }, {
+    fetchImpl: async () => { fetched = true },
+  }), { code: 'TTS_INVALID_REQUEST' })
+  assert.equal(fetched, false)
 })
 
 test('invalid header keys and malformed/bounded voice IDs disable health before reserving spend', () => {
@@ -313,4 +406,63 @@ test('a non-settling body cancellation does not block stream abort or provider-e
   await assert.rejects(synthesiseMinimax(config, { text: '你好！', delivery: 'neutral' }, {
     fetchImpl: async () => response,
   }), { code: 'TTS_UPSTREAM_FAILED' })
+})
+
+test('a real speech-2.8 stream: replayed cumulative subtitles and an aggregate size larger than the chunks', async () => {
+  // Captured 2026-10-20 from api.minimax.cn (speech-2.8-hd, 13 characters).
+  const { readFile } = await import('node:fs/promises')
+  const raw = await readFile(new URL('./fixtures/minimax-2.8-cumulative.sse', import.meta.url), 'utf8')
+  const result = await collectMinimaxStream(new Response(raw).body, { textLength: 13 })
+  assert.equal(Buffer.from(result.audio, 'base64').length, 49_005)
+  assert.equal(result.words.length, 13, 'the word timings survive the last update that had none')
+  assert.equal(result.wordAlignmentAvailable, true)
+  assert.deepEqual(result.usage, { billableCharacters: 24, textCharacters: 13 })
+  // Streaming updates must still only grow.
+  const shrinking = raw.replace('"time_end":1194.6666666666665', '"time_end":100')
+  await assert.rejects(collectMinimaxStream(new Response(shrinking).body, { textLength: 13 }), { code: 'TTS_UPSTREAM_INVALID' })
+})
+
+test('a second real stream: three cumulative snapshots of one sentence, the last one kept', async () => {
+  // Captured 2026-10-20 (speech-2.8-hd, happy, '我们先从第一条开始吧。'): the
+  // sentence that failed once in the audition and then came back clean.
+  const { readFile } = await import('node:fs/promises')
+  const raw = await readFile(new URL('./fixtures/minimax-2.8-happy-short.sse', import.meta.url), 'utf8')
+  const result = await collectMinimaxStream(new Response(raw).body, { textLength: 11 })
+  assert.equal(Buffer.from(result.audio, 'base64').length, 35_757)
+  assert.equal(result.words.length, 11)
+  assert.ok(result.words.at(-1).end <= 2.136)
+  assert.deepEqual(result.usage, { billableCharacters: 21, textCharacters: 11 })
+})
+
+test('each failure names its check for local diagnosis, never with upstream text or to visitors', async () => {
+  const reason = async (body) => {
+    const error = await collectMinimaxStream(body, { textLength: 3 }).then(() => null, error => error)
+    assert.equal(error?.code, 'TTS_UPSTREAM_INVALID')
+    return error.detail
+  }
+  const modified = (change) => { const frames = fixture(); change(frames); return stream(frames) }
+  assert.equal(await reason(modified(frames => { frames[0].base_resp = { status_code: 1002, status_msg: 'test-secret-key 你好！' } })), 'status-code-1002')
+  assert.equal(await reason(modified(frames => { frames[2].extra_info = { ...finalInfo, audio_size: mp3.length + 5_000 } })),
+    `audio-size streamed=${mp3.length} reported=${mp3.length + 5_000}`)
+  assert.equal(await reason(stream(fixture().slice(0, 2))), 'no-final-event')
+  assert.equal(await reason(modified(frames => { frames[1].data.subtitle.time_begin = 5 })), 'subtitle-time-begin-changed')
+  assert.equal(await reason(modified(frames => { frames[1].data.subtitle = frames[0].data.subtitle; frames[0].data.subtitle = segment([word('你', 0, 1, 0, 600)]) })),
+    'subtitle-shrank-while-streaming')
+  assert.equal(await reason(byteStream(Buffer.from([0x64, 0x61, 0x74, 0x61, 0x3a, 0xff, 0x0a, 0x0a]))), 'not-utf8')
+
+  // MiniMax sends rate limits and similar errors as a 200 JSON body.
+  const limited = await synthesiseMinimax(config, { text: '你好！', delivery: 'neutral' }, {
+    fetchImpl: async () => new Response(JSON.stringify({ base_resp: { status_code: 1002, status_msg: 'test-secret-key 你好！' } }),
+      { headers: { 'content-type': 'application/json' } }),
+  }).then(() => null, error => error)
+  assert.equal(limited.code, 'TTS_UPSTREAM_INVALID')
+  assert.equal(limited.detail, 'status-code-1002')
+  const http = await synthesiseMinimax(config, { text: '你好！', delivery: 'neutral' }, {
+    fetchImpl: async () => new Response('test-secret-key', { status: 429 }),
+  }).then(() => null, error => error)
+  assert.deepEqual([http.code, http.detail], ['TTS_UPSTREAM_FAILED', 'http-429'])
+
+  const { speechErrorResponse } = await import('./speech.mjs')
+  assert.deepEqual(Object.keys(speechErrorResponse(limited)).sort(), ['code', 'message', 'status'])
+  assert.doesNotMatch(JSON.stringify(speechErrorResponse(limited)), /status-code|1002/)
 })

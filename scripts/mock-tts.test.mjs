@@ -44,7 +44,7 @@ test('the no-`say` fallback returns a valid, audible sine-wave WAV sized to the 
   assert.deepEqual(speech.health(), { configured: true, provider: 'minimax', model: 'mock-tone', region: 'cn' })
 
   const short = await speech.synthesise({ text: '你好。', delivery: 'neutral' })
-  const long = await speech.synthesise({ text: '今天我们来聊聊彩排的事情，看看口型和字幕。', delivery: 'bright' })
+  const long = await speech.synthesise({ text: '今天我们来聊聊彩排的事情，看看口型和字幕。', delivery: 'happy', act: 'laugh' })
   for (const clip of [short, long]) {
     assert.equal(clip.format, 'mp3', 'mock clips keep the cloud label (see the module comment)')
     assert.equal(clip.sampleRate, SAMPLE_RATE)
@@ -55,10 +55,13 @@ test('the no-`say` fallback returns a valid, audible sine-wave WAV sized to the 
     assert.ok(wav.peak > 0.3 * 32_767, 'loud enough to open the mouth')
   }
   assert.ok(readWav(long.audio).dataBytes > readWav(short.audio).dataBytes)
-  assert.deepEqual(lines.map(line => [line.mockClip, line.engine, line.delivery]), [[1, 'tone', 'neutral'], [2, 'tone', 'bright']])
+  assert.deepEqual(lines.map(line => [line.mockClip, line.engine, line.delivery, line.act]),
+    [[1, 'tone', 'neutral', null], [2, 'tone', 'happy', 'laugh']])
   assert.doesNotMatch(JSON.stringify(lines), /你好/, 'only counts are logged, never the text')
   assert.deepEqual(await readdir(workDirectory), [], 'the tone writes no files')
   await assert.rejects(speech.synthesise({ text: '  ', delivery: 'neutral' }), SpeechProviderError)
+  await assert.rejects(speech.synthesise({ text: '你好。', delivery: 'neutral', act: 'cry' }), SpeechProviderError)
+  assert.equal(lines.length, 2, 'a refused request makes no clip')
 })
 
 test('a failing `say` falls back to the tone per clip; an abort is passed through', async (context) => {

@@ -5,13 +5,14 @@ import type { LiveAction, LiveState, PreflightCheckId, PreflightResult, QueueIte
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import { describeLiveError, fetchLiveState, fetchPreflight, LiveApiError, sendLiveControl } from './console-api'
+import { EMOTIONS } from '../../shared/performance-cues.mjs'
 
-const DELIVERY_OPTIONS: { value: Delivery, label: string }[] = [
-  { value: 'neutral', label: '平常' },
-  { value: 'soft', label: '温柔' },
-  { value: 'bright', label: '开心' },
-  { value: 'curious', label: '好奇' },
-]
+// A Record, so a tone added to the shared table without a label is a type error.
+const DELIVERY_LABELS: Record<Delivery, string> = {
+  neutral: '平常', happy: '开心', soft: '温柔', curious: '好奇',
+  surprised: '惊讶', sad: '难过', pout: '假装生气', shy: '害羞',
+}
+const DELIVERY_OPTIONS = EMOTIONS.map(value => ({ value, label: DELIVERY_LABELS[value] }))
 const OUTCOME_LABELS: Record<string, string> = {
   played: '已播完', partial: '只播了一部分', failed: '失败', cancelled: '被取消',
   empty: '没有可读正文', stopped: '已停下', timeout: '超时未回报',

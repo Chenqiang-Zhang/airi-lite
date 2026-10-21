@@ -75,3 +75,34 @@ test('a stream error after partial text rejects once the partial delta was deliv
   ]), () => chat(deltas)), /DeepSeek 流式响应中断/)
   assert.deepEqual(deltas, ['故事讲到'])
 })
+
+test('tone and act events reach their callbacks canonically; unknown values are dropped', async () => {
+  const events = []
+  const result = await withResponse(ndjson([
+    { type: 'delivery', value: 'bright' },
+    { type: 'delivery', value: 'surprised' },
+    { type: 'delivery', value: 'invented' },
+    { type: 'delivery', value: '__proto__' },
+    { type: 'act', value: 'giggle' },
+    { type: 'act', value: 'laugh' },
+    { type: 'delta', content: '哈哈，真的吗？' },
+    { type: 'act', value: 'pause' },
+    { type: 'act' },
+    { type: 'done' },
+  ]), () => streamChat({
+    messages: [{ role: 'user', content: '你好' }],
+    persona,
+    onDelta: delta => events.push(['delta', delta]),
+    onDelivery: delivery => events.push(['delivery', delivery]),
+    onAct: act => events.push(['act', act]),
+  }))
+  assert.deepEqual(events, [
+    ['delivery', 'happy'],
+    ['delivery', 'surprised'],
+    ['act', 'laugh'],
+    ['delta', '哈哈，真的吗？'],
+    // The server sends one act per reply; keeping only the first is the caller's rule.
+    ['act', 'pause'],
+  ])
+  assert.deepEqual(result, { text: '哈哈，真的吗？', truncated: false })
+})

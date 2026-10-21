@@ -365,13 +365,18 @@ test('upstream non-OK responses become 502 with a provider message truncated to 
   assert.equal(results[0][1].length, 'DeepSeek：'.length + 240)
 })
 
-test('upstream SSE is relayed as NDJSON delta / delivery / done events across arbitrary chunk splits', async (context) => {
+test('upstream SSE is relayed as NDJSON delta / delivery / act / done events across arbitrary chunk splits', async (context) => {
   const upstream = [
     line('[[tone:so'),
     line('ft]]你好呀。'),
     ': keep-alive\n\n',
     'data: {"choices":[],"usage":{"total_tokens":9}}\r\n\r\n',
+    // The old tone name arrives as happy; an act split across deltas is
+    // still one event, and a second act in the reply is dropped silently.
     line('\n[[tone:bright]]今天怎么样？'),
+    line('[[ac'),
+    line('t:laugh]]哈哈，好呀。'),
+    line('[[act:sigh]]就这样。'),
     'data: [DONE]\n\n',
   ].join('')
   for (const pieceBytes of [Infinity, 7, 1]) {
@@ -385,8 +390,11 @@ test('upstream SSE is relayed as NDJSON delta / delivery / done events across ar
       { type: 'delivery', value: 'soft' },
       { type: 'delta', content: '你好呀。' },
       { type: 'delta', content: '\n' },
-      { type: 'delivery', value: 'bright' },
+      { type: 'delivery', value: 'happy' },
       { type: 'delta', content: '今天怎么样？' },
+      { type: 'act', value: 'laugh' },
+      { type: 'delta', content: '哈哈，好呀。' },
+      { type: 'delta', content: '就这样。' },
       { type: 'done' },
     ], `piece size ${pieceBytes}`)
   }

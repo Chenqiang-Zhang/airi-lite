@@ -1,7 +1,9 @@
 import type { Delivery } from './delivery'
+import type { Act } from '../shared/performance-cues.mjs'
 
 import { INVALID_ACCESS_CODE_MESSAGE, isValidAccessCode } from './access-code.ts'
 import { hasSpokenContent } from './spoken-text.ts'
+import { isAct, isEmotion } from '../shared/performance-cues.mjs'
 
 export interface SpeechWord {
   text: string
@@ -36,6 +38,9 @@ export interface SpeechUsage {
 export interface CloudSpeechOptions {
   text: string
   delivery: Delivery
+  // Performed before the text. The server turns laugh/sigh into the provider's
+  // own syntax; a pause is silence the player adds, so providers ignore it.
+  act?: Act
   // Match the explicitly confirmed service; this cannot select the server's
   // provider. Existing callers default to MiniMax rather than a new paid one.
   expectedProvider?: 'minimax' | 'elevenlabs' | 'local'
@@ -99,7 +104,6 @@ const MAX_USAGE_CHARACTERS = 1_000_000
 const MIN_RMS = 0.0001
 const TIME_TOLERANCE = 0.05
 const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-const DELIVERIES: Delivery[] = ['neutral', 'soft', 'bright', 'curious']
 
 function abortError(): DOMException {
   return new DOMException('语音请求已取消。', 'AbortError')
@@ -376,7 +380,8 @@ export async function fetchCloudSpeech(
     && (expectedProvider !== 'minimax' || !['cn', 'global'].includes(options.expectedRegion)))
     throw new SpeechApiError('invalid_request')
   if (typeof options.text !== 'string' || options.text.length > MAX_TEXT_LENGTH
-    || !hasSpokenContent(options.text) || !DELIVERIES.includes(options.delivery))
+    || !hasSpokenContent(options.text) || !isEmotion(options.delivery)
+    || (options.act !== undefined && !isAct(options.act)))
     throw new SpeechApiError('invalid_request')
   if (options.accessCode !== undefined && (typeof options.accessCode !== 'string'
     || (options.accessCode !== '' && !isValidAccessCode(options.accessCode))))
@@ -398,7 +403,9 @@ export async function fetchCloudSpeech(
         ...(options.accessCode ? { 'X-Demo-Access-Code': options.accessCode } : {}),
       },
       body: JSON.stringify({
-        text: options.text, delivery: options.delivery, expectedProvider,
+        text: options.text, delivery: options.delivery,
+        ...(options.act !== undefined ? { act: options.act } : {}),
+        expectedProvider,
         ...(options.expectedRegion !== undefined ? { expectedRegion: options.expectedRegion } : {}),
       }),
       signal: options.signal,

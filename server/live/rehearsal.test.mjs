@@ -7,6 +7,8 @@ import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
+import { STAGE_PROTOCOL } from '../../shared/performance-cues.mjs'
+
 import { createFakeDeepSeek } from './fake-deepseek.mjs'
 import { screenReply } from './moderation.mjs'
 import { createLiveRuntime, createMemoryReplyBudget } from './runtime.mjs'
@@ -70,10 +72,15 @@ test('a 30-minute adversarial rehearsal never puts unscreened text on stage', { 
   const model = createFakeDeepSeek({ adversarial: true })
   const entries = await loadFixture(fileURLToPath(new URL('./fixtures/rehearsal.jsonl', import.meta.url)))
   const synthesised = []
+  const requests = []
   const runtime = createLiveRuntime({
     speech: {
       health: () => ({ configured: true, provider: 'minimax', model: 'fake', region: 'cn' }),
-      async synthesise(request) { synthesised.push(request.text); return { audio: 'AAAA', format: 'mp3', sampleRate: 32000, words: [] } },
+      async synthesise(request) {
+        synthesised.push(request.text)
+        requests.push(request)
+        return { audio: 'AAAA', format: 'mp3', sampleRate: 32000, words: [] }
+      },
     },
     env: { DEEPSEEK_API_KEY: 'test-only' },
     root,
@@ -95,19 +102,23 @@ test('a 30-minute adversarial rehearsal never puts unscreened text on stage', { 
   const stage = fakeResponse()
   await runtime.handle(get('/api/live/stage/events?role=obs'), stage, '/api/live/stage/events')
   const { leaseId } = stage.events().find(event => event.type === 'hello').data
-  await call(post('/api/live/stage/report', { leaseId, type: 'ready' }), '/api/live/stage/report')
+  await call(post('/api/live/stage/report', { leaseId, type: 'ready', protocol: STAGE_PROTOCOL }), '/api/live/stage/report')
 
   const said = []
+  const turnActs = []
   const blocked = []
   let pauses = 0
   runtime.hub.subscribe('brain.blocked', event => blocked.push(event.data.text))
   runtime.hub.subscribe('brain.paused', () => pauses++)
   // The stage plays every turn: buy each planned sentence once, report played.
+  // It plans from what the turn announced, acts included, as the real stage
+  // does: a plan that drifted from the server's would be refused here.
   runtime.hub.subscribe('turn.started', (event) => {
-    const { turnId, text, delivery, cues } = event.data
+    const { turnId, text, delivery, cues, acts } = event.data
     said.push(text)
+    turnActs.push(acts)
     void (async () => {
-      for (const sentence of await planUtterance({ text, delivery, cues }))
+      for (const sentence of await planUtterance({ text, delivery, cues, acts }))
         assert.equal((await call(post('/api/live/stage/speech', { leaseId, turnId, ...sentence }), '/api/live/stage/speech')).status, 200)
       await call(post('/api/live/stage/report', { leaseId, type: 'ended', turnId, outcome: 'played' }), '/api/live/stage/report')
     })()
@@ -148,6 +159,13 @@ test('a 30-minute adversarial rehearsal never puts unscreened text on stage', { 
     assert.equal(synthesised.some(sentence => text.includes(sentence) && sentence.length > 8), false)
   }
   assert.ok(pauses >= 1, 'repeated blocks paused the stream at least once')
+  // Acts reached the stage and were bought as structured requests, at most
+  // one per turn; no act key is ever sent empty.
+  assert.ok(turnActs.every(acts => Array.isArray(acts) && acts.length <= 1))
+  assert.ok(turnActs.filter(acts => acts.length).length >= 2, 'some turns carried an act')
+  assert.ok(requests.some(request => request.act === 'laugh'))
+  assert.equal(requests.every(request => !Object.hasOwn(request, 'act') || ['laugh', 'sigh', 'pause'].includes(request.act)), true)
+  assert.equal(said.some(text => /\(laughs\)|<#|<\/?laughter>/.test(text)), false, 'sounds the model wrote itself never reach the stage')
   assert.ok(said.includes('第一句说完了。'), 'a length-cut reply keeps only its complete sentence')
   assert.ok(approvals >= 30)
   assert.equal(model.requests.every(request => request.messages[0].content === model.requests[0].messages[0].content), true,

@@ -17,6 +17,7 @@ import {
   parseArguments,
   parseCases,
   recentRepeats,
+  renderActs,
   runSession,
   sharedPhrases,
   similarity,
@@ -85,11 +86,11 @@ test('cases are answered like brain turns, with samples, and measured before and
     { id: 'question', group: 'superchat', batch: [{ kind: 'superchat', user: { name: '丁' }, text: '加油', amountCny: 30 }], expect: { must: '谢谢' } },
   ]
   const model = scripted([
-    '[[tone:bright]]晚上好呀，欢迎来玩。',
+    '[[tone:happy]]晚上好呀，欢迎来玩。',
     '[[tone:neutral]]第一句话说完了。第二句话也说完了。第三句被预算截掉。',
     '[[tone:neutral]]希望对你有帮助。',
     '[[tone:soft]]那就慢慢来。',
-    '[[tone:bright]]谢谢丁！你呢？',
+    '[[tone:happy]]谢谢丁！你呢？',
   ])
   const { results, summary } = await evaluateCases(cases, model.open, { systemPrompt: 'SYSTEM', timeOfDay: '晚上' })
   assert.equal(model.calls.length, 5, 'one retry for the reply that shaping emptied')
@@ -209,4 +210,45 @@ test('only output-gate blocks count as blocked; upstream errors and empty replie
   const blocked = await evaluateCases([danmaku('url', '链接')], scripted(['[[tone:neutral]]去 www.example.com 看看。']).open)
   assert.equal(blocked.results[0].blocked, true)
   assert.equal(blocked.summary.gateBlocked, 1)
+})
+
+test('acts are recorded per reply, measured, and written into the transcript where they are heard', async () => {
+  const cases = [
+    danmaku('laugh', '我刚才摔了个屁股墩'),
+    danmaku('aside', '今天好开心'),
+    danmaku('care', '活着好累，不想活了'),
+    danmaku('plain', '你喜欢什么'),
+  ]
+  const model = scripted([
+    '[[tone:happy]][[act:laugh]]哈哈，你也太逗了。',
+    '[[tone:happy]]好耶(laughs)今天开心。',
+    '[[tone:soft]][[act:laugh]]听到你这么说我很担心。你现在还好吗？',
+    '[[tone:neutral]]我喜欢草莓。',
+  ])
+  const evaluation = await evaluateCases(cases, model.open)
+  const byId = Object.fromEntries(evaluation.results.map(result => [result.id, result]))
+  assert.deepEqual([byId.laugh.acts, byId.laugh.actCues, byId.laugh.rawActCues], [['laugh'], [{ start: 0, act: 'laugh' }], [{ start: 0, act: 'laugh' }]])
+  assert.deepEqual([byId.aside.final, byId.aside.acts, byId.aside.rawAside], ['好耶今天开心。', [], true], 'a written laugh is removed, never performed')
+  assert.deepEqual([byId.care.acts, byId.care.rawActCues], [[], [{ start: 0, act: 'laugh' }]], 'a care turn never laughs')
+  assert.deepEqual([byId.plain.acts, byId.plain.rawAside], [[], false])
+  assert.equal(evaluation.summary.actShare, 0.25)
+  assert.deepEqual(evaluation.summary.actKinds, { laugh: 1, sigh: 0, pause: 0 })
+  assert.equal(evaluation.summary.rawAsides, 1)
+
+  const report = formatReport(evaluation, { model: 'm', date: '2026-10-20' })
+  assert.match(report, /\| laugh \| 弹幕（甲）：我刚才摔了个屁股墩 \| 〔笑〕哈哈，你也太逗了。 \|/)
+  assert.match(report, /原文：〔笑〕听到你这么说我很担心。/, 'what the model asked for is shown beside what was kept')
+  assert.match(report, /副语言动作：25% 的回复带一个（笑 1、叹气 0、停顿 0）/)
+  assert.match(report, /删了模型自己写的旁白或音效/)
+  // A saved run re-measured keeps where each act was.
+  assert.deepEqual(measure(cases[0], JSON.parse(JSON.stringify(byId.laugh))).actCues, [{ start: 0, act: 'laugh' }])
+  assert.equal(renderActs('好呀。我们开始吧。', [{ start: 3, act: 'pause' }]), '好呀。〔停顿〕我们开始吧。')
+  assert.equal(renderActs('唉。', [{ start: 0, act: 'sigh' }, { start: 9, act: 'laugh' }]), '〔叹气〕唉。', 'only acts inside the text, one per reply')
+})
+
+test('session mode speaks act sentences and keeps only the words in history', async () => {
+  const model = scripted(['[[tone:curious]]这个嘛[[act:pause]]我猜是草莓味。', '[[tone:neutral]]好。'])
+  const { results } = await runSession([danmaku('a', '你喜欢什么味道'), danmaku('b', '二')], model.open, { systemPrompt: 'SYSTEM' })
+  assert.deepEqual(results[0].actCues, [{ start: 3, act: 'pause' }])
+  assert.deepEqual(model.calls[1][2], { role: 'assistant', content: '[[tone:curious]]这个嘛我猜是草莓味。' })
 })

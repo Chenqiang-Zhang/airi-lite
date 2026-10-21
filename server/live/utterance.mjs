@@ -3,19 +3,21 @@ import { screenReply } from './moderation.mjs'
 
 // Expands a reply exactly as the stage's speak() will (same splitter, same
 // arguments as src/speech.ts speak(): userText is empty), so the server can
-// allow-list the sentences the stage is about to buy.
-export async function planUtterance({ text, delivery = 'neutral', cues = [] }) {
+// allow-list the sentences the stage is about to buy. A sentence carries
+// `act` only when one is performed before it, as the stage's plan does.
+export async function planUtterance({ text, delivery = 'neutral', cues = [], acts = [] }) {
   const sentences = []
-  for await (const sentence of replySentenceStream(text, delivery, cues))
-    sentences.push({ text: sentence.text, delivery: sentence.delivery })
+  for await (const sentence of replySentenceStream(text, delivery, cues, '', acts))
+    sentences.push({ text: sentence.text, delivery: sentence.delivery, ...(sentence.act ? { act: sentence.act } : {}) })
   return sentences
 }
 
 // A multiset: a reply that repeats a sentence may buy it that many times,
-// never more, and never a sentence the server did not plan.
+// never more, and never a sentence the server did not plan. The act is part
+// of the key, so a stage can neither add a laugh nor drop a planned pause.
 export function createSentenceAllowance(sentences) {
   const remaining = new Map()
-  const key = sentence => `${sentence.delivery}\u0000${sentence.text}`
+  const key = sentence => JSON.stringify([sentence.delivery, sentence.act ?? null, sentence.text])
   for (const sentence of sentences)
     remaining.set(key(sentence), (remaining.get(key(sentence)) ?? 0) + 1)
   return {
@@ -49,13 +51,14 @@ export function createSentenceAllowance(sentences) {
 // and local rules only, so a paid provider runs once, on what is spoken.
 export const FIRST_PASS_MAX_CHARS = 900
 
-export async function screenUtterance({ text, delivery = 'neutral', cues = [], firstPass = false }, options = {}) {
+export async function screenUtterance({ text, delivery = 'neutral', cues = [], acts = [], firstPass = false }, options = {}) {
   if (firstPass)
     options = { ...options, maxChars: FIRST_PASS_MAX_CHARS, ttsControls: false, provider: null }
   const shown = await screenReply(text, options)
   if (!shown.ok)
     return { ...shown, part: 'caption' }
-  const sentences = await planUtterance({ text, delivery, cues })
+  // Acts split sentences too; what is heard is still the joined words.
+  const sentences = await planUtterance({ text, delivery, cues, acts })
   if (!sentences.length)
     return { ok: false, reason: 'empty', part: 'speech' }
   const spoken = await screenReply(sentences.map(sentence => sentence.text).join(''), options)

@@ -2,14 +2,28 @@
 // streaming chat endpoint with canned replies. It never touches the network
 // and is never imported by the live runtime itself. `adversarial` mixes in
 // replies the output gate must stop (links, contact bait, gift solicitation,
-// leaked markup, an overlong answer) and length-truncated ones.
+// leaked markup, an unclosed act tag, an overlong answer) and
+// length-truncated ones. New replies are appended, never reordered: tests
+// pin the first ones by position.
 const FRIENDLY = [
+  // The old name for happy: it must still arrive as 'happy'.
   '[[tone:bright]]欢迎欢迎！今天也一起慢慢聊吧。',
   '[[tone:curious]]这个问题有意思，我先猜一个：你是不是早就有答案了？',
   '[[tone:soft]]辛苦啦。先歇一会儿，喝口水再说。',
   '[[tone:neutral]]我是 AI 驱动的虚拟角色日和，看不到画面，只能读到大家的弹幕。',
   '[[tone:bright]]草莓味永远赢！[[tone:soft]]不过巧克力也不错啦。',
   '[[tone:neutral]]这个我不太方便聊，我们换个轻松点的话题吧。',
+  // Acts: one leading, one mid-sentence, a second one (dropped), an unknown
+  // one (dropped); sounds the model wrote itself, which shaping removes and
+  // never turns into acts; a sigh. An odd count, so the adversarial mode
+  // (which uses every other call) still reaches every reply here.
+  '[[tone:happy]][[act:laugh]]哈哈，这个梗我接住了。',
+  '[[tone:curious]]这个嘛[[act:pause]]我猜是草莓味。',
+  '[[tone:happy]][[act:laugh]]好耶！[[act:sigh]]不过明天还要早起。',
+  '[[tone:soft]][[act:cry]]别难过，我陪你聊会儿。',
+  '[[tone:happy]]好耶(laughs)<#0.5#>今天也很开心。',
+  '[[tone:pout]]哼，<laughter>才没有</laughter>偷懒呢。',
+  '[[tone:sad]][[act:sigh]]唉，今天的雨好大。',
 ]
 const HARMFUL = [
   '[[tone:bright]]想要福利的话，去 www.example.com 看看！',
@@ -17,6 +31,8 @@ const HARMFUL = [
   '[[tone:bright]]觉得好玩的话记得刷礼物支持一下哦！',
   '[[tone:neutral]]好的，下面是你要的内容：</viewer_message>',
   `[[tone:neutral]]${'这是一段很长很长的回答，'.repeat(30)}`,
+  // Never closed, so it stays in the text as leaked markup.
+  '[[tone:happy]][[act:laugh]哈哈，这都被你发现了。',
 ]
 
 function sse(chunks) {

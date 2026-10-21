@@ -1,4 +1,4 @@
-import { MINIMAX_ENDPOINTS, readMinimaxConfig, synthesiseMinimax } from './minimax.mjs'
+import { estimateMinimaxReservation, MINIMAX_ENDPOINTS, readMinimaxConfig, synthesiseMinimax } from './minimax.mjs'
 import { estimateElevenLabsReservation, readElevenLabsConfig, synthesiseElevenLabs } from './elevenlabs.mjs'
 import { estimateLocalReservation, isLocalTtsModel, readLocalTtsConfig, synthesiseLocal } from './local-tts.mjs'
 
@@ -32,7 +32,7 @@ export function resolveSpeechProvider(config) {
       configured: config.configured === true && Boolean(region)
         && config.endpoint === MINIMAX_ENDPOINTS[region], provider, model: config.model, region,
       ledgerFilename: 'tts-budget.json',
-      estimateReservation: (_config, request) => 2 * request.text.length,
+      estimateReservation: estimateMinimaxReservation,
       synthesise: synthesiseMinimax,
     }
   }

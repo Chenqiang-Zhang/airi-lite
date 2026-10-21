@@ -1,8 +1,11 @@
 import { createServer } from 'node:http'
 
+// Markers split across chunks on purpose: the parser must hold a partial
+// [[tone:…]] or [[act:…]] instead of showing or reading it aloud.
 const chunks = [
-  '[[tone:bright]]嗨！',
-  '刚才你说无聊，',
+  '[[tone:happy]]嗨！',
+  '[[ac',
+  't:laugh]]刚才你说无聊，',
   '我先丢个小游戏。',
   'Deep',
   'Seek 这个词被拆开传过来，',
@@ -10,6 +13,8 @@ const chunks = [
   '\n\n[[to',
   'ne:soft]]不过累了的话，',
   '我们慢慢聊就好。',
+  '\n[[tone:surp',
+  'rised]]对了，今天居然是周五！',
   '\n[[tone:cur',
   'ious]]你想从哪个小游戏开始？',
 ]

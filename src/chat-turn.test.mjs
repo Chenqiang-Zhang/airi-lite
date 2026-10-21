@@ -65,7 +65,7 @@ test('typed barge-in claims new ownership synchronously while old release/deltas
   let releaseOld
   const delayedOld = new Promise(resolve => { releaseOld = resolve }).then(() => {
     old.delta('不该出现的迟到内容。')
-    old.delivery('bright')
+    old.delivery('happy')
     old.release()
   })
   chat.draft.value = '不，改讲公园。'

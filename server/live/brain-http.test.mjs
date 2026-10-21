@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
+import { STAGE_PROTOCOL } from '../../shared/performance-cues.mjs'
+
 import { createRequestHandler } from '../app.mjs'
 import { createFakeDeepSeek } from './fake-deepseek.mjs'
 import { createLiveRuntime } from './runtime.mjs'
@@ -78,7 +80,7 @@ async function playingStage(context, base) {
           const payload = JSON.parse(data)
           if (type === 'hello') {
             leaseId = payload.leaseId
-            await post(base, '/api/live/stage/report', { leaseId, type: 'ready' })
+            await post(base, '/api/live/stage/report', { leaseId, type: 'ready', protocol: STAGE_PROTOCOL })
           }
           if (type === 'say') {
             said.push(payload)
@@ -102,7 +104,8 @@ test('a host message is answered by the brain, spoken by the stage, and kept as 
   assert.equal(injected.status, 200)
   await until(() => said.length === 1, 'first reply on stage')
   assert.equal(said[0].text, '欢迎欢迎！今天也一起慢慢聊吧。')
-  assert.equal(said[0].delivery, 'bright')
+  assert.equal(said[0].delivery, 'happy', 'the canned [[tone:bright]] arrives under its new name')
+  assert.deepEqual(said[0].acts, [])
   assert.equal(model.requests[0].max_tokens, 160)
   assert.match(model.requests[0].messages.at(-1).content, /^<viewer_message from="主播" kind="host">跟大家打个招呼吧<\/viewer_message>\n<reply_guide>这轮回一到三句，90 字以内，像直播时随口接话；现在是(?:早上|上午|中午|下午|晚上|深夜)。<\/reply_guide>$/)
   await until(async () => (await state(base)).brain.historyRounds === 1, 'history recorded')

@@ -11,15 +11,19 @@ const options = (fetchImpl, extra = {}) => ({
   messages: [{ role: 'user', content: '你好' }], maxTokens: 160, temperature: 0.8, fetchImpl, ...extra,
 })
 
-test('relay emits cue and text events and reports truncation and usage', async () => {
+test('relay emits cue, act and text events and reports truncation and usage', async () => {
   const stream = await openDeepSeekStream(options(async () => sse([
-    line({ content: '[[tone:bright]]你' }), line({ content: '好。' }), line({}, 'length'),
+    line({ content: '[[tone:bright]]你' }), line({ content: '好。[[act:si' }), line({ content: 'gh]]唉。' }), line({}, 'length'),
     `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 12, completion_tokens: 3, prompt_cache_hit_tokens: 8 } })}\n\n`,
     'data: [DONE]\n\n',
   ].join(''))))
   const events = []
   const result = await stream.relay(event => events.push(event))
-  assert.deepEqual(events, [{ type: 'delivery', value: 'bright' }, { type: 'delta', content: '你' }, { type: 'delta', content: '好。' }])
+  // The old name 'bright' arrives as 'happy'.
+  assert.deepEqual(events, [
+    { type: 'delivery', value: 'happy' }, { type: 'delta', content: '你' }, { type: 'delta', content: '好。' },
+    { type: 'act', value: 'sigh' }, { type: 'delta', content: '唉。' },
+  ])
   assert.deepEqual(result, { truncated: true, usage: { prompt_tokens: 12, completion_tokens: 3, prompt_cache_hit_tokens: 8 } })
 })
 

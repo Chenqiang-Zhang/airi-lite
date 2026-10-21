@@ -51,7 +51,7 @@ test('rendered mouth survives alternating Idle motions and closes on interruptio
 test('facial expression fades across speech gaps instead of switching at sentence boundaries', () => {
   const { actor, frame } = fixture()
   actor.setActivity('speaking')
-  actor.setDelivery('bright')
+  actor.setDelivery('happy')
   for (let i = 0; i < 12; i++) frame(50)
   const speaking = frame().ParamCheek
   actor.setActivity('thinking')
@@ -306,4 +306,21 @@ test('acknowledgement stays within real m02/m05 pitch ranges and restores their 
       assert.equal(frame(325, 1, 0, pitch).ParamAngleY, pitch)
     }
   }
+})
+
+test('the newer tones borrow the closest of the four faces, and the old bright still smiles', () => {
+  const settled = (delivery, idleSmile = 0.5) => {
+    const { actor, frame } = fixture()
+    actor.setDelivery(delivery)
+    for (let i = 0; i < 40; i++) frame(50, 0, idleSmile, 0, 0.3)
+    return frame(16, 0, idleSmile, 0, 0.3)
+  }
+  for (const [delivery, face] of [['bright', 'happy'], ['surprised', 'curious'], ['sad', 'soft'], ['shy', 'soft'], ['pout', 'neutral'], ['invented', 'neutral']])
+    assert.deepEqual(settled(delivery), settled(face), `${delivery} wears the ${face} face`)
+  // The four original faces stay distinct, with the happy coefficients.
+  const happy = settled('happy', 0)
+  assert.ok(Math.abs(happy.ParamCheek - 0.18) < 1e-3 && Math.abs(happy.ParamEyeLSmile - 0.15) < 1e-3)
+  assert.ok(Math.abs(happy.ParamMouthForm - 0.32) < 1e-3)
+  const faces = ['neutral', 'happy', 'soft', 'curious'].map(delivery => JSON.stringify(settled(delivery)))
+  assert.equal(new Set(faces).size, 4)
 })

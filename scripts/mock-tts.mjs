@@ -13,6 +13,7 @@ import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
+import { isAct } from '../shared/performance-cues.mjs'
 import { SpeechProviderError } from '../server/speech-error.mjs'
 
 export const SAMPLE_RATE = 32_000
@@ -104,8 +105,10 @@ export function createMockSpeech({
       response.writeHead(404, { 'content-type': 'application/json', 'cache-control': 'no-store' })
       response.end(JSON.stringify({ code: 'MOCK_NO_PUBLIC_SPEECH' }))
     },
-    async synthesise({ text, delivery }, { signal } = {}) {
-      if (typeof text !== 'string' || !text.trim())
+    // The act is only logged: `say` and the tone make no laugh or sigh, and a
+    // pause is silence the stage's player adds for every engine.
+    async synthesise({ text, delivery, act }, { signal } = {}) {
+      if (typeof text !== 'string' || !text.trim() || (act !== undefined && !isAct(act)))
         throw new SpeechProviderError('TTS_INVALID_REQUEST')
       signal?.throwIfAborted()
       const id = ++clips
@@ -119,7 +122,7 @@ export function createMockSpeech({
       }
       const engine = audio ? 'say' : 'tone'
       audio ??= toneWav(toneSeconds(text))
-      log(JSON.stringify({ mockClip: id, delivery, characters: text.length, bytes: audio.length, engine }))
+      log(JSON.stringify({ mockClip: id, delivery, act: act ?? null, characters: text.length, bytes: audio.length, engine }))
       return { audio: audio.toString('base64'), format: 'mp3', sampleRate: SAMPLE_RATE, words: [] }
     },
   }

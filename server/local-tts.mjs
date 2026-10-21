@@ -1,5 +1,6 @@
 import { isIP } from 'node:net'
 
+import { normaliseEmotion } from '../shared/performance-cues.mjs'
 import { SpeechProviderError } from './speech-error.mjs'
 
 const SPEECH_PATH = '/v1/audio/speech'
@@ -11,15 +12,27 @@ const MAX_SAMPLE_RATE = 96_000
 // of continuous speech, yet a synthesis loop at full concurrency hits it fast.
 export const DEFAULT_LOCAL_DAILY_CHAR_LIMIT = 500_000
 const ACCEPT = { wav: 'audio/wav', mp3: 'audio/mpeg' }
-// The single delivery table for self-hosted engines. `instructions` is sent
-// only when LOCAL_TTS_INSTRUCTIONS=1, because many OpenAI-compatible wrappers
-// ignore or reject the field. Widening the delivery list means one new row.
+// The single delivery table for self-hosted engines, one row per shared
+// emotion. `instructions` is sent only when LOCAL_TTS_INSTRUCTIONS=1, because
+// many OpenAI-compatible wrappers ignore or reject the field; without it,
+// speed (kept within 0.9–1.05) is the only emotion an engine hears.
 const DELIVERY_STYLE = Object.freeze({
   neutral: Object.freeze({ speed: 1, instructions: '' }),
+  happy: Object.freeze({ speed: 1.03, instructions: '用开心、明亮的语气说。' }),
   soft: Object.freeze({ speed: 0.96, instructions: '用轻柔、平静的语气说。' }),
-  bright: Object.freeze({ speed: 1, instructions: '用开心、明亮的语气说。' }),
   curious: Object.freeze({ speed: 1, instructions: '用好奇、略带疑问的语气说。' }),
+  surprised: Object.freeze({ speed: 1.03, instructions: '用惊讶、意外的语气说。' }),
+  sad: Object.freeze({ speed: 0.94, instructions: '用低落、有点难过的语气说。' }),
+  pout: Object.freeze({ speed: 1, instructions: '用假装生气、带点撒娇的语气说。' }),
+  shy: Object.freeze({ speed: 0.96, instructions: '用害羞、小声的语气说。' }),
 })
+// Engine sound markup is unknown, so a laugh or sigh is only ever asked for
+// in the instructions; with instructions off it changes nothing. A pause is
+// silence the player adds for every engine.
+const ACT_INSTRUCTIONS = Object.freeze({ laugh: '开头轻轻笑一声。', sigh: '开头轻轻叹一口气。', pause: '' })
+// Kokoro-FastAPI would read brackets aloud and CosyVoice would act on
+// [laughter] or <strong>: literal text never carries ASCII brackets.
+const FULL_WIDTH = Object.freeze({ '<': '＜', '>': '＞', '[': '［', ']': '］' })
 const MODEL_PATTERN = /^[A-Za-z0-9][\w.:/@+-]{0,127}$/
 const validApiKey = value => value === '' || (typeof value === 'string' && /^[\x21-\x7e]{1,4096}$/.test(value))
 const validVoice = value => typeof value === 'string' && value.length >= 1 && value.length <= 256
@@ -125,13 +138,18 @@ export function readLocalTtsConfig(env = process.env) {
   return Object.freeze({ ...config, configured: env.LOCAL_TTS_ENABLED === '1' && validLocalConfig(config) })
 }
 
-export function buildLocalRequest(config, { text, delivery } = {}) {
+export function buildLocalRequest(config, { text, delivery, act } = {}) {
+  const emotion = normaliseEmotion(delivery)
   if (typeof text !== 'string' || !text.isWellFormed() || !text.trim() || text.length > 360
-    || typeof delivery !== 'string' || !Object.hasOwn(DELIVERY_STYLE, delivery))
+    || !emotion || !Object.hasOwn(DELIVERY_STYLE, emotion)
+    || (act !== undefined && !Object.hasOwn(ACT_INSTRUCTIONS, act)))
     throw new SpeechProviderError('TTS_INVALID_REQUEST')
-  const style = DELIVERY_STYLE[delivery]
-  return { model: config.model, input: text, voice: config.voice, response_format: config.format,
-    speed: style.speed, ...(config.instructions && style.instructions ? { instructions: style.instructions } : {}) }
+  const style = DELIVERY_STYLE[emotion]
+  const instructions = config.instructions
+    ? (act === undefined ? '' : ACT_INSTRUCTIONS[act]) + style.instructions : ''
+  return { model: config.model, input: text.replace(/[<>[\]]/g, character => FULL_WIDTH[character]),
+    voice: config.voice, response_format: config.format, speed: style.speed,
+    ...(instructions ? { instructions } : {}) }
 }
 
 export function estimateLocalReservation(config, request) {
