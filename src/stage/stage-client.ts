@@ -158,6 +158,9 @@ export function createStageClient(options: StageClientOptions) {
     speakingTurn = turnId
     void options.speech.speak(text, delivery, DEFAULT_VOICE, cues, 'cloud', {
       acts,
+      // Join same-tone sentences only when this server planned its clips
+      // that way; it refuses any clip it did not plan.
+      join: data.join === true,
       onEnded: (outcome: SpeechRunOutcome) => {
         if (speakingTurn === turnId)
           speakingTurn = null

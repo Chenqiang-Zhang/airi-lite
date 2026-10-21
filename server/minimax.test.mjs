@@ -151,8 +151,10 @@ test('literal MiniMax pause markers and official sound tags never reach the prov
     assert.equal(sent(`好(${tag})的(${tag.toUpperCase()})`), '好的', tag)
   // Removal never assembles a new working tag out of the pieces left behind.
   assert.equal(sent('好<<#1#>#0.5#>的((laughs)laughs)呀'), '好的呀')
-  // Ordinary parentheses, other brackets and non-tag words stay as written.
-  assert.equal(sent('他(笑)说(smiles)[laughs]《书》#5#'), '他(笑)说(smiles)[laughs]《书》#5#')
+  // Ordinary parentheses keep their words but turn full width, one for one
+  // (half-width bracket pinyin is performed); other brackets and non-tag
+  // words stay as written.
+  assert.equal(sent('他(笑)说(smiles)[laughs]《书》#5#'), '他（笑）说（smiles）[laughs]《书》#5#')
   assert.equal(sent('a<b#>c'), 'a<b#>c')
   // The trusted tag is added after the literal is neutralised, never inside it.
   assert.equal(buildMinimaxRequest(config, { text: '(sighs)好<#1#>', delivery: 'sad', act: 'laugh' }).text, '(laughs)好')
@@ -441,7 +443,9 @@ test('each failure names its check for local diagnosis, never with upstream text
     return error.detail
   }
   const modified = (change) => { const frames = fixture(); change(frames); return stream(frames) }
-  assert.equal(await reason(modified(frames => { frames[0].base_resp = { status_code: 1002, status_msg: 'test-secret-key 你好！' } })), 'status-code-1002')
+  assert.equal(await reason(modified(frames => { frames[0].base_resp = { status_code: 1039, status_msg: 'test-secret-key 你好！' } })), 'status-code-1039')
+  assert.equal(await reason(modified(frames => { frames[1].base_resp = { status_code: 1002, status_msg: 'test-secret-key' } })), 'status-code-1002',
+    'a rate limit after audio has arrived is a broken stream, not a refusal')
   assert.equal(await reason(modified(frames => { frames[2].extra_info = { ...finalInfo, audio_size: mp3.length + 5_000 } })),
     `audio-size streamed=${mp3.length} reported=${mp3.length + 5_000}`)
   assert.equal(await reason(stream(fixture().slice(0, 2))), 'no-final-event')
@@ -451,12 +455,16 @@ test('each failure names its check for local diagnosis, never with upstream text
   assert.equal(await reason(byteStream(Buffer.from([0x64, 0x61, 0x74, 0x61, 0x3a, 0xff, 0x0a, 0x0a]))), 'not-utf8')
 
   // MiniMax sends rate limits and similar errors as a 200 JSON body.
-  const limited = await synthesiseMinimax(config, { text: '你好！', delivery: 'neutral' }, {
-    fetchImpl: async () => new Response(JSON.stringify({ base_resp: { status_code: 1002, status_msg: 'test-secret-key 你好！' } }),
+  const refused = status_code => synthesiseMinimax(config, { text: '你好！', delivery: 'neutral' }, {
+    fetchImpl: async () => new Response(JSON.stringify({ base_resp: { status_code, status_msg: 'test-secret-key 你好！' } }),
       { headers: { 'content-type': 'application/json' } }),
   }).then(() => null, error => error)
-  assert.equal(limited.code, 'TTS_UPSTREAM_INVALID')
-  assert.equal(limited.detail, 'status-code-1002')
+  const limited = await refused(1002)
+  assert.deepEqual([limited.code, limited.detail], ['TTS_UPSTREAM_RATE_LIMITED', 'status-code-1002'])
+  for (const code of [1039, 2045, 1008]) {
+    const other = await refused(code)
+    assert.deepEqual([other.code, other.detail], ['TTS_UPSTREAM_INVALID', `status-code-${code}`], 'only 1002 is a rate limit')
+  }
   const http = await synthesiseMinimax(config, { text: '你好！', delivery: 'neutral' }, {
     fetchImpl: async () => new Response('test-secret-key', { status: 429 }),
   }).then(() => null, error => error)
@@ -464,5 +472,129 @@ test('each failure names its check for local diagnosis, never with upstream text
 
   const { speechErrorResponse } = await import('./speech.mjs')
   assert.deepEqual(Object.keys(speechErrorResponse(limited)).sort(), ['code', 'message', 'status'])
-  assert.doesNotMatch(JSON.stringify(speechErrorResponse(limited)), /status-code|1002/)
+  assert.deepEqual([speechErrorResponse(limited).status, speechErrorResponse(limited).code], [429, 'TTS_UPSTREAM_RATE_LIMITED'])
+  assert.doesNotMatch(JSON.stringify(speechErrorResponse(limited)), /status-code|1002|secret|你好|RPM/)
+})
+
+test('a 1002 in the first stream event is a rate-limit refusal with no provider text', async () => {
+  const frames = [{ base_resp: { status_code: 1002, status_msg: 'rate limit exceeded(RPM) test-secret-key' } }]
+  const error = await synthesiseMinimax(config, { text: '你好！', delivery: 'neutral' }, {
+    fetchImpl: async () => new Response(stream(frames), { headers: { 'content-type': 'text/event-stream' } }),
+  }).then(() => null, caught => caught)
+  assert.deepEqual([error?.code, error?.detail], ['TTS_UPSTREAM_RATE_LIMITED', 'status-code-1002'])
+  assert.doesNotMatch(`${error.message} ${error.detail}`, /secret|RPM/)
+})
+
+test('half-width brackets in the words are never performed as inline pinyin; the act tag stays half width', () => {
+  const sent = (text, act) => buildMinimaxRequest(config, { text, delivery: 'neutral', ...(act ? { act } : {}) }).text
+  assert.equal(sent('这是(he2)平'), '这是（he2）平')
+  assert.equal(sent('这是(he2)平').length, '这是(he2)平'.length, 'subtitle offsets are unchanged')
+  assert.equal(sent('(ri4)(he2)'), '（ri4）（he2）')
+  assert.equal(sent('))(('), '））（（')
+  // Already full width, or no brackets at all: sent as written.
+  assert.equal(sent('这是（he2）平，不是（huo4）面。'), '这是（he2）平，不是（huo4）面。')
+  assert.equal(sent('你好'), '你好')
+  // Sound tags are still removed first, and the server's own tag stays syntax.
+  assert.equal(sent('(laughs)他(笑)了', 'laugh'), '(laughs)他（笑）了')
+  assert.equal(sent('好(sighs)呀(呀)', 'sigh'), '(sighs)好呀（呀）')
+})
+
+test('a dictionary rule is sent only when its key occurs in the words, in table order', () => {
+  const body = (text, selected = config, act) => buildMinimaxRequest(selected, { text, delivery: 'neutral', ...(act ? { act } : {}) })
+  assert.deepEqual(config.pronunciation, ['日和/(ri4)(he2)', 'Hiyori/(ri4)(he2)'])
+  assert.ok(Object.isFrozen(config.pronunciation))
+  // Without a match the body is exactly what it was before the dictionary.
+  const plain = body('你好')
+  assert.equal(Object.hasOwn(plain, 'pronunciation_dict'), false)
+  assert.deepEqual(Object.keys(plain), ['model', 'text', 'stream', 'stream_options', 'voice_setting', 'audio_setting',
+    'language_boost', 'subtitle_enable', 'subtitle_type'])
+  assert.equal(JSON.stringify(plain), JSON.stringify(body('你好', { ...config, pronunciation: [] })))
+  // Only the matched rules, in table order, whatever order the words use.
+  assert.deepEqual(body('我是日和').pronunciation_dict, { tone: ['日和/(ri4)(he2)'] })
+  assert.deepEqual(body('Hiyori，也就是日和').pronunciation_dict, { tone: ['日和/(ri4)(he2)', 'Hiyori/(ri4)(he2)'] })
+  assert.deepEqual(body('大家好，我是HIYORI。').pronunciation_dict, { tone: ['Hiyori/(ri4)(he2)'] })
+  assert.equal(body('我是日和').text, '我是日和', 'the words themselves are never rewritten')
+  const custom = { ...config, pronunciation: ['弹幕/(dan4)(mu4)', '日和/(ri4)(he2)', 'bad rule', 42, '卡壳/(qia3)(ke2)'] }
+  assert.deepEqual(body('卡壳了，弹幕好多', custom).pronunciation_dict, { tone: ['弹幕/(dan4)(mu4)', '卡壳/(qia3)(ke2)'] })
+  assert.equal(Object.hasOwn(body('日和', { ...config, pronunciation: ['日和/(ri4)', '日和 /(ri4)(he2)'] }), 'pronunciation_dict'), false,
+    'invalid rules are never sent')
+  // The act tag is never matched, only the words.
+  const tags = { ...config, pronunciation: ['laughs/(la1)(fu5)', 'sighs/(sai1)'] }
+  for (const act of ACTS)
+    assert.equal(Object.hasOwn(body('你好', tags, act), 'pronunciation_dict'), false, act)
+  assert.deepEqual(body('他说laughs', tags, 'laugh').pronunciation_dict, { tone: ['laughs/(la1)(fu5)'] })
+  // A key written in removed MiniMax syntax is gone before matching.
+  assert.equal(Object.hasOwn(body('好(sighs)的', tags), 'pronunciation_dict'), false)
+})
+
+test('MINIMAX_PRONUNCIATION=0 and a config without the field send no dictionary', () => {
+  const off = readMinimaxConfig({ ...env, MINIMAX_PRONUNCIATION: '0' })
+  assert.deepEqual(off.pronunciation, [])
+  assert.equal(off.configured, true)
+  for (const value of ['1', '', ' 0', 'off'])
+    assert.deepEqual(readMinimaxConfig({ ...env, MINIMAX_PRONUNCIATION: value }).pronunciation, config.pronunciation, value)
+  const { pronunciation, ...bare } = config
+  assert.ok(pronunciation.length)
+  for (const selected of [off, bare, { voiceId: 'v', model: 'speech-2.8-hd' }, { ...config, pronunciation: '日和/(ri4)(he2)' }]) {
+    const body = buildMinimaxRequest(selected, { text: '我是日和，也叫Hiyori。', delivery: 'neutral' })
+    assert.equal(Object.hasOwn(body, 'pronunciation_dict'), false)
+    assert.equal(estimateMinimaxReservation(selected, { text: '我是日和，也叫Hiyori。', delivery: 'neutral' }), 2 * 14)
+  }
+})
+
+test('the reservation adds the characters of the rules sent', () => {
+  const rule = '日和/(ri4)(he2)'
+  assert.equal(estimateMinimaxReservation(config, { text: '你好', delivery: 'neutral' }), 2 * 2)
+  assert.equal(estimateMinimaxReservation(config, { text: '我是日和', delivery: 'neutral' }), 2 * (4 + rule.length))
+  assert.equal(estimateMinimaxReservation(config, { text: '日和日和', delivery: 'neutral' }), 2 * (4 + rule.length), 'once per rule')
+  assert.equal(estimateMinimaxReservation(config, { text: '我是日和', delivery: 'happy', act: 'laugh' }),
+    2 * ('(laughs)我是日和'.length + rule.length))
+  assert.equal(estimateMinimaxReservation(config, { text: '日和和Hiyori', delivery: 'neutral' }),
+    2 * (9 + rule.length + 'Hiyori/(ri4)(he2)'.length))
+})
+
+test('the subtitle bound is relaxed to the substituted length only when a rule was sent', async () => {
+  // '我是日和' is 4 units sent; with 日和 → (ri4)(he2) it would be 12.
+  const subtitled = textEnd => [{ ...chunk(mp3.toString('hex'), 2, { subtitle: { text: '我是日和', text_begin: 0,
+    text_end: textEnd, time_begin: 0, time_end: 900, timestamped_words: [word('我', 0, 1, 0, 300), word('是', 1, 2, 300, 500),
+      word('日和', 2, textEnd, 500, 900)] } }), extra_info: finalInfo }]
+  const synthesise = (selected, textEnd, request = { text: '我是日和', delivery: 'neutral' }) => {
+    const sent = []
+    return synthesiseMinimax(selected, request, {
+      fetchImpl: async (url, options) => {
+        sent.push(JSON.parse(options.body))
+        return new Response(stream(subtitled(textEnd)), { headers: { 'content-type': 'text/event-stream' } })
+      },
+    }).then(result => ({ result, sent }), error => ({ error, sent }))
+  }
+  const relaxed = await synthesise(config, 12)
+  assert.deepEqual(relaxed.sent[0].pronunciation_dict, { tone: ['日和/(ri4)(he2)'] })
+  assert.equal(relaxed.result.words.length, 3)
+  assert.equal((await synthesise(config, 4)).result.words.length, 3, 'offsets into the sent text still pass')
+  // Past even the substituted text, or without a rule sent, it still fails.
+  assert.equal((await synthesise(config, 13)).error?.detail, 'subtitle-shape')
+  const off = readMinimaxConfig({ ...env, MINIMAX_PRONUNCIATION: '0' })
+  const strict = await synthesise(off, 12)
+  assert.equal(Object.hasOwn(strict.sent[0], 'pronunciation_dict'), false)
+  assert.deepEqual([strict.error?.code, strict.error?.detail], ['TTS_UPSTREAM_INVALID', 'subtitle-shape'])
+  assert.equal((await synthesise(config, 12, { text: '我是小和', delivery: 'neutral' })).error?.detail, 'subtitle-shape')
+  assert.equal((await synthesise(off, 4)).result.words.length, 3)
+})
+
+test('real speech-2.8 streams: a joined two-sentence clip with a laugh, and a pronunciation rule', async () => {
+  // Captured 2026-10-20 (UTC) by scripts/minimax-p5b-check.mjs on speech-2.8-hd.
+  const { readFile } = await import('node:fs/promises')
+  const joined = await readFile(new URL('./fixtures/minimax-2.8-joined-laugh.sse', import.meta.url), 'utf8')
+  const sent = buildMinimaxRequest(config, { text: '这个梗我接住了！你们今天弹幕好热闹。', delivery: 'happy', act: 'laugh' }).text
+  assert.equal(sent, '(laughs)这个梗我接住了！你们今天弹幕好热闹。')
+  const clip = await collectMinimaxStream(new Response(joined).body, { textLength: sent.length })
+  assert.equal(clip.words.length, 19, 'the laugh tag is timed as a word before the 18 characters')
+  assert.equal(clip.words[0].text, '(laughs)')
+  assert.deepEqual(clip.usage, { billableCharacters: 42, textCharacters: 26 }, 'the tag is billed like 8 Latin characters')
+  // Hiyori/(ri4)(he2): offsets still index the text as sent, and the rule
+  // added nothing to billing (5 Han x 2 + 2 marks + 6 letters = 18).
+  const named = await readFile(new URL('./fixtures/minimax-2.8-pronunciation.sse', import.meta.url), 'utf8')
+  const result = await collectMinimaxStream(new Response(named).body, { textLength: '大家好，我是Hiyori。'.length })
+  assert.deepEqual(result.usage, { billableCharacters: 18, textCharacters: 13 })
+  assert.ok(result.words.some(word => word.text === 'Hiyori'))
 })

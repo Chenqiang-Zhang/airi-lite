@@ -16,7 +16,7 @@ import { createCandidateQueue } from './queue.mjs'
 import { createSseChannel } from './sse.mjs'
 import { createStageBus, STAGE_ROLES } from './stage-bus.mjs'
 import { HOST_CONTROL } from './text.mjs'
-import { createSentenceAllowance, planUtterance, screenUtterance } from './utterance.mjs'
+import { createClipAllowance, planClips, screenUtterance } from './utterance.mjs'
 
 const OUTCOMES = new Set(['played', 'partial', 'failed', 'cancelled', 'empty'])
 const AVATAR_STATES = new Set(['loading', 'ready', 'failed'])
@@ -24,6 +24,27 @@ const INPUT_KINDS = { 'input.danmaku': 'danmaku', 'input.superchat': 'superchat'
 const MAX_SAY_CHARS = 200
 const MAX_PROBLEM_CHARS = 120
 const OUTDATED_RELOAD_INTERVAL_MS = 30_000
+// When the voice provider refuses a clip for its per-minute request limit
+// (MiniMax 1002, TTS_UPSTREAM_RATE_LIMITED), the stage route waits this long
+// once and asks once more, instead of pacing requests ahead of time. Pacing
+// needs the account's real limit: api.minimax.cn documents 10 RPM (free) or
+// 20 (paid), and this account refused after about 14 requests in 25 s, so
+// MiniMax does not count a plain 60 s window; a wrong local guess would
+// either drop replies MiniMax would have voiced or change nothing. The
+// refusal is MiniMax's own signal, and the 2026-10-21 check saw 2 of the next
+// 8 requests pass and all 5 refused ones pass when rerun 6 s apart. 4 s is
+// over one 20 RPM interval (3 s). Bounded: one wait and at most one more
+// request per clip, which reserves again in .data/tts-budget.json (a refusal
+// returns no audio but the local ledger never refunds). Meanwhile /api/speech
+// keeps visitors off the account (UPSTREAM_BACKOFF_MS in server/speech.mjs).
+// Every other failure is final, as before.
+const RATE_LIMIT_RETRY_MS = 4_000
+const RATE_LIMIT_NOTES = {
+  waiting: `每分钟请求数到上限，${RATE_LIMIT_RETRY_MS / 1_000} 秒后重试这一段。`,
+  recovered: '每分钟请求数到上限，重试后已出声。',
+  lost: '每分钟请求数到上限，这一段没有声音。',
+}
+const isRateLimited = error => error instanceof SpeechProviderError && error.code === 'TTS_UPSTREAM_RATE_LIMITED'
 
 // A process-local daily counter for tests and runs without a data directory.
 export function createMemoryReplyBudget({ dailyLimit, now = Date.now }) {
@@ -89,6 +110,10 @@ export function createLiveRuntime({
   let turn = null
   let lastOutcome = null
   let lastProblem = null
+  // The voice provider's rate limit, apart from the stage's own report of
+  // the same clip ("云端语音失败…"), which would otherwise overwrite it.
+  let lastSpeechProblem = null
+  let rateLimitedClips = 0
   let lastOutdatedReload = -Infinity
   let lastHostBlock = null
   let stopped = false
@@ -108,6 +133,9 @@ export function createLiveRuntime({
   const auditLog = audit ?? (dataDirectory ? createAuditLog({ directory: join(dataDirectory, 'live-logs'), now }) : null)
   const detachAudit = auditLog?.attach(hub)
   const dailyReplies = boundedInteger(env.LIVE_DAILY_REPLY_LIMIT, 250, 1, 5_000)
+  // Same-tone sentences are bought as one clip unless switched off; each say
+  // tells the stage which way this server planned.
+  const joinSentences = env.LIVE_JOIN_SENTENCES !== '0'
   const budget = replyBudget ?? (dataDirectory
     // The TTS ledger counts "characters"; here each unit is one model reply.
     ? createTtsBudget({ path: join(dataDirectory, 'live-reply-budget.json'), dailyLimit: dailyReplies, now })
@@ -231,12 +259,14 @@ export function createLiveRuntime({
     const ended = turn
     turn = null
     timers.clearTimeout(ended.watchdog)
-    lastOutcome = { turnId, outcome, at: now(), sentencesBought: ended.bought, sentencesPlanned: ended.planned }
+    lastOutcome = { turnId, outcome, at: now(), sentencesBought: ended.bought, sentencesPlanned: ended.planned,
+      clipsBought: ended.clipsBought, clipsPlanned: ended.clipsPlanned }
     if (notifyStage)
       bus.publish('stop', { turnId })
     hub.publish('turn.ended', {
       turnId, outcome, origin: ended.origin, replyTo: ended.replyTo,
       planned: ended.planned, bought: ended.bought, spoken: [...ended.spoken],
+      clipsPlanned: ended.clipsPlanned, clipsBought: ended.clipsBought,
     })
     return true
   }
@@ -255,9 +285,10 @@ export function createLiveRuntime({
     // What the planner keeps anyway (at most one, inside the text), so the
     // stage is sent the very list the allowance was planned from.
     acts = normaliseActCues(acts, text.length)
-    const sentences = await planUtterance({ text, delivery, cues, acts })
-    if (!sentences.length)
+    const clips = await planClips({ text, delivery, cues, acts }, { join: joinSentences })
+    if (!clips.length)
       return refuse(400, 'LIVE_EMPTY')
+    const planned = clips.reduce((count, clip) => count + clip.parts.length, 0)
     // Re-check after the await: a concurrent say may have started a turn,
     // the stage may have gone, or the host may have paused meanwhile.
     if (stopped || control !== 'running')
@@ -277,16 +308,20 @@ export function createLiveRuntime({
       origin,
       replyTo,
       startedAt: now(),
-      allowance: createSentenceAllowance(sentences),
-      planned: sentences.length,
+      allowance: createClipAllowance(clips),
+      // planned/bought/spoken count sentences (the brain's history is by
+      // sentence); clips count the requests the stage buys them in.
+      planned,
       bought: 0,
       spoken: [],
+      clipsPlanned: clips.length,
+      clipsBought: 0,
       watchdog: timers.setTimeout(() => endTurn(turnId, 'timeout', { notifyStage: true }), watchdogMs),
     }
     turn.watchdog.unref?.()
     activity = 'idle'
-    hub.publish('turn.started', { turnId, text, delivery, cues, acts, origin, replyTo, sentences: sentences.length })
-    bus.publish('say', { turnId, text, delivery, cues, acts, replyTo })
+    hub.publish('turn.started', { turnId, text, delivery, cues, acts, origin, replyTo, sentences: planned, clips: clips.length })
+    bus.publish('say', { turnId, text, delivery, cues, acts, replyTo, join: joinSentences })
     // Publishing can drop a stalled primary, which cancels this very turn
     // (its lease handover runs one microtask later). Never report success
     // for it, and leave every page's last word "stop".
@@ -295,7 +330,7 @@ export function createLiveRuntime({
       bus.publish('stop', { turnId })
       return refuse(409, 'LIVE_NO_STAGE')
     }
-    return { ok: true, turnId, sentences: sentences.length }
+    return { ok: true, turnId, sentences: planned }
   }
 
   function hostText(value) {
@@ -502,7 +537,7 @@ export function createLiveRuntime({
   }
 
   // The only route the stage uses to buy audio: the server decides which
-  // sentences exist, each is bought at most once, and only by the primary.
+  // clips exist, each is bought at most once, and only by the primary.
   // The stage names an act, never its sound: each provider's own syntax,
   // and the pause length, are the server's and the player's.
   async function handleStageSpeech(request, response) {
@@ -514,23 +549,47 @@ export function createLiveRuntime({
     const text = body.text
     const delivery = normaliseEmotion(body.delivery)
     const act = body.act ?? null
-    if (typeof text !== 'string' || !delivery || (act !== null && !isAct(act))
-      || !turn.allowance.take({ text, delivery, act }))
+    const parts = typeof text === 'string' && delivery && (act === null || isAct(act))
+      ? turn.allowance.take({ text, delivery, act }) : null
+    if (!parts)
       return sendJson(response, 409, { code: 'LIVE_SENTENCE_NOT_ALLOWED' })
     const owner = turn
-    owner.bought++
+    owner.bought += parts.length
+    owner.clipsBought++
 
     const cancelled = new AbortController()
     const abort = () => cancelled.abort()
     response.once('close', abort)
+    const clip = { text, delivery, ...(act ? { act } : {}) }
+    let limited = false
     try {
-      const result = await speech.synthesise({ text, delivery, ...(act ? { act } : {}) }, { signal: cancelled.signal })
+      let result
+      try {
+        result = await speech.synthesise(clip, { signal: cancelled.signal })
+      }
+      catch (error) {
+        if (!isRateLimited(error) || cancelled.signal.aborted)
+          throw error
+        limited = true
+        noteRateLimit('waiting')
+        await wait(RATE_LIMIT_RETRY_MS, cancelled.signal)
+        // The host may have stopped or skipped the turn meanwhile.
+        if (turn !== owner) {
+          noteRateLimit('lost')
+          return sendJson(response, 409, { code: 'LIVE_TURN_MISMATCH' })
+        }
+        result = await speech.synthesise(clip, { signal: cancelled.signal })
+      }
+      if (limited)
+        noteRateLimit('recovered')
       // Only audio that was actually produced enters the brain's history.
-      owner.spoken.push(text)
+      owner.spoken.push(...parts)
       if (!response.destroyed && !response.writableEnded)
         sendJson(response, 200, result)
     }
     catch (error) {
+      if (limited)
+        noteRateLimit('lost')
       if (cancelled.signal.aborted || response.destroyed || response.writableEnded)
         return
       // Same stable codes as /api/speech; never echo text or provider detail.
@@ -544,6 +603,33 @@ export function createLiveRuntime({
     }
   }
 
+  function wait(ms, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted)
+        return reject(signal.reason)
+      const stop = () => {
+        timers.clearTimeout(handle)
+        reject(signal.reason)
+      }
+      const handle = timers.setTimeout(() => {
+        signal.removeEventListener('abort', stop)
+        resolve()
+      }, ms)
+      handle?.unref?.()
+      signal.addEventListener('abort', stop, { once: true })
+    })
+  }
+
+  // Shown to the host only; the stage and visitors get the stable code.
+  function noteRateLimit(step) {
+    if (step === 'waiting')
+      rateLimitedClips++
+    const provider = speech.health().provider === 'minimax' ? 'MiniMax ' : '语音服务'
+    lastSpeechProblem = { code: 'TTS_UPSTREAM_RATE_LIMITED', message: provider + RATE_LIMIT_NOTES[step],
+      at: now(), clips: rateLimitedClips }
+    hub.publish('speech.rate_limited', { step, clips: rateLimitedClips })
+  }
+
   function state() {
     return {
       control,
@@ -553,9 +639,11 @@ export function createLiveRuntime({
       turn: turn ? {
         turnId: turn.turnId, text: turn.text, delivery: turn.delivery, origin: turn.origin,
         startedAgoMs: now() - turn.startedAt, sentencesPlanned: turn.planned, sentencesBought: turn.bought,
+        clipsPlanned: turn.clipsPlanned, clipsBought: turn.clipsBought,
       } : null,
       lastOutcome,
       lastProblem,
+      lastSpeechProblem: lastSpeechProblem && { ...lastSpeechProblem, agoMs: now() - lastSpeechProblem.at },
       lastHostBlock,
       queue: queue.snapshot(),
       brain: {

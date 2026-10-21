@@ -22,7 +22,7 @@ import { createRequestHandler, readServerConfig } from '../server/app.mjs'
 import { createFakeDeepSeek } from '../server/live/fake-deepseek.mjs'
 import { createLiveRuntime } from '../server/live/runtime.mjs'
 import { createFixtureSource, loadFixture } from '../server/live/sources/fixture.mjs'
-import { chooseSayVoice, createMockSpeech } from './mock-tts.mjs'
+import { chooseSayVoice, createMockSpeech, parseMockLatency } from './mock-tts.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const port = Number(process.env.MOCK_LIVE_PORT ?? 4176)
@@ -34,7 +34,7 @@ const speed = speedArgument ? Math.min(100, Math.max(0.1, Number(speedArgument.s
 const fakeDeepSeek = createFakeDeepSeek({ adversarial, delayMs: 600 })
 
 const voice = process.argv.includes('--tone') ? null : await chooseSayVoice()
-const speech = createMockSpeech({ voice, workDirectory })
+const speech = createMockSpeech({ voice, workDirectory, latency: parseMockLatency(process.env.MOCK_TTS_LATENCY_MS) })
 // The go-live checklist wants a host blocklist; give the rehearsal a sample.
 await mkdir(join(workDirectory, '.data', 'moderation'), { recursive: true, mode: 0o700 })
 await writeFile(join(workDirectory, '.data', 'moderation', 'blocklist.txt'), '# mock-live sample\n彩排屏蔽词\n', { mode: 0o600 })

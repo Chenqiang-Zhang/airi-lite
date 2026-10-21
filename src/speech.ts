@@ -12,7 +12,7 @@ import { deliverySpeed } from './delivery.ts'
 import { mouthAtTime, mouthFrames } from './mouth.ts'
 import { createPlaybackClockGuard } from './playback-clock.ts'
 import type { MouthSegment } from './mouth'
-import { deliveryAtTime, replySentenceStream, SpeechSentenceStream } from './speech-sentences.ts'
+import { deliveryAtTime, joinLimit, joinSentence, replySentenceStream, SpeechSentenceStream } from './speech-sentences.ts'
 import type { DeliveryCue, PlaybackCue, SpokenSentence } from './speech-sentences'
 import { DEFAULT_VOICE } from './voice.ts'
 import { ACT_PAUSE_SECONDS, isAct, normaliseEmotion } from '../shared/performance-cues.mjs'
@@ -29,6 +29,9 @@ export interface SpeakOptions {
   onEnded?: (outcome: SpeechRunOutcome) => void
   // The reply's laugh/sigh/pause as [{start, act}] offsets into the text.
   acts?: ActCue[]
+  // Cloud only: join same-tone sentences into one request (joinSentence in
+  // speech-sentences.ts). Defaults to the controller's joinCloudSentences.
+  join?: boolean
 }
 
 // Policy deadline for an unconfirmed native start, not a browser guarantee or
@@ -141,8 +144,11 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   // false: a failed local/cloud run is skipped instead of retried with the
   // system voice (OBS browser sources may have no audible speechSynthesis).
   browserFallback?: boolean
+  // false: one cloud request per sentence, as before joining existed.
+  joinCloudSentences?: boolean
 } = {}) {
   const browserFallback = dependencies.browserFallback ?? true
+  const joinCloudSentences = dependencies.joinCloudSentences ?? true
   const scheduleBrowserStartDeadline = dependencies.scheduleBrowserStartDeadline ?? ((expired, milliseconds) => {
     const timeout = setTimeout(expired, milliseconds)
     return () => clearTimeout(timeout)
@@ -706,7 +712,9 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     return token === run
   }
 
-  async function *synthesizeCloudSentences(input: AsyncIterable<SpokenSentence>, token: number): AsyncGenerator<AudioClip> {
+  // `joinInput`: the reply's stream, to join sentences that are already
+  // queued onto the one about to be bought; null buys one per sentence.
+  async function *synthesizeCloudSentences(input: AsyncIterable<SpokenSentence>, token: number, joinInput: SpeechSentenceStream | null): AsyncGenerator<AudioClip> {
     if (!dependencies.synthesizeCloud)
       throw new Error('Cloud voice is not configured')
     // consumeSegments installs this exact run before pulling the generator.
@@ -716,6 +724,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       return
     const controller = new AbortController()
     activeVoiceAbort = controller
+    let previousUnits: number | undefined
     try {
       for await (const sentence of input) {
         while (true) {
@@ -727,11 +736,27 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
           if (hasCloudCapacity(session))
             break
         }
+        // Grow the clip from sentences already here, after the permit, so a
+        // streamed reply has had the most time to produce them. While a reply
+        // is still streaming its first sentence goes alone: waiting for more
+        // would delay the first audio. A whole reply (the stage, a replay)
+        // follows groupSentences exactly, which the live server checks.
+        let request = sentence
+        if (joinInput) {
+          const limit = previousUnits === undefined && !joinInput.done ? 0 : joinLimit(previousUnits)
+          while (true) {
+            const next = joinInput.takeReady(candidate => joinSentence(request, candidate, limit) !== null)
+            if (!next)
+              break
+            request = joinSentence(request, next, limit)!
+          }
+          previousUnits = request.text.length
+        }
         // Preserve real Chinese/English text; Kokoro's browser workaround must
         // never rewrite a cloud provider's input. No retries of paid requests.
-        const clip = await dependencies.synthesizeCloud(sentence, controller.signal)
+        const clip = await dependencies.synthesizeCloud(request, controller.signal)
         if (token !== run || controller.signal.aborted) return
-        yield { ...clip, delivery: sentence.delivery, ...(sentence.act ? { act: sentence.act } : {}) }
+        yield { ...clip, delivery: request.delivery, ...(request.act ? { act: request.act } : {}) }
       }
     }
     finally {
@@ -785,7 +810,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     }
   }
 
-  async function synthesizeInput(input: SpeechSentenceStream, voice: VoiceId, token: number, engine: SpeechEngine) {
+  async function synthesizeInput(input: SpeechSentenceStream, voice: VoiceId, token: number, engine: SpeechEngine, join = joinCloudSentences) {
     // Do not load a large voice model for a reply containing only code/markup.
     // Waiting for the first *spoken* sentence also keeps fallback from treating
     // intentional omission as invalid or silent synthesized audio.
@@ -808,7 +833,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     }
     if (engine === 'cloud') {
       callbacks.onState('cloud')
-      await consumeSegments(synthesizeCloudSentences(resumed, token), token, 'cloud')
+      await consumeSegments(synthesizeCloudSentences(resumed, token, join ? input : null), token, 'cloud')
       return
     }
     const model = await prepare(token)
@@ -946,7 +971,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     activeInput = input
     callbacks.onProblem('')
     try {
-      await synthesizeInput(input, voice, token, engine)
+      await synthesizeInput(input, voice, token, engine, options.join ?? joinCloudSentences)
     }
     catch (error) {
       if (token !== run)

@@ -1,4 +1,5 @@
 import { normaliseEmotion } from '../shared/performance-cues.mjs'
+import { isPronunciationRule, matchPronunciation, MINIMAX_PRONUNCIATION, substitutedLength } from './minimax-pronunciation.mjs'
 import { SpeechProviderError } from './speech-error.mjs'
 import { stripMinimaxSyntax } from './speech-syntax.mjs'
 
@@ -43,6 +44,10 @@ const ACT_TAG = Object.freeze({ laugh: '(laughs)', sigh: '(sighs)', pause: '' })
 // Sound tags and pause markers written by anyone but this server would be
 // performed, so literal text loses them (server/speech-syntax.mjs). The live
 // gate refuses any sentence this would change, so nothing is spliced.
+// MiniMax also performs half-width bracket pinyin/IPA written inline
+// ("(he2)平"), so literal brackets become full width, one for one: the words,
+// lengths and subtitle offsets stay the same and nothing is read as syntax.
+const fullWidthBrackets = text => text.replace(/[()]/g, bracket => bracket === '(' ? '（' : '）')
 
 // `detail` names which check failed, for local diagnosis (the audition
 // script prints it). It is always built here from fixed words and numbers,
@@ -56,6 +61,18 @@ export class MinimaxSpeechError extends SpeechProviderError {
 }
 
 const invalid = detail => new MinimaxSpeechError('TTS_UPSTREAM_INVALID', detail)
+
+// 1002 is MiniMax's 请求频率超限 ("rate limit exceeded(RPM)"): nothing was
+// synthesised, and the official docs say to retry later. Checked against the
+// error-code and rate-limit pages on 2026-10-21: T2A on api.minimax.cn has an
+// RPM limit only (10 free, 20 paid accounts; main and sub-accounts share
+// it). 1039 is "Token 限制" with the fix "adjust max_tokens", and T2A lists
+// no TPM, so it is not mapped here; neither is 2045 (request-rate growth),
+// which a retry would only make worse.
+const MINIMAX_RATE_LIMITED = 1002
+const statusError = code => code === MINIMAX_RATE_LIMITED
+  ? new MinimaxSpeechError('TTS_UPSTREAM_RATE_LIMITED', `status-code-${code}`)
+  : invalid(`status-code-${code}`)
 
 // MiniMax reports errors such as rate limits as a 200 JSON body; keep only
 // its numeric status code, reading at most 16 KB.
@@ -105,7 +122,10 @@ export function readMinimaxConfig(env = process.env) {
   const endpoint = region ? MINIMAX_ENDPOINTS[region] : null
   const configured = env.MINIMAX_TTS_ENABLED === '1' && validApiKey && validVoiceId && Boolean(endpoint)
     && MODELS.has(selectedModel) && Number.isSafeInteger(dailyLimit) && dailyLimit > 0
-  return Object.freeze({ configured, model, region, endpoint, apiKey, voiceId, dailyLimit })
+  // The server's own table (server/minimax-pronunciation.mjs); '0' turns it
+  // off without a deploy if a rule turns out to misbehave.
+  const pronunciation = env.MINIMAX_PRONUNCIATION === '0' ? Object.freeze([]) : MINIMAX_PRONUNCIATION
+  return Object.freeze({ configured, model, region, endpoint, apiKey, voiceId, dailyLimit, pronunciation })
 }
 
 export function speechHealth(config) {
@@ -117,14 +137,23 @@ export function speechHealth(config) {
 }
 
 
+// The dictionary rules this text would be sent with: only those whose key
+// occurs in the literal words, never in the server's act tag. A hand-built
+// config without the field sends none.
+function pronunciationFor(config, literal) {
+  const rules = Array.isArray(config.pronunciation) ? config.pronunciation.filter(isPronunciationRule) : []
+  return matchPronunciation(literal, rules)
+}
+
 export function buildMinimaxRequest(config, { text, delivery, act } = {}) {
   const emotion = normaliseEmotion(delivery)
   if (typeof text !== 'string' || !emotion || !Object.hasOwn(EMOTION_VOICE, emotion)
     || (act !== undefined && !Object.hasOwn(ACT_TAG, act)))
     throw new MinimaxSpeechError('TTS_INVALID_REQUEST')
-  const literal = stripMinimaxSyntax(text)
+  const literal = fullWidthBrackets(stripMinimaxSyntax(text))
   if (!literal.trim())
     throw new MinimaxSpeechError('TTS_INVALID_REQUEST')
+  const tone = pronunciationFor(config, literal)
   const { emotion: voiceEmotion, speed = 1 } = EMOTION_VOICE[emotion]
   // No emotion key selects automatic text-conditioned delivery (the enum has
   // no "auto"). Only the server-owned act tag is ever executable syntax.
@@ -143,14 +172,20 @@ export function buildMinimaxRequest(config, { text, delivery, act } = {}) {
     language_boost: 'auto',
     subtitle_enable: true,
     subtitle_type: 'word_streaming',
+    // Absent unless a rule matched, so every other body is unchanged.
+    ...(tone.length ? { pronunciation_dict: { tone } } : {}),
   }
 }
 
+const dictionaryRules = payload => payload.pronunciation_dict?.tone ?? []
+
 // The protective local reservation: twice the UTF-16 length of the text
-// actually sent (act tag included, removed literal tags excluded). It is not
-// the account balance and failed requests are not refunded.
+// actually sent (act tag included, removed literal tags excluded), plus the
+// dictionary rules sent with it, since whether MiniMax bills those is
+// unknown. It is not the account balance and failed requests are not refunded.
 export function estimateMinimaxReservation(config, request) {
-  return 2 * buildMinimaxRequest(config, request).text.length
+  const payload = buildMinimaxRequest(config, request)
+  return 2 * (payload.text.length + dictionaryRules(payload).reduce((sum, rule) => sum + rule.length, 0))
 }
 
 export async function synthesiseMinimax(config, request, { fetchImpl = fetch, signal } = {}) {
@@ -186,10 +221,15 @@ export async function synthesiseMinimax(config, request, { fetchImpl = fetch, si
     const code = contentType.includes('json') ? await upstreamStatusCode(upstream) : undefined
     if (!contentType.includes('json'))
       void upstream.body?.cancel().catch(() => {})
-    throw invalid(code === undefined ? 'not-event-stream' : `status-code-${code}`)
+    throw code === undefined ? invalid('not-event-stream') : statusError(code)
   }
-  // Subtitle offsets index the text actually sent, act tag included.
-  return await collectMinimaxStream(upstream.body, { textLength: payload.text.length, signal })
+  // Subtitle offsets index the text actually sent, act tag included. With a
+  // dictionary rule they might index the substituted text (unverified), so
+  // only then is the bound the longer of the two.
+  const rules = dictionaryRules(payload)
+  const textLength = rules.length ? Math.max(payload.text.length, substitutedLength(payload.text, rules))
+    : payload.text.length
+  return await collectMinimaxStream(upstream.body, { textLength, signal })
 }
 
 const AGGREGATE_SLACK_BYTES = 4_096
@@ -275,6 +315,9 @@ export async function collectMinimaxStream(body, { textLength, signal } = {}) {
     }
     if (chunk?.base_resp?.status_code !== 0) {
       const code = chunk?.base_resp?.status_code
+      // A refusal comes before any audio; after audio it is a broken stream.
+      if (code === MINIMAX_RATE_LIMITED && !audioBytes)
+        throw statusError(code)
       throw invalid(Number.isSafeInteger(code) ? `status-code-${code}` : 'no-status-code')
     }
     if (![1, 2].includes(chunk?.data?.status))

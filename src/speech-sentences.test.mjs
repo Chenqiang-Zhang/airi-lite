@@ -465,3 +465,72 @@ test('old bright cues are read as happy and merged with a following happy cue', 
   for await (const sentence of replySentenceStream('好耶好耶。', 'bright')) sentences.push(sentence)
   assert.deepEqual(sentences, [{ text: '好耶好耶。', delivery: 'happy' }])
 })
+
+test('joinSpokenText keeps CJK tight and spaces Latin words apart', async () => {
+  const { joinSpokenText } = await import('./speech-sentences.ts')
+  assert.equal(joinSpokenText(['你好。', '今天好。']), '你好。今天好。')
+  assert.equal(joinSpokenText(['Hello Hiyori!', 'Rest well.']), 'Hello Hiyori! Rest well.')
+  assert.equal(joinSpokenText(['好！', 'DeepSeek 来了。']), '好！DeepSeek 来了。', 'full-width end: no space')
+  assert.equal(joinSpokenText(['OK.', '好的。']), 'OK.好的。', 'a CJK start: no space')
+  assert.equal(joinSpokenText([]), '')
+})
+
+test('joinSentence refuses another tone, an act on the next, an unfinished clip and an over-long result', async () => {
+  const { joinSentence, joinLimit, JOIN_FIRST_UNITS, JOIN_MAX_UNITS, JOIN_MIN_UNITS } = await import('./speech-sentences.ts')
+  const happy = text => ({ text, delivery: 'happy' })
+  assert.deepEqual(joinSentence(happy('一。'), happy('二。'), 40), happy('一。二。'))
+  assert.deepEqual(joinSentence({ ...happy('哈哈。'), act: 'laugh' }, happy('好。'), 40), { ...happy('哈哈。好。'), act: 'laugh' }, 'the clip keeps its act at the start')
+  assert.equal(joinSentence(happy('一。'), { text: '二。', delivery: 'sad' }, 40), null)
+  assert.equal(joinSentence(happy('一。'), { ...happy('二。'), act: 'pause' }, 40), null)
+  for (const unfinished of ['第一行', '我想想，', '等一下：', '嗯……'])
+    assert.equal(joinSentence(happy(unfinished), happy('二。'), 40), null, unfinished)
+  for (const finished of ['真的？', '好!', '对；', '他说“好。”', '（笑）好。）', '「好！」'])
+    assert.ok(joinSentence(happy(finished), happy('二。'), 40), finished)
+  assert.equal(joinSentence(happy('一二三。'), happy('四五。'), 6), null)
+  assert.ok(joinSentence(happy('一二三。'), happy('四五。'), 7))
+  assert.deepEqual([undefined, 0, 5, 15, 40, 150].map(joinLimit), [40, 20, 20, 30, 60, 60])
+  assert.deepEqual([JOIN_FIRST_UNITS, JOIN_MIN_UNITS, JOIN_MAX_UNITS], [40, 20, 60])
+})
+
+test('groupSentences is greedy under the limit chain and flattens back to the sentences', async () => {
+  const { groupSentences, joinSpokenText } = await import('./speech-sentences.ts')
+  const happy = text => ({ text, delivery: 'happy' })
+  assert.deepEqual(groupSentences([happy('只有一句。')]), [{ ...happy('只有一句。'), parts: ['只有一句。'] }])
+  assert.deepEqual(groupSentences([]), [])
+  const long = `${'长'.repeat(49)}。`
+  assert.deepEqual(groupSentences([happy(long), happy('短。')]).map(clip => clip.parts.length), [1, 1], 'over the first limit: alone')
+  const chain = [happy(`${'一'.repeat(9)}。`), happy(`${'二'.repeat(9)}。`), happy(`${'三'.repeat(19)}。`), happy(`${'四'.repeat(19)}。`), happy(`${'五'.repeat(19)}。`), happy(`${'六'.repeat(19)}。`), happy('七。')]
+  const clips = groupSentences(chain)
+  assert.deepEqual(clips.map(clip => clip.text.length), [40, 60, 2], '40, then up to twice that capped at 60')
+  assert.deepEqual(clips.flatMap(clip => clip.parts), chain.map(sentence => sentence.text))
+  for (const clip of clips)
+    assert.equal(clip.text, joinSpokenText(clip.parts))
+  assert.deepEqual(groupSentences(chain, false).map(clip => clip.parts.length), [1, 1, 1, 1, 1, 1, 1])
+  const mixed = groupSentences([happy('一。'), { text: '二。', delivery: 'sad' }, { text: '三。', delivery: 'sad' }, { ...happy('四。'), act: 'laugh' }, happy('五。')])
+  assert.deepEqual(mixed.map(clip => [clip.text, clip.delivery, clip.act ?? null]), [
+    ['一。', 'happy', null], ['二。三。', 'sad', null], ['四。五。', 'happy', 'laugh'],
+  ])
+  assert.equal(Object.hasOwn(mixed[0], 'act'), false, 'no act key without an act')
+})
+
+test('takeReady never waits, takes only what accept wants, and the iterator neither skips nor repeats', async () => {
+  const { SpeechSentenceStream } = await import('./speech-sentences.ts')
+  const stream = new SpeechSentenceStream('', 'neutral')
+  assert.equal(stream.takeReady(() => true), undefined, 'nothing queued')
+  stream.push('一。二。三。四')
+  assert.equal(stream.done, false)
+  const seen = []
+  const iterator = stream[Symbol.asyncIterator]()
+  seen.push((await iterator.next()).value.text)
+  assert.equal(stream.takeReady(sentence => sentence.text === '三。'), undefined, 'only the head is offered')
+  seen.push(stream.takeReady(() => true).text)
+  stream.finish()
+  assert.equal(stream.done, true)
+  for (let next = await iterator.next(); !next.done; next = await iterator.next())
+    seen.push(next.value.text)
+  assert.deepEqual(seen, ['一。', '二。', '三。', '四'])
+  const cancelled = new SpeechSentenceStream('', 'neutral')
+  cancelled.push('一。二。三')
+  cancelled.cancel()
+  assert.equal(cancelled.takeReady(() => true), undefined)
+})

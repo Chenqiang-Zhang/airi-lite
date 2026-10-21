@@ -46,17 +46,28 @@ export const SAMPLES = Object.freeze([
 
 export const plannedCharacters = (samples = SAMPLES) => samples.flatMap(sample => sample.parts).reduce((sum, part) => sum + part.text.length, 0)
 
-// A saved clip is reused only for the same voice, model and request.
-export const clipKey = ({ voice, model, part }) => createHash('sha256')
-  .update(JSON.stringify([voice, model, part.text, part.delivery, part.act ?? null])).digest('hex').slice(0, 16)
+// A saved clip is reused only for the same voice, model, request and
+// dictionary rules sent with it (`dictionary`: buildMinimaxRequest's
+// pronunciation_dict.tone). The rules join the hash only when there are
+// some, so every clip made before the dictionary keeps its key.
+export const clipKey = ({ voice, model, part, dictionary = [] }) => createHash('sha256')
+  .update(JSON.stringify([voice, model, part.text, part.delivery, part.act ?? null,
+    ...(dictionary.length ? [dictionary] : [])])).digest('hex').slice(0, 16)
+
+const speechRequest = part => ({ text: part.text, delivery: part.delivery, ...(part.act ? { act: part.act } : {}) })
+// What the page shows as sent; the dictionary only when one was sent.
+export const sentFields = built => ({ text: built.text, emotion: built.voice_setting.emotion, speed: built.voice_setting.speed,
+  ...(built.pronunciation_dict ? { dictionary: built.pronunciation_dict.tone } : {}) })
 
 const ACT_LABELS = { laugh: '笑', sigh: '叹气', pause: '停顿' }
 const escapeHtml = text => String(text).replace(/[&<>"']/g, character => `&#${character.charCodeAt(0)};`)
 
 // The listening page: every clip embedded, a play button per sample that
 // plays its parts back to back (with the pause act's silence), and what was
-// actually sent (emotion, speed, the text with the act tag).
-export function buildAuditionPage({ results, voice, model, date }) {
+// actually sent (emotion, speed, the text with the act tag, any dictionary
+// rules). Another listening script may pass its own heading and note.
+const AUDITION_NOTE = `每句都走直播用的同一条服务端路径。「播放」按舞台的方式依次播放各段；停顿是播放器加的 ${ACT_PAUSE_SECONDS} 秒静音。最后两段比较逐句合成和整段合成。`
+export function buildAuditionPage({ results, voice, model, date, heading = 'MiniMax 试听', note = AUDITION_NOTE }) {
   const sections = results.map((sample) => {
     const parts = sample.parts.map((part, index) => `
       <li>
@@ -64,7 +75,7 @@ export function buildAuditionPage({ results, voice, model, date }) {
           ? `<audio id="${sample.id}-${index}" preload="auto" controls src="data:audio/mpeg;base64,${part.audio}" data-pause="${part.act === 'pause' ? ACT_PAUSE_SECONDS : 0}"></audio>`
           : '<span class="missing">这一段没有生成成功</span>'}
         <span class="text">${escapeHtml(part.text)}</span>
-        <span class="meta">${escapeHtml(part.delivery)}${part.act ? ` · ${ACT_LABELS[part.act]}` : ''} → ${escapeHtml(part.sent.emotion ?? '自动')} · 语速 ${part.sent.speed}${part.sent.text !== part.text ? ` · 发送「${escapeHtml(part.sent.text)}」` : ''}</span>
+        <span class="meta">${escapeHtml(part.delivery)}${part.act ? ` · ${ACT_LABELS[part.act]}` : ''} → ${escapeHtml(part.sent.emotion ?? '自动')} · 语速 ${part.sent.speed}${part.sent.text !== part.text ? ` · 发送「${escapeHtml(part.sent.text)}」` : ''}${part.sent.dictionary?.length ? ` · 词典 ${escapeHtml(part.sent.dictionary.join('，'))}` : ''}</span>
       </li>`).join('')
     const complete = sample.parts.every(part => part.audio)
     return `
@@ -78,7 +89,7 @@ export function buildAuditionPage({ results, voice, model, date }) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MiniMax 试听</title>
+<title>${escapeHtml(heading)}</title>
 <style>
   :root { color-scheme: light dark; --fg: #1f2328; --muted: #59636e; --bg: #ffffff; --line: #d1d9e0; }
   @media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --muted: #9198a1; --bg: #0d1117; --line: #3d444d; } }
@@ -96,8 +107,8 @@ export function buildAuditionPage({ results, voice, model, date }) {
 </style>
 </head>
 <body>
-<h1>MiniMax 试听（${escapeHtml(model)}）</h1>
-<p class="note">${escapeHtml(date)} · 音色 ${escapeHtml(voice)} · 每句都走直播用的同一条服务端路径。「播放」按舞台的方式依次播放各段；停顿是播放器加的 ${ACT_PAUSE_SECONDS} 秒静音。最后两段比较逐句合成和整段合成。</p>
+<h1>${escapeHtml(heading)}（${escapeHtml(model)}）</h1>
+<p class="note">${escapeHtml(date)} · 音色 ${escapeHtml(voice)} · ${escapeHtml(note)}</p>
 ${sections}
 <script>
   const wait = seconds => new Promise(resolve => setTimeout(resolve, seconds * 1000))
@@ -139,7 +150,10 @@ export function recordingFetch(inner = fetch) {
   return recorder
 }
 
-export const clipFile = ({ out, config, part }) => join(out, 'clips', `${clipKey({ voice: config.voiceId, model: config.model, part })}.json`)
+// The key of a part as this config would send it.
+const partKey = (config, part) => clipKey({ voice: config.voiceId, model: config.model, part,
+  dictionary: buildMinimaxRequest(config, speechRequest(part)).pronunciation_dict?.tone })
+export const clipFile = ({ out, config, part }) => join(out, 'clips', `${partKey(config, part)}.json`)
 export const readClip = async (file) => JSON.parse(await readFile(file, 'utf8').catch(() => 'null'))
 
 // Makes the missing clips one by one (each saved as it arrives), then writes
@@ -153,7 +167,7 @@ export async function runAudition({ config, out, missing, cap, speech, recorder,
   let requests = 0
   const failures = []
   for (const part of missing) {
-    const request = { text: part.text, delivery: part.delivery, ...(part.act ? { act: part.act } : {}) }
+    const request = speechRequest(part)
     const built = buildMinimaxRequest(config, request)
     for (let attempt = 1; attempt <= 2; attempt++) {
       if (requests >= cap) {
@@ -167,7 +181,7 @@ export async function runAudition({ config, out, missing, cap, speech, recorder,
       try {
         const result = await speech.synthesise(request)
         await writeFile(clipPath(part), JSON.stringify({ text: part.text, delivery: part.delivery, act: part.act ?? null,
-          audio: result.audio, sent: { text: built.text, emotion: built.voice_setting.emotion, speed: built.voice_setting.speed } }))
+          audio: result.audio, sent: sentFields(built) }))
         progress()
         break
       }
@@ -176,7 +190,7 @@ export async function runAudition({ config, out, missing, cap, speech, recorder,
         log(`\n「${part.text}」 attempt ${attempt}: ${reason}`)
         if (recorder.last) {
           await mkdir(join(out, 'failed'), { recursive: true })
-          const file = join(out, 'failed', `${clipKey({ voice: config.voiceId, model: config.model, part })}-${attempt}.txt`)
+          const file = join(out, 'failed', `${partKey(config, part)}-${attempt}.txt`)
           await writeFile(file, `HTTP ${recorder.last.status} ${recorder.last.contentType}\n\n${recorder.last.raw}`)
           log(`  raw response: ${file}`)
         }
@@ -194,8 +208,7 @@ export async function runAudition({ config, out, missing, cap, speech, recorder,
     const parts = []
     for (const part of sample.parts) {
       const clip = await readClip(clipPath(part))
-      const built = buildMinimaxRequest(config, { text: part.text, delivery: part.delivery, ...(part.act ? { act: part.act } : {}) })
-      parts.push({ ...part, audio: clip?.audio, sent: clip?.sent ?? { text: built.text, emotion: built.voice_setting.emotion, speed: built.voice_setting.speed } })
+      parts.push({ ...part, audio: clip?.audio, sent: clip?.sent ?? sentFields(buildMinimaxRequest(config, speechRequest(part))) })
     }
     results.push({ ...sample, parts })
   }

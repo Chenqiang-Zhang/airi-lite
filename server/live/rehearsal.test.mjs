@@ -13,7 +13,7 @@ import { createFakeDeepSeek } from './fake-deepseek.mjs'
 import { screenReply } from './moderation.mjs'
 import { createLiveRuntime, createMemoryReplyBudget } from './runtime.mjs'
 import { createFixtureSource, loadFixture } from './sources/fixture.mjs'
-import { planUtterance } from './utterance.mjs'
+import { planClips } from './utterance.mjs'
 
 // The M2 acceptance run: the real runtime, brain, queue, gate and audit log,
 // fed the bundled 30-minute rehearsal on a fake clock, with an adversarial
@@ -110,7 +110,7 @@ test('a 30-minute adversarial rehearsal never puts unscreened text on stage', { 
   let pauses = 0
   runtime.hub.subscribe('brain.blocked', event => blocked.push(event.data.text))
   runtime.hub.subscribe('brain.paused', () => pauses++)
-  // The stage plays every turn: buy each planned sentence once, report played.
+  // The stage plays every turn: buy each planned clip once, report played.
   // It plans from what the turn announced, acts included, as the real stage
   // does: a plan that drifted from the server's would be refused here.
   runtime.hub.subscribe('turn.started', (event) => {
@@ -118,8 +118,8 @@ test('a 30-minute adversarial rehearsal never puts unscreened text on stage', { 
     said.push(text)
     turnActs.push(acts)
     void (async () => {
-      for (const sentence of await planUtterance({ text, delivery, cues, acts }))
-        assert.equal((await call(post('/api/live/stage/speech', { leaseId, turnId, ...sentence }), '/api/live/stage/speech')).status, 200)
+      for (const { parts: _parts, ...clip } of await planClips({ text, delivery, cues, acts }))
+        assert.equal((await call(post('/api/live/stage/speech', { leaseId, turnId, ...clip }), '/api/live/stage/speech')).status, 200)
       await call(post('/api/live/stage/report', { leaseId, type: 'ended', turnId, outcome: 'played' }), '/api/live/stage/report')
     })()
   })

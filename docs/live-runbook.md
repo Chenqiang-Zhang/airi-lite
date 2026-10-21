@@ -16,6 +16,7 @@
 3. **OBS Studio 32.x**（Mac 选 Apple 芯片版）。
 4. **`.env.local`**：在项目根目录自己创建，变量见下面的[环境变量](#环境变量)。不要把内容贴到聊天里，也不要提交到 Git。
 5. **屏蔽词**：新建 `.data/moderation/blocklist.txt`，每行一个词。前缀 `drop:`（默认，命中就不说）、`avoid:`、`crisis:` 区分类别，`#` 后面是注释。服务只在启动时读这个文件，改了要重启。开播预检要求这里至少有一条可用的词。
+6. **MiniMax 每分钟请求数**（`cloud` 档位）：首播前在 MiniMax 控制台确认账号的 RPM（官方文档：国内站免费账号 10、充值账号 20，主账号和子账号共用），直播和网页聊天用的是同一个 Key。超了的那一段会等 4 秒重试一次，控制台「当前」栏显示「语音提示：MiniMax 每分钟请求数到上限…」；经常出现就向 MiniMax 申请提额（官方说要 3–5 个工作日）。
 
 Windows 额外注意：
 
@@ -37,11 +38,12 @@ Windows 额外注意：
 | `DEEPSEEK_MODEL` / `DEEPSEEK_BASE_URL` | 否 | `deepseek-flash` / `https://api.deepseek.com` | |
 | `LIVE_DAILY_REPLY_LIMIT` | 否 | `250`（1–5000） | 每天最多调用几次大脑（含失败和中止的调用），记在 `.data/live-reply-budget.json`。用完自动暂停。 |
 | `LIVE_MAX_TOKENS` | 否 | `160`（32–400） | 每条直播回复的最大输出 token。 |
+| `LIVE_JOIN_SENTENCES` | 否 | 开 | 一条回复里语气相同的相邻句子合成一次（一段最多 60 字），句与句之间的语调不再断开。控制台显示「已取音 3/3 句（1 段）」：句是字幕和记忆的单位，段是实际的语音请求。设 `0` 回到一句一请求。 |
 | `TTS_PROVIDER` | 否 | `minimax` | `minimax`、`elevenlabs` 或 `local`（`local-voice` 档位用）。 |
-| `MINIMAX_TTS_ENABLED`、`MINIMAX_API_KEY`、`MINIMAX_VOICE_ID`、`MINIMAX_TTS_DAILY_CHAR_LIMIT` | `cloud` 档位必需 | `MINIMAX_TTS_ENABLED=0` | 四项都要填，`ENABLED=1` 才会花钱。可选 `MINIMAX_TTS_MODEL`（`speech-2.8-turbo`）、`MINIMAX_TTS_REGION`（`cn`）。细节见 `.env.example`。 |
+| `MINIMAX_TTS_ENABLED`、`MINIMAX_API_KEY`、`MINIMAX_VOICE_ID`、`MINIMAX_TTS_DAILY_CHAR_LIMIT` | `cloud` 档位必需 | `MINIMAX_TTS_ENABLED=0` | 四项都要填，`ENABLED=1` 才会花钱。可选 `MINIMAX_TTS_MODEL`（`speech-2.8-turbo`）、`MINIMAX_TTS_REGION`（`cn`）、`MINIMAX_PRONUNCIATION`（默认开：句子里出现「日和」「Hiyori」这类词时附带读音表，词表在 `server/minimax-pronunciation.mjs`；读错时设 `0` 关掉）。细节见 `.env.example`。 |
 | `LOCAL_TTS_URL` 等 `LOCAL_TTS_*` | `local-voice` 档位必需 | — | 本地 TTS 引擎的基础地址，例如 `http://127.0.0.1:9880`（程序会接上 OpenAI 兼容的 `/v1/audio/speech`）；还要 `LOCAL_TTS_ENABLED=1`、`LOCAL_TTS_MODEL`、`LOCAL_TTS_VOICE`，其余见 `docs/local-tts.md` 和 `.env.example`。预检会对这个地址的主机做一次很轻的 HEAD 请求，确认引擎开着。 |
 | `BILIBILI_OPEN_ACCESS_KEY_ID`、`BILIBILI_OPEN_ACCESS_KEY_SECRET`、`BILIBILI_OPEN_APP_ID`、`BILIBILI_OPEN_CODE` | 现在不需要 | — | B 站开放平台凭据。目前只有 `scripts/bili-probe.mjs` 读取，直播服务还不读（M5 接入弹幕时才用）。 |
-| `MOCK_LIVE_PORT`、`MOCK_SAY_VOICE` | 否 | `4176` / 自动 | 只给零费用彩排用。 |
+| `MOCK_LIVE_PORT`、`MOCK_SAY_VOICE`、`MOCK_TTS_LATENCY_MS` | 否 | `4176` / 自动 / 无 | 只给零费用彩排用。`MOCK_TTS_LATENCY_MS=800,40` 让每段假语音晚 800 毫秒 + 每字 40 毫秒才到，模拟云端合成要等的时间，用来看段与段之间会不会断档。 |
 
 每日额度按 UTC 日期计算，也就是北京时间早上 8 点清零。
 

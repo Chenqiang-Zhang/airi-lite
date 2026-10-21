@@ -1,5 +1,5 @@
-import { replySentenceStream } from '../../src/speech-sentences.ts'
-import { screenReply } from './moderation.mjs'
+import { groupSentences, joinSpokenText, replySentenceStream } from '../../src/speech-sentences.ts'
+import { MAX_REPLY_CHARS, screenReply } from './moderation.mjs'
 
 // Expands a reply exactly as the stage's speak() will (same splitter, same
 // arguments as src/speech.ts speak(): userText is empty), so the server can
@@ -12,30 +12,40 @@ export async function planUtterance({ text, delivery = 'neutral', cues = [], act
   return sentences
 }
 
-// A multiset: a reply that repeats a sentence may buy it that many times,
-// never more, and never a sentence the server did not plan. The act is part
-// of the key, so a stage can neither add a laugh nor drop a planned pause.
-export function createSentenceAllowance(sentences) {
+// The clips the stage will buy: the planned sentences, same-tone runs joined
+// by the rules in src/speech-sentences.ts (one clip per sentence when
+// `join` is false). Each clip keeps its sentences as `parts`.
+export async function planClips(utterance, { join = true } = {}) {
+  return groupSentences(await planUtterance(utterance), join)
+}
+
+// A multiset of clips: a reply that repeats a clip may buy it that many
+// times, never more, and never text the server did not plan, so a stage can
+// neither buy one sentence of a joined clip alone nor join its own. The act
+// is part of the key, so it can neither add a laugh nor drop a planned
+// pause. take() returns the clip's sentences, or null.
+export function createClipAllowance(clips) {
   const remaining = new Map()
-  const key = sentence => JSON.stringify([sentence.delivery, sentence.act ?? null, sentence.text])
-  for (const sentence of sentences)
-    remaining.set(key(sentence), (remaining.get(key(sentence)) ?? 0) + 1)
+  const key = clip => JSON.stringify([clip.delivery, clip.act ?? null, clip.text])
+  for (const clip of clips) {
+    const id = key(clip)
+    remaining.set(id, [...(remaining.get(id) ?? []), [...(clip.parts ?? [clip.text])]])
+  }
   return {
-    take(sentence) {
-      const id = key(sentence)
-      const count = remaining.get(id) ?? 0
-      if (!count)
-        return false
-      if (count === 1)
+    take(clip) {
+      const id = key(clip)
+      const left = remaining.get(id)
+      if (!left)
+        return null
+      const parts = left.shift()
+      if (!left.length)
         remaining.delete(id)
-      else
-        remaining.set(id, count - 1)
-      return true
+      return parts
     },
     get remaining() {
       let total = 0
-      for (const count of remaining.values())
-        total += count
+      for (const left of remaining.values())
+        total += left.length
       return total
     },
   }
@@ -57,10 +67,24 @@ export async function screenUtterance({ text, delivery = 'neutral', cues = [], a
   const shown = await screenReply(text, options)
   if (!shown.ok)
     return { ...shown, part: 'caption' }
-  // Acts split sentences too; what is heard is still the joined words.
+  // Acts split sentences too; what is heard is still the joined words. This
+  // does not depend on how sentences are grouped into clips, so the brain's
+  // screen and the turn's plan always agree.
   const sentences = await planUtterance({ text, delivery, cues, acts })
   if (!sentences.length)
     return { ok: false, reason: 'empty', part: 'speech' }
-  const spoken = await screenReply(sentences.map(sentence => sentence.text).join(''), options)
-  return spoken.ok ? { ok: true } : { ...spoken, part: 'speech' }
+  const parts = sentences.map(sentence => sentence.text)
+  const spoken = await screenReply(parts.join(''), options)
+  if (!spoken.ok)
+    return { ...spoken, part: 'speech' }
+  // A joined clip puts a space between Latin sentences, which whole-word
+  // rules see differently; the local rules check that form too.
+  const spaced = joinSpokenText(parts)
+  if (spaced !== parts.join('')) {
+    const again = await screenReply(spaced, { ...options, provider: null,
+      maxChars: (options.maxChars ?? MAX_REPLY_CHARS) + parts.length })
+    if (!again.ok)
+      return { ...again, part: 'speech' }
+  }
+  return { ok: true }
 }

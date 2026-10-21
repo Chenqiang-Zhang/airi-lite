@@ -144,6 +144,18 @@ export class SpeechSentenceStream implements AsyncIterable<SpokenSentence> {
     this.wake = null
   }
 
+  // Closed: every sentence of the reply is queued (or it was cancelled).
+  get done() {
+    return this.closed
+  }
+
+  // The next sentence, only if it is already queued and `accept` wants it.
+  // Never waits, so joining never holds back a sentence that is ready.
+  takeReady(accept: (sentence: SpokenSentence) => boolean): SpokenSentence | undefined {
+    const next = this.queue[0]
+    return next && accept(next) ? this.queue.shift() : undefined
+  }
+
   cancel() {
     this.queue.length = 0
     this.filter.cancel()
@@ -185,6 +197,70 @@ export function replySentenceStream(text: string, delivery?: Delivery, cues: Del
   stream.push(text.slice(start))
   stream.finish()
   return stream
+}
+
+// Consecutive same-tone sentences are joined into one cloud request, so the
+// voice carries its intonation across them instead of starting over (heard
+// in the MiniMax listening test, 2026-10-20). The live server's allowance and
+// the stage's controller both group by these rules and must buy the same
+// clips: changing any of them is a STAGE_PROTOCOL change, and a golden table
+// in server/live/utterance.test.mjs fails until the protocol is bumped.
+// Lengths are UTF-16 units of the joined words; act tags are not counted.
+// 60 units is about 13 s of speech (19 s at the slowest tone), well inside
+// the 30 s clip limit.
+export const JOIN_FIRST_UNITS = 40
+export const JOIN_MIN_UNITS = 20
+export const JOIN_MAX_UNITS = 60
+// Only a finished sentence joins the next one; text cut at a tone change, a
+// newline or the buffer's length limit has no end mark and stays apart.
+const JOINABLE_END = /[。！？!?；;][)\]}）］｝》〉」』】〕〗〙〛”’»›"']*$/
+
+export interface SpokenClip extends SpokenSentence {
+  parts: string[] // The sentences in it, in order.
+}
+
+export function joinSpokenText(texts: readonly string[]): string {
+  let joined = ''
+  for (const text of texts)
+    joined += /[\x21-\x7e]$/.test(joined) && /^[A-Za-z0-9]/.test(text) ? ` ${text}` : text
+  return joined
+}
+
+// How long the next clip may grow: the first is kept short so it starts
+// quickly, and each later one at most doubles the one before it, so it is
+// usually ready before that one finishes playing.
+export function joinLimit(previousUnits?: number): number {
+  return previousUnits === undefined ? JOIN_FIRST_UNITS
+    : Math.min(JOIN_MAX_UNITS, Math.max(JOIN_MIN_UNITS, 2 * previousUnits))
+}
+
+// `clip` with `next` appended, or null when they must stay separate requests:
+// another tone, an act on `next` (it starts its own clip), an unfinished
+// `clip`, or a result over `limit`. A clip's own act stays at its start.
+export function joinSentence(clip: SpokenSentence, next: SpokenSentence, limit: number): SpokenSentence | null {
+  if (next.delivery !== clip.delivery || next.act || !JOINABLE_END.test(clip.text))
+    return null
+  const text = joinSpokenText([clip.text, next.text])
+  return text.length <= limit ? { ...clip, text } : null
+}
+
+// The clips a whole reply is bought as, greedily, under the joinLimit chain.
+// The stage's controller makes the same choices one request at a time.
+export function groupSentences(sentences: readonly SpokenSentence[], join = true): SpokenClip[] {
+  const clips: SpokenClip[] = []
+  let previous: number | undefined
+  for (let index = 0; index < sentences.length;) {
+    let clip: SpokenSentence = sentences[index++]
+    const parts = [clip.text]
+    const limit = joinLimit(previous)
+    for (let joined; join && index < sentences.length && (joined = joinSentence(clip, sentences[index], limit)); index++) {
+      clip = joined
+      parts.push(sentences[index].text)
+    }
+    clips.push({ text: clip.text, delivery: clip.delivery, ...(clip.act ? { act: clip.act } : {}), parts })
+    previous = clip.text.length
+  }
+  return clips
 }
 
 export interface PlaybackCue {

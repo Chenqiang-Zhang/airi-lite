@@ -13,7 +13,8 @@ const ID3_FOOTER = Buffer.from('3DI', 'ascii')
 const ID3_TRAILER = Buffer.from('TAG', 'ascii')
 // One row per shared emotion. v4 audio tags are free-form words in square
 // brackets put before the words they colour; a tag carries forward through
-// the rest of the request (one sentence here). SSML is disabled on v4. Only
+// the rest of the request (one clip here: a sentence or a same-tone run of
+// them, never two tones). SSML is disabled on v4. Only
 // these server-owned rows ever become executable tags.
 const EMOTION_TAG = Object.freeze({ neutral: '', happy: '[happy] ', soft: '[softly] ', curious: '[curious] ',
   surprised: '[surprised] ', sad: '[sad] ', pout: '[playful] ', shy: '[shyly] ' })

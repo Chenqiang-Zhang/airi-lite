@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { SpeechProviderError } from '../server/speech-error.mjs'
-import { chooseSayVoice, createMockSpeech, SAMPLE_RATE, toneSeconds, toneWav } from './mock-tts.mjs'
+import { chooseSayVoice, createMockSpeech, parseMockLatency, SAMPLE_RATE, toneSeconds, toneWav } from './mock-tts.mjs'
 
 const refuseExec = async () => { throw new Error('say must not be spawned') }
 
@@ -87,6 +87,24 @@ test('tone length follows the line and stays bounded', () => {
   assert.equal(toneSeconds(''), 0.6)
   assert.equal(toneSeconds('你好'), 0.6)
   assert.equal(toneSeconds('一二三四五六七八九十'), 2)
-  assert.equal(toneSeconds('长'.repeat(200)), 8)
+  assert.equal(toneSeconds('长'.repeat(60)), 12, 'a joined 60-character clip is not cut short')
+  assert.equal(toneSeconds('长'.repeat(200)), 15)
   assert.equal(toneWav(0.5, 8_000).length, 44 + 4_000 * 2)
+})
+
+test('the optional latency delays each clip by its length and an abort cuts it short', async () => {
+  assert.equal(parseMockLatency(undefined), null)
+  assert.deepEqual(parseMockLatency('800,40'), { fixedMs: 800, perCharacterMs: 40 })
+  for (const bad of ['800', '-1,2', '800,40,1', '20000,1', 'a,b'])
+    assert.throws(() => parseMockLatency(bad), /MOCK_TTS_LATENCY_MS/, bad)
+  const waits = []
+  const speech = createMockSpeech({ voice: null, workDirectory: '/nonexistent', log() {}, latency: { fixedMs: 800, perCharacterMs: 40 },
+    delay: async (milliseconds) => { waits.push(milliseconds) } })
+  await speech.synthesise({ text: '一二三四五', delivery: 'happy' })
+  assert.deepEqual(waits, [1_000])
+  const real = createMockSpeech({ voice: null, workDirectory: '/nonexistent', log() {}, latency: { fixedMs: 10_000, perCharacterMs: 0 } })
+  const controller = new AbortController()
+  const pending = real.synthesise({ text: '好。', delivery: 'happy' }, { signal: controller.signal })
+  controller.abort()
+  await assert.rejects(pending, { name: 'AbortError' })
 })

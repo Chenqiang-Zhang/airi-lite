@@ -39,9 +39,14 @@ export interface LiveState {
     startedAgoMs: number
     sentencesPlanned: number
     sentencesBought: number
+    // Requests: same-tone sentences are bought together. Absent from older servers.
+    clipsPlanned?: number
+    clipsBought?: number
   }
-  lastOutcome: null | { turnId: string, outcome: string, at: number, sentencesBought: number, sentencesPlanned: number }
+  lastOutcome: null | { turnId: string, outcome: string, at: number, sentencesBought: number, sentencesPlanned: number, clipsBought?: number, clipsPlanned?: number }
   lastProblem: null | { message: string, at: number }
+  // The voice provider's per-minute limit (MiniMax 1002). Absent from older servers.
+  lastSpeechProblem?: null | { code: string, message: string, at: number, agoMs: number, clips: number }
   lastHostBlock: null | { reason: string, term: string | null, at: number }
   queue: { open: QueueItem[], recent: QueueItem[] }
   brain: {

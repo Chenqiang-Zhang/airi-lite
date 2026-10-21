@@ -26,7 +26,9 @@ export function normaliseEmotion(value) {
 // A page reporting another version, or none (loaded before acts existed),
 // would buy sentences the server never planned or drop new tones, so it is
 // told to reload instead of going live. Bump it with any such change.
-export const STAGE_PROTOCOL = 2
+// 3: same-tone sentences are bought as one clip (the join rules in
+// src/speech-sentences.ts), and say carries `join`.
+export const STAGE_PROTOCOL = 3
 
 export const ACTS = Object.freeze(['laugh', 'sigh', 'pause'])
 export const MAX_ACTS_PER_REPLY = 1

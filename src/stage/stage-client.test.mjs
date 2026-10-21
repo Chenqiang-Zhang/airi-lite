@@ -264,3 +264,17 @@ test('a tone this page does not know is reported and ends the turn at once inste
     assert.deepEqual(reports[1], { leaseId: 'lease-1', type: 'ended', turnId: 't1', outcome: 'failed' })
   }
 })
+
+test('a say joins sentences only when the server planned clips that way', async () => {
+  const f = fixture()
+  f.client.start()
+  f.emit('hello', { leaseId: 'lease-1', primary: true, mode: 'live' })
+  f.emit('say', { turnId: 't1', text: '一。二。', delivery: 'happy', cues: [], acts: [], join: true })
+  f.emit('say', { turnId: 't2', text: '一。二。', delivery: 'happy', cues: [], acts: [] })
+  f.emit('say', { turnId: 't3', text: '一。二。', delivery: 'happy', cues: [], acts: [], join: 'yes' })
+  assert.deepEqual(f.spoken.map(call => call.options.join), [true, false, false], 'an older server, or anything but true, means one per sentence')
+  await f.client.synthesizeCloud({ text: '哈哈真好。再说一句。', delivery: 'happy', act: 'laugh' }, new AbortController().signal)
+  assert.equal(JSON.stringify(f.posts.at(-1).body),
+    JSON.stringify({ leaseId: 'lease-1', turnId: 't3', text: '哈哈真好。再说一句。', delivery: 'happy', act: 'laugh' }), 'a joined clip is bought like a sentence')
+  f.client.stop()
+})

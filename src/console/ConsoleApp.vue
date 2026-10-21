@@ -207,6 +207,11 @@ function who(item: QueueItem) {
   return item.user?.name || '观众'
 }
 
+// "（1 段）" when same-tone sentences were bought together; nothing otherwise.
+function clipNote(clips: number | undefined, sentences: number) {
+  return typeof clips === 'number' && clips !== sentences ? `（${clips} 段）` : ''
+}
+
 function ago(ms: number | null | undefined) {
   if (ms === null || ms === undefined) return '—'
   return ms < 1_000 ? '刚刚' : `${Math.round(ms / 1_000)} 秒前`
@@ -334,14 +339,17 @@ onUnmounted(() => {
     <section class="turn" aria-label="当前回合">
       <h2>当前</h2>
       <p v-if="state?.turn">
-        「{{ state.turn.text }}」 · 已取音 {{ state.turn.sentencesBought }}/{{ state.turn.sentencesPlanned }} 句 · {{ ago(state.turn.startedAgoMs) }}开始
+        「{{ state.turn.text }}」 · 已取音 {{ state.turn.sentencesBought }}/{{ state.turn.sentencesPlanned }} 句{{ clipNote(state.turn.clipsPlanned, state.turn.sentencesPlanned) }} · {{ ago(state.turn.startedAgoMs) }}开始
       </p>
       <p v-else class="muted">空闲</p>
       <p v-if="state?.lastOutcome" class="muted">
         上一句：{{ OUTCOME_LABELS[state.lastOutcome.outcome] ?? state.lastOutcome.outcome }}
-        （取音 {{ state.lastOutcome.sentencesBought }}/{{ state.lastOutcome.sentencesPlanned }} 句）
+        （取音 {{ state.lastOutcome.sentencesBought }}/{{ state.lastOutcome.sentencesPlanned }} 句{{ clipNote(state.lastOutcome.clipsPlanned, state.lastOutcome.sentencesPlanned) }}）
       </p>
       <p v-if="state?.lastProblem" class="problem">舞台提示：{{ state.lastProblem.message }}</p>
+      <p v-if="state?.lastSpeechProblem" class="problem">
+        语音提示：{{ state.lastSpeechProblem.message }}（本次启动第 {{ state.lastSpeechProblem.clips }} 次 · {{ ago(state.lastSpeechProblem.agoMs) }}）
+      </p>
       <p v-if="state?.lastHostBlock" class="problem">照读被拦下：{{ BLOCK_LABELS[state.lastHostBlock.reason] ?? state.lastHostBlock.reason }}{{ state.lastHostBlock.term ? `（${state.lastHostBlock.term}）` : '' }}</p>
     </section>
 

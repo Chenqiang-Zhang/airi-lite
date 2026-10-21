@@ -6,7 +6,7 @@ Written 2026-10-20. Only the zero-dependency mock engine below has been tested. 
 
 ## How a request looks
 
-airi-lite sends one JSON request per sentence:
+airi-lite sends one JSON request per clip: a sentence, or several consecutive sentences with the same emotion joined together (at most 60 characters; `LIVE_JOIN_SENTENCES=0` turns joining off on the live stage):
 
 ```http
 POST {LOCAL_TTS_URL}/v1/audio/speech
@@ -18,7 +18,7 @@ Authorization: Bearer …      (only when LOCAL_TTS_API_KEY is set)
  "response_format": "wav", "speed": 1}
 ```
 
-- `input` is at most 360 UTF-16 characters (the same limit as the cloud providers).
+- `input` is at most 360 UTF-16 characters (the same limit as the cloud providers). A joined clip is at most 60, about 13 s of speech and up to about 19 s for the slowest tones. At 48 kHz 16-bit mono WAV, 2 MiB holds only 21.8 s, so prefer a 24 kHz WAV or MP3 engine setting.
 - `speed` comes from the sentence's emotion (0.94–1.03, see [Emotions and acts](#emotions-and-acts)). `instructions` is sent only with `LOCAL_TTS_INSTRUCTIONS=1`.
 - ASCII `< > [ ]` in the sentence are sent as full-width `＜ ＞ ［ ］`. An engine's own markup is never trusted from text: Kokoro-FastAPI would read brackets aloud, and CosyVoice would act on `[laughter]` or `<strong>`.
 - The reply must be raw audio bytes with an `audio/*` or `application/octet-stream` content type, at most **2 MiB** and **30 s**. Anything else, including a JSON error body, becomes a stable `TTS_UPSTREAM_INVALID` / `TTS_UPSTREAM_FAILED` code. Engine messages are never relayed to the browser or the logs.
@@ -58,7 +58,7 @@ The ledger `.data/tts-budget-local.json` counts reserved characters per UTC day,
 
 ## Emotions and acts
 
-Each sentence carries one of the shared emotions in `shared/performance-cues.mjs`, and sometimes one act (`laugh`, `sigh` or `pause`) to perform just before its words. This is all that reaches a local engine. The mapping is one table, `DELIVERY_STYLE` (plus `ACT_INSTRUCTIONS`) in `server/local-tts.mjs`:
+Each clip carries one of the shared emotions in `shared/performance-cues.mjs` (a clip never mixes two), and sometimes one act (`laugh`, `sigh` or `pause`) to perform just before its words, at the start of the clip. This is all that reaches a local engine. The mapping is one table, `DELIVERY_STYLE` (plus `ACT_INSTRUCTIONS`) in `server/local-tts.mjs`:
 
 | Emotion | `speed` | `instructions` (only with `LOCAL_TTS_INSTRUCTIONS=1`) |
 | --- | --- | --- |
@@ -72,7 +72,7 @@ Each sentence carries one of the shared emotions in `shared/performance-cues.mjs
 | shy | 0.96 | 用害羞、小声的语气说。 |
 
 - **laugh / sigh**: with `LOCAL_TTS_INSTRUCTIONS=1`, a clause goes before the emotion's instructions: 「开头轻轻笑一声。」 or 「开头轻轻叹一口气。」. With instructions off (the default), an act changes nothing in the request.
-- **pause**: the player puts 0.4 s of silence before the sentence's audio, the same for every engine. Nothing is sent.
+- **pause**: the player puts 0.4 s of silence before the clip's audio, the same for every engine. Nothing is sent.
 - **No bracket tags are sent.** The words go unchanged apart from the full-width brackets above. airi-lite never adds `[laughter]`, `<breath>` or any other engine syntax, so an engine that ignores `instructions` hears only the speed.
 
 An old client may still send the earlier name `bright`. It is read as `happy`.

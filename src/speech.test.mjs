@@ -4,6 +4,7 @@ import { SpeechApiError, fetchCloudSpeech } from './cloud-speech.ts'
 import { mouthAtTime, mouthFrames } from './mouth.ts'
 import { speechBeats, speechBeatAtTime } from './speech-beats.ts'
 import { BROWSER_SPEECH_START_DEADLINE_MS, createSpeechController } from './speech.ts'
+import { groupSentences, replySentenceStream } from './speech-sentences.ts'
 import { collectMinimaxStream } from '../server/minimax.mjs'
 import { ACT_PAUSE_SECONDS } from '../shared/performance-cues.mjs'
 
@@ -101,7 +102,9 @@ function fixture(loadModel, dependencies = {}, callbackOverrides = {}) {
     onPreparing: value => events.preparing.push(value),
     onMouth: (open, form, beat) => { events.mouth.push([open, form]); events.beats.push(beat) },
     ...callbackOverrides,
-  }, { loadModel, ...dependencies })
+  // Most tests here pin per-sentence buying (capacity, lookahead, outcomes);
+  // the joining tests opt in with joinCloudSentences: true or speak({ join }).
+  }, { loadModel, joinCloudSentences: false, ...dependencies })
   return {
     audio, events, controller, utterances,
     tick(time, timestamp = performance.now()) {
@@ -3112,6 +3115,124 @@ test('a dropped silent local chunk passes its act (and pause) to the next audibl
     await f.controller.speak('嗯。', 'neutral', undefined, [], 'local', { acts: [{ start: 0, act: 'pause' }] })
     assert.deepEqual(await sourcePcm(f), int16([...new Float32Array(Math.round(ACT_PAUSE_SECONDS * 24000)), ...voiced]))
     assert.deepEqual(acts, ['pause'])
+  }
+  finally { f.close() }
+})
+
+// Plays a cloud reply to the end, one clip after another.
+async function playThrough(f, speaking) {
+  let done = false
+  void speaking.then(() => { done = true })
+  for (let i = 0; i < 40 && !done; i++) {
+    await settle()
+    f.audio.end()
+  }
+  await speaking
+  for (let i = 0; i < 4; i++) {
+    f.audio.end()
+    await settle()
+  }
+}
+
+test('a whole cloud reply joins its same-tone sentences into one request', async () => {
+  const calls = []
+  const f = fixture(undefined, { joinCloudSentences: true, async synthesizeCloud(sentence) { calls.push(sentence); return cloudClip() } })
+  try {
+    await playThrough(f, f.controller.speak('一。二。三。', 'neutral', undefined, [], 'cloud'))
+    assert.deepEqual(calls, [{ text: '一。二。三。', delivery: 'neutral' }])
+  }
+  finally { f.close() }
+  const off = []
+  const g = fixture(undefined, { joinCloudSentences: true, async synthesizeCloud(sentence) { off.push(sentence.text); return cloudClip() } })
+  try {
+    await playThrough(g, g.controller.speak('一。二。三。', 'neutral', undefined, [], 'cloud', { join: false }))
+    assert.deepEqual(off, ['一。', '二。', '三。'], 'speak({ join: false }) buys one per sentence')
+  }
+  finally { g.close() }
+  const on = []
+  const h = fixture(undefined, { async synthesizeCloud(sentence) { on.push(sentence.text); return cloudClip() } })
+  try {
+    await playThrough(h, h.controller.speak('一。二。', 'neutral', undefined, [], 'cloud', { join: true }))
+    assert.deepEqual(on, ['一。二。'], 'speak({ join: true }) overrides the controller default')
+  }
+  finally { h.close() }
+})
+
+test('the controller buys exactly the clips the live server plans: tones, acts and the limit chain', async () => {
+  const replies = [
+    ['晚上好呀！今天弹幕好热闹。我们先从第一条开始吧。', 'happy', [], []],
+    ['先开心一下。还开心呢。然后难过了。', 'happy', [{ start: 11, delivery: 'sad' }], []],
+    ['这个梗我接住了！你们今天弹幕好热闹。还有呢？', 'happy', [], [{ start: 8, act: 'laugh' }]],
+    ['这个嘛我猜是草莓味。', 'curious', [], [{ start: 3, act: 'pause' }]],
+    [`${'好！'.repeat(25)}再见。`, 'happy', [], []],
+    ['第一行\n第二行。第三行。', 'neutral', [], []],
+  ]
+  for (const [text, delivery, cues, acts] of replies) {
+    const calls = []
+    const f = fixture(undefined, { joinCloudSentences: true, async synthesizeCloud(sentence) { calls.push(sentence); return cloudClip() } })
+    try {
+      await playThrough(f, f.controller.speak(text, delivery, undefined, cues, 'cloud', { acts }))
+      const planned = []
+      for await (const sentence of replySentenceStream(text, delivery, cues, '', acts))
+        planned.push(sentence)
+      assert.deepEqual(calls, groupSentences(planned).map(({ parts: _parts, ...clip }) => clip), text)
+    }
+    finally { f.close() }
+  }
+})
+
+test('a streamed reply sends its first sentence alone, then joins what has arrived', async () => {
+  const calls = []
+  const f = fixture(undefined, { joinCloudSentences: true, async synthesizeCloud(sentence) { calls.push(sentence.text); return cloudClip() } })
+  try {
+    const input = f.controller.beginStream('', 'happy', undefined, 'cloud')
+    input.push('第一句。第')
+    await settle()
+    await settle()
+    assert.deepEqual(calls, ['第一句。'], 'the first audio never waits for more text')
+    // The buffer releases a sentence once the next character shows no
+    // closing quote follows, so 第三句 is complete when 第 arrives.
+    input.push('二句。第三句。第')
+    for (let i = 0; i < 4; i++) await settle()
+    assert.deepEqual(calls, ['第一句。', '第二句。第三句。'], 'complete sentences already here join')
+    input.push('四句。')
+    input.finish()
+    for (let i = 0; i < 6; i++) {
+      f.audio.end()
+      await settle()
+    }
+    assert.deepEqual(calls, ['第一句。', '第二句。第三句。', '第四句。'])
+  }
+  finally { f.close() }
+})
+
+test('a streamed first request goes alone even when several sentences arrive in one delta', async () => {
+  const calls = []
+  const f = fixture(undefined, { joinCloudSentences: true, async synthesizeCloud(sentence) { calls.push(sentence.text); return cloudClip() } })
+  try {
+    const input = f.controller.beginStream('', 'happy', undefined, 'cloud')
+    input.push('第一句。第二句。第')
+    await settle()
+    await settle()
+    assert.equal(calls[0], '第一句。', 'a longer first request would delay the first audio')
+    input.push('三句。')
+    input.finish()
+    for (let i = 0; i < 6; i++) {
+      f.audio.end()
+      await settle()
+    }
+    assert.deepEqual(calls.flatMap(text => text.match(/第.句。/g)), ['第一句。', '第二句。', '第三句。'], 'nothing skipped or repeated')
+  }
+  finally { f.close() }
+})
+
+test('the web chat controller joins by default', async () => {
+  const calls = []
+  // joinCloudSentences: undefined is what App.vue passes (nothing).
+  const f = fixture(undefined, { joinCloudSentences: undefined, async synthesizeCloud(sentence) { calls.push(sentence.text); return cloudClip() } })
+  try {
+    await playThrough(f, f.controller.speak('一。二。', 'neutral', undefined, [], 'cloud'))
+    assert.deepEqual(calls, ['一。二。'])
   }
   finally { f.close() }
 })

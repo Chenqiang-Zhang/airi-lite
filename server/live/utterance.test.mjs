@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { replySentenceStream } from '../../src/speech-sentences.ts'
-import { createSentenceAllowance, planUtterance, screenUtterance } from './utterance.mjs'
+import { STAGE_PROTOCOL } from '../../shared/performance-cues.mjs'
+import { groupSentences, joinSpokenText, replySentenceStream } from '../../src/speech-sentences.ts'
+import { parseRules } from './moderation.mjs'
+import { createClipAllowance, planClips, planUtterance, screenUtterance } from './utterance.mjs'
 
 async function stageSentences(text, delivery, cues, acts = []) {
   const sentences = []
@@ -56,29 +58,95 @@ test('screening plans with the acts but still reads the joined words', async () 
   assert.deepEqual(await screenUtterance({ text: '哈哈，好呀。', acts: [{ start: 0, act: 'laugh' }] }), { ok: true })
 })
 
-test('the allowance is a multiset of planned sentences', () => {
-  const allowance = createSentenceAllowance([
-    { text: '好！', delivery: 'happy' }, { text: '好！', delivery: 'happy' }, { text: '再见。', delivery: 'soft' },
+test('screening covers the spaced words a joined Latin clip says, locally only', async () => {
+  // Short Latin terms are whole-word rules, so the space a joined clip puts
+  // between two sentences can make one appear.
+  const rules = parseRules('sb')
+  const spaced = await screenUtterance({ text: 'Look at this!Sb is here.' }, { rules })
+  assert.deepEqual([spaced.ok, spaced.term, spaced.part], [false, 'sb', 'speech'])
+  const split = await screenUtterance({ text: 'ok s!b you.' }, { rules })
+  assert.deepEqual([split.ok, split.term], [false, 'sb'], 'the unspaced words are still read too')
+  const checked = []
+  const provider = { check: async (text) => { checked.push(text); return { ok: true } } }
+  assert.deepEqual(await screenUtterance({ text: 'Hello Hiyori!Rest well.' }, { rules, provider }), { ok: true })
+  assert.deepEqual(checked, ['Hello Hiyori!Rest well.', 'Hello Hiyori!Rest well.'], 'the paid check reads the caption and the speech once each, never the spaced form')
+})
+
+test('clips join same-tone finished sentences under the limit chain; the server and stage agree', async () => {
+  const cases = [
+    ['晚上好呀！今天弹幕好热闹。我们先从第一条开始吧。', 'happy', [], []],
+    ['好！好！再见。', 'happy', [], []],
+    ['先开心一下。然后轻轻说。最后问你？', 'happy', [{ start: 6, delivery: 'soft' }], []],
+    ['哈哈，你也太逗了。再说一句。还有一句。', 'happy', [], [{ start: 9, act: 'laugh' }]],
+    ['第一行\n第二行。', 'neutral', [], []],
+    ['一。\n二。', 'neutral', [], []],
+    ['Hello Hiyori! Rest with DeepSeek.', 'neutral', [], []],
+    [`${'很长的一句话'.repeat(8)}。短句。`, 'soft', [], []],
+  ]
+  for (const [text, delivery, cues, acts] of cases) {
+    const clips = await planClips({ text, delivery, cues, acts })
+    assert.deepEqual(clips, groupSentences(await stageSentences(text, delivery, cues, acts)), text)
+    assert.deepEqual(clips.flatMap(clip => clip.parts), (await planUtterance({ text, delivery, cues, acts })).map(sentence => sentence.text))
+    for (const clip of clips)
+      assert.equal(clip.text, joinSpokenText(clip.parts))
+    assert.deepEqual(await planClips({ text, delivery, cues, acts }, { join: false }),
+      (await planUtterance({ text, delivery, cues, acts })).map(sentence => ({ ...sentence, parts: [sentence.text] })), 'join: false is one clip per sentence')
+  }
+})
+
+// Changing a join rule changes what the stage buys: bump STAGE_PROTOCOL so
+// older stage pages reload, then update this table.
+test('the clip plans are pinned to the stage protocol', async () => {
+  const replies = [
+    ['晚上好呀！今天弹幕好热闹。我们先从第一条开始吧。', 'happy', []],
+    ['嗯……晚上本来就容易想多。不急着睡也没关系，先陪你说说话吧。', 'soft', []],
+    ['草莓党举手！大福的话还是草莓的最好吃，软软糯糯。', 'happy', []],
+    ['好！好！好！好！好！好！好！好！好！好！好！好！好！好！好！好！好！好！好！好！好！再见。', 'happy', []],
+    ['这个梗我接住了！你们今天弹幕好热闹。还有呢？', 'happy', [{ start: 8, act: 'laugh' }]],
+    ['这个嘛我猜是草莓味。', 'curious', [{ start: 3, act: 'pause' }]],
+    ['Hello Hiyori! Rest with DeepSeek.', 'neutral', []],
+  ]
+  const plans = []
+  for (const [text, delivery, acts] of replies)
+    plans.push((await planClips({ text, delivery, acts })).map(clip => [clip.text, clip.act ?? null, clip.parts.length]))
+  assert.deepEqual([STAGE_PROTOCOL, plans], [3, [
+    [['晚上好呀！今天弹幕好热闹。我们先从第一条开始吧。', null, 3]],
+    [['嗯……晚上本来就容易想多。不急着睡也没关系，先陪你说说话吧。', null, 2]],
+    [['草莓党举手！大福的话还是草莓的最好吃，软软糯糯。', null, 2]],
+    [['好！好！好！好！好！好！好！好！好！好！好！好！好！好！好！好！好！好！好！好！', null, 20], ['好！再见。', null, 2]],
+    [['这个梗我接住了！', null, 1], ['你们今天弹幕好热闹。还有呢？', 'laugh', 2]],
+    [['这个嘛', null, 1], ['我猜是草莓味。', 'pause', 1]],
+    [['Hello Hiyori! Rest with DeepSeek.', null, 2]],
+  ]])
+})
+
+test('the allowance is a multiset of planned clips and returns their sentences', () => {
+  const allowance = createClipAllowance([
+    { text: '好！', delivery: 'happy', parts: ['好！'] }, { text: '好！', delivery: 'happy', parts: ['好！'] },
+    { text: '再见。明天见。', delivery: 'soft', parts: ['再见。', '明天见。'] },
   ])
   assert.equal(allowance.remaining, 3)
-  assert.equal(allowance.take({ text: '好！', delivery: 'soft' }), false, 'delivery is part of the key')
-  assert.equal(allowance.take({ text: '好！', delivery: 'happy' }), true)
-  assert.equal(allowance.take({ text: '好！', delivery: 'happy' }), true)
-  assert.equal(allowance.take({ text: '好！', delivery: 'happy' }), false, 'never more often than planned')
-  assert.equal(allowance.take({ text: '再见', delivery: 'soft' }), false, 'exact text only')
-  assert.equal(allowance.take({ text: '再见。', delivery: 'soft' }), true)
+  assert.equal(allowance.take({ text: '好！', delivery: 'soft' }), null, 'delivery is part of the key')
+  assert.deepEqual(allowance.take({ text: '好！', delivery: 'happy' }), ['好！'])
+  assert.deepEqual(allowance.take({ text: '好！', delivery: 'happy' }), ['好！'])
+  assert.equal(allowance.take({ text: '好！', delivery: 'happy' }), null, 'never more often than planned')
+  assert.equal(allowance.take({ text: '再见。', delivery: 'soft' }), null, 'one sentence of a joined clip cannot be bought alone')
+  assert.equal(allowance.take({ text: '再见。明天见', delivery: 'soft' }), null, 'exact text only')
+  assert.deepEqual(allowance.take({ text: '再见。明天见。', delivery: 'soft' }), ['再见。', '明天见。'])
   assert.equal(allowance.remaining, 0)
+  const unjoined = createClipAllowance([{ text: '一。', delivery: 'happy', parts: ['一。'] }, { text: '二。', delivery: 'happy', parts: ['二。'] }])
+  assert.equal(unjoined.take({ text: '一。二。', delivery: 'happy' }), null, 'nor can a stage join its own')
 })
 
 test('the act is part of the allowance key: none added, none removed, none changed', () => {
-  const allowance = createSentenceAllowance([{ text: '哈哈，好呀。', delivery: 'happy', act: 'laugh' }, { text: '再见。', delivery: 'happy' }])
-  assert.equal(allowance.take({ text: '哈哈，好呀。', delivery: 'happy' }), false, 'a planned laugh cannot be dropped')
-  assert.equal(allowance.take({ text: '哈哈，好呀。', delivery: 'happy', act: 'sigh' }), false)
-  assert.equal(allowance.take({ text: '再见。', delivery: 'happy', act: 'pause' }), false, 'nor a pause added')
-  assert.equal(allowance.take({ text: '哈哈，好呀。', delivery: 'happy', act: 'laugh' }), true)
-  assert.equal(allowance.take({ text: '再见。', delivery: 'happy', act: null }), true, 'null is no act')
+  const allowance = createClipAllowance([{ text: '哈哈，好呀。', delivery: 'happy', act: 'laugh', parts: ['哈哈，好呀。'] }, { text: '再见。', delivery: 'happy', parts: ['再见。'] }])
+  assert.equal(allowance.take({ text: '哈哈，好呀。', delivery: 'happy' }), null, 'a planned laugh cannot be dropped')
+  assert.equal(allowance.take({ text: '哈哈，好呀。', delivery: 'happy', act: 'sigh' }), null)
+  assert.equal(allowance.take({ text: '再见。', delivery: 'happy', act: 'pause' }), null, 'nor a pause added')
+  assert.deepEqual(allowance.take({ text: '哈哈，好呀。', delivery: 'happy', act: 'laugh' }), ['哈哈，好呀。'])
+  assert.deepEqual(allowance.take({ text: '再见。', delivery: 'happy', act: null }), ['再见。'], 'null is no act')
   assert.equal(allowance.remaining, 0)
   // Joining with a separator could be forged across fields; JSON cannot.
-  const tricky = createSentenceAllowance([{ text: 'b', delivery: 'happy', act: 'laugh' }])
-  assert.equal(tricky.take({ text: 'laugh","b', delivery: 'happy' }), false)
+  const tricky = createClipAllowance([{ text: 'b', delivery: 'happy', act: 'laugh', parts: ['b'] }])
+  assert.equal(tricky.take({ text: 'laugh","b', delivery: 'happy' }), null)
 })

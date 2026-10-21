@@ -19,7 +19,14 @@ const MESSAGES = {
   TTS_PROVIDER_CHANGED: '云端供应商或地区已变更，请刷新并重新确认语音设置。',
   TTS_UPSTREAM_FAILED: '云端语音服务请求失败。',
   TTS_UPSTREAM_INVALID: '云端语音响应不完整或格式无效。',
+  // The provider's own per-minute request limit (MiniMax 1002), not ours.
+  TTS_UPSTREAM_RATE_LIMITED: '云端语音服务每分钟请求数已达上限，请稍后再试。',
 }
+// After the provider refuses for its rate limit, visitors' requests are
+// refused here for this long, without a reservation or a request, so the
+// account's next slots go to the live stage's single retry
+// (server/live/runtime.mjs) rather than to the web chat.
+export const UPSTREAM_BACKOFF_MS = 10_000
 
 // delivery is canonicalised here (an old client's 'bright' arrives as happy),
 // so providers and ledgers only ever see shared emotion names. act is an
@@ -78,6 +85,7 @@ export function createSpeechHandler({
   })
   const acceptRate = createSpeechRateLimiter({ now })
   let active = 0
+  let upstreamLimitedUntil = 0
 
   // Provider-specific local estimates are NOT the actual account balance.
   // MiniMax and Eleven estimates count the trusted tags they will send.
@@ -85,7 +93,15 @@ export function createSpeechHandler({
   async function reserveAndSynthesise(speechRequest, signal) {
     await selectedBudget.reserve(provider.estimateReservation(config, speechRequest), signal)
     signal.throwIfAborted()
-    const result = await provider.synthesise(config, speechRequest, { fetchImpl, signal })
+    let result
+    try {
+      result = await provider.synthesise(config, speechRequest, { fetchImpl, signal })
+    }
+    catch (error) {
+      if (error instanceof SpeechProviderError && error.code === 'TTS_UPSTREAM_RATE_LIMITED')
+        upstreamLimitedUntil = now() + UPSTREAM_BACKOFF_MS
+      throw error
+    }
     signal.throwIfAborted()
     return result
   }
@@ -130,6 +146,8 @@ export function createSpeechHandler({
         return sendError(response, 503, 'TTS_NOT_CONFIGURED')
       if (active >= 4)
         return sendError(response, 503, 'TTS_BUSY')
+      if (now() < upstreamLimitedUntil)
+        return sendError(response, 429, 'TTS_UPSTREAM_RATE_LIMITED')
 
       active++
       const cancelled = new AbortController()
@@ -176,7 +194,7 @@ export function speechErrorResponse(error, { timedOut = false } = {}) {
     ? error.code : 'TTS_UPSTREAM_FAILED'
   const status = code === 'TTS_INVALID_REQUEST' ? 400
     : code === 'TTS_PROVIDER_CHANGED' ? 409
-    : code === 'TTS_DAILY_LIMIT' ? 429
+    : code === 'TTS_DAILY_LIMIT' || code === 'TTS_UPSTREAM_RATE_LIMITED' ? 429
       : code === 'TTS_BUDGET_UNAVAILABLE' ? 503
         : code === 'TTS_TIMEOUT' ? 504 : 502
   return { status, code, message: MESSAGES[code] }

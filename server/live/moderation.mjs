@@ -11,7 +11,7 @@ import { hasProviderSyntax } from '../speech-syntax.mjs'
 // drop every control, format and default-ignorable code point, so joiners,
 // tag characters, bidi marks or variation selectors cannot split a term.
 const IGNORABLE = /[\p{Cc}\p{Cf}\p{Co}\p{Default_Ignorable_Code_Point}]/gu
-const MAX_REPLY_CHARS = 300
+export const MAX_REPLY_CHARS = 300
 const PROVIDER_TIMEOUT_MS = 1_500
 
 // Traditional forms of the characters used by the built-in terms and common

@@ -55,7 +55,7 @@ function fixture(dependencies = {}) {
   const controller = createSpeechController(audio, {
     onState() {}, onAudioReady() {}, onDelivery() {}, onPlaying() {}, onPreparing() {}, onMouth() {},
     onProblem: message => problems.push(message),
-  }, { loadModel: async () => { throw new Error('local model must not load') }, ...dependencies })
+  }, { loadModel: async () => { throw new Error('local model must not load') }, joinCloudSentences: false, ...dependencies })
   return {
     audio, controller, utterances, problems, outcomes,
     speak(text, engine = 'cloud', label = text) {

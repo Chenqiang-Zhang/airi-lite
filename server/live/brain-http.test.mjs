@@ -10,7 +10,7 @@ import { STAGE_PROTOCOL } from '../../shared/performance-cues.mjs'
 import { createRequestHandler } from '../app.mjs'
 import { createFakeDeepSeek } from './fake-deepseek.mjs'
 import { createLiveRuntime } from './runtime.mjs'
-import { planUtterance } from './utterance.mjs'
+import { planClips } from './utterance.mjs'
 
 // The brain through the real request handler, with the canned fake model
 // injected as fetch: nothing here can reach DeepSeek or a speech provider.
@@ -84,8 +84,9 @@ async function playingStage(context, base) {
           }
           if (type === 'say') {
             said.push(payload)
-            for (const sentence of await planUtterance(payload))
-              await post(base, '/api/live/stage/speech', { leaseId, turnId: payload.turnId, ...sentence })
+            // The clips this server planned, as the real stage buys them.
+            for (const { parts: _parts, ...clip } of await planClips(payload, { join: payload.join === true }))
+              await post(base, '/api/live/stage/speech', { leaseId, turnId: payload.turnId, ...clip })
             await post(base, '/api/live/stage/report', { leaseId, type: 'ended', turnId: payload.turnId, outcome: 'played' })
           }
         }
@@ -109,7 +110,7 @@ test('a host message is answered by the brain, spoken by the stage, and kept as 
   assert.equal(model.requests[0].max_tokens, 160)
   assert.match(model.requests[0].messages.at(-1).content, /^<viewer_message from="主播" kind="host">跟大家打个招呼吧<\/viewer_message>\n<reply_guide>这轮回一到三句，90 字以内，像直播时随口接话；现在是(?:早上|上午|中午|下午|晚上|深夜)。<\/reply_guide>$/)
   await until(async () => (await state(base)).brain.historyRounds === 1, 'history recorded')
-  assert.deepEqual(synthesised, ['欢迎欢迎！', '今天也一起慢慢聊吧。'])
+  assert.deepEqual(synthesised, ['欢迎欢迎！今天也一起慢慢聊吧。'], 'one same-tone clip')
   const current = await state(base)
   assert.equal(current.queue.recent[0].status, 'answered')
   assert.equal(current.brain.usage.calls, 1)

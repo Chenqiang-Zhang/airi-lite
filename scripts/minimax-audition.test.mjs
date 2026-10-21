@@ -101,3 +101,41 @@ test('the recorder keeps the raw body and still hands the stream on', async () =
   assert.equal(await response.text(), 'data: x\n\n')
   assert.deepEqual(recorder.last, { status: 200, contentType: 'text/event-stream', raw: 'data: x\n\n' })
 })
+
+test('a clip key changes with the dictionary rules sent, and only then', async () => {
+  const { createHash } = await import('node:crypto')
+  const { clipFile, clipKey, sentFields } = await import('./minimax-audition.mjs')
+  const { readMinimaxConfig } = await import('../server/minimax.mjs')
+  const legacy = ({ voice, model, part }) => createHash('sha256')
+    .update(JSON.stringify([voice, model, part.text, part.delivery, part.act ?? null])).digest('hex').slice(0, 16)
+  const laugh = { text: '这个梗我接住了！', delivery: 'happy', act: 'laugh' }
+  assert.equal(clipKey({ voice: 'voice-a', model: 'speech-2.8-hd', part: laugh }), '51e3e50dbe3cd7ba', 'saved clips stay valid')
+  for (const part of SAMPLES.flatMap(sample => sample.parts)) {
+    const key = { voice: 'voice-a', model: 'speech-2.8-hd', part }
+    assert.equal(clipKey(key), legacy(key), part.text)
+    assert.equal(clipKey({ ...key, dictionary: [] }), legacy(key), part.text)
+  }
+  const name = { text: '我是日和，今天也请多指教。', delivery: 'neutral' }
+  const key = { voice: 'voice-a', model: 'speech-2.8-hd', part: name }
+  const pinyin = clipKey({ ...key, dictionary: ['日和/(ri4)(he2)'] })
+  assert.notEqual(pinyin, clipKey(key))
+  assert.notEqual(clipKey({ ...key, dictionary: ['日和/ひより'] }), pinyin)
+
+  // clipFile passes what buildMinimaxRequest would send for that config.
+  const env = { MINIMAX_TTS_ENABLED: '1', MINIMAX_API_KEY: 'k', MINIMAX_VOICE_ID: 'voice-a', MINIMAX_TTS_MODEL: 'speech-2.8-hd',
+    MINIMAX_TTS_DAILY_CHAR_LIMIT: '100' }
+  const shipped = readMinimaxConfig(env)
+  const off = readMinimaxConfig({ ...env, MINIMAX_PRONUNCIATION: '0' })
+  assert.equal(clipFile({ out: 'o', config: shipped, part: laugh }), clipFile({ out: 'o', config: off, part: laugh }))
+  assert.equal(clipFile({ out: 'o', config: shipped, part: laugh }), `o/clips/${legacy({ voice: 'voice-a', model: 'speech-2.8-hd', part: laugh })}.json`)
+  assert.equal(clipFile({ out: 'o', config: shipped, part: name }), `o/clips/${pinyin}.json`)
+  assert.equal(clipFile({ out: 'o', config: off, part: name }), `o/clips/${clipKey(key)}.json`)
+  // The page records the rules only when some were sent.
+  assert.deepEqual(sentFields(buildMinimaxRequest(shipped, name)), { text: name.text, emotion: undefined, speed: 1, dictionary: ['日和/(ri4)(he2)'] })
+  assert.equal(Object.hasOwn(sentFields(buildMinimaxRequest(off, name)), 'dictionary'), false)
+  const page = buildAuditionPage({ results: [{ id: 'n', title: '名字', parts: [{ ...name, audio: 'QUJD', sent: sentFields(buildMinimaxRequest(shipped, name)) }] }],
+    voice: 'v', model: 'speech-2.8-hd', date: 'd', heading: 'P5b <检查>', note: '说明' })
+  assert.match(page, /词典 日和\/\(ri4\)\(he2\)/)
+  assert.match(page, /<h1>P5b &#60;检查&#62;（speech-2.8-hd）<\/h1>/)
+  assert.match(page, /d · 音色 v · 说明<\/p>/)
+})

@@ -11,7 +11,7 @@ import { ACTS, EMOTIONS } from '../shared/performance-cues.mjs'
 import { readMinimaxConfig } from './minimax.mjs'
 import { buildElevenLabsRequest, readElevenLabsConfig } from './elevenlabs.mjs'
 import { readSpeechConfig } from './speech-provider.mjs'
-import { createSpeechHandler, createSpeechRateLimiter, normaliseSpeechRequest, speechErrorResponse } from './speech.mjs'
+import { createSpeechHandler, createSpeechRateLimiter, normaliseSpeechRequest, speechErrorResponse, UPSTREAM_BACKOFF_MS } from './speech.mjs'
 import { createTtsBudget } from './tts-budget.mjs'
 import { SpeechProviderError } from './speech-error.mjs'
 
@@ -535,10 +535,71 @@ test('speechErrorResponse keeps the public status table and never exposes unknow
     { status: 502, code: 'TTS_UPSTREAM_FAILED', message: '云端语音服务请求失败。' })
   assert.equal(speechErrorResponse(new Error('x'), { timedOut: true }).status, 504)
   const table = { TTS_INVALID_REQUEST: 400, TTS_PROVIDER_CHANGED: 409, TTS_DAILY_LIMIT: 429,
-    TTS_BUDGET_UNAVAILABLE: 503, TTS_UPSTREAM_INVALID: 502, TTS_UPSTREAM_FAILED: 502 }
+    TTS_BUDGET_UNAVAILABLE: 503, TTS_UPSTREAM_INVALID: 502, TTS_UPSTREAM_FAILED: 502, TTS_UPSTREAM_RATE_LIMITED: 429 }
   for (const [code, status] of Object.entries(table)) {
     const error = Object.assign(new Error('secret'), { code })
     assert.equal(speechErrorResponse(error).code, 'TTS_UPSTREAM_FAILED', 'a plain Error with a code is not trusted')
     assert.equal(speechErrorResponse(new SpeechProviderError(code)).status, status, code)
   }
+})
+
+function rateLimitedResponse() {
+  return new Response(JSON.stringify({ base_resp: { status_code: 1002, status_msg: 'rate limit exceeded(RPM) test-key-do-not-leak' } }),
+    { headers: { 'content-type': 'application/json' } })
+}
+
+test('a MiniMax 1002 is a 429 with a stable code, then visitors are held off for the backoff without spending', async () => {
+  let clock = Date.parse('2026-10-21T12:00:00Z')
+  let fetches = 0
+  let reserved = 0
+  let limited = true
+  const handler = create({ now: () => clock, budget: { reserve: async () => { reserved++ } },
+    fetchImpl: async () => { fetches++; return limited ? rateLimitedResponse() : audioResponse() } })
+
+  const refused = await run(handler)
+  assert.equal(refused.status, 429)
+  assert.deepEqual(JSON.parse(refused.body), { code: 'TTS_UPSTREAM_RATE_LIMITED', message: '云端语音服务每分钟请求数已达上限，请稍后再试。' })
+  assert.doesNotMatch(refused.body, /1002|RPM|test-key|private/)
+  assert.deepEqual([fetches, reserved], [1, 1])
+
+  limited = false
+  clock += UPSTREAM_BACKOFF_MS - 1
+  const held = await run(handler)
+  assert.equal(held.status, 429)
+  assert.equal(JSON.parse(held.body).code, 'TTS_UPSTREAM_RATE_LIMITED')
+  assert.deepEqual([fetches, reserved], [1, 1], 'held off before any reservation or request')
+  assert.equal((await run(handler, request('{}', { 'x-demo-access-code': 'wrong' }))).status, 401, 'the access code is still checked first')
+
+  clock += 1
+  assert.equal((await run(handler)).status, 200)
+  assert.deepEqual([fetches, reserved], [2, 2])
+})
+
+test('a refusal on the trusted path holds visitors off too, but the stage itself is never held off here', async () => {
+  let clock = Date.parse('2026-10-21T12:00:00Z')
+  const fetched = []
+  let limited = true
+  const handler = create({ now: () => clock,
+    fetchImpl: async () => { fetched.push(limited); return limited ? rateLimitedResponse() : audioResponse() } })
+  const error = await handler.synthesise(payload).catch(caught => caught)
+  assert.equal(error.code, 'TTS_UPSTREAM_RATE_LIMITED')
+  assert.doesNotMatch(error.message, /RPM|test-key/)
+  limited = false
+  assert.equal((await run(handler)).status, 429, 'the web chat waits')
+  assert.deepEqual(Object.keys(await handler.synthesise(payload)), ['audio', 'format', 'sampleRate', 'words'],
+    'the live stage decides for itself whether to wait (server/live/runtime.mjs)')
+  assert.deepEqual(fetched, [true, false])
+  clock += UPSTREAM_BACKOFF_MS
+  assert.equal((await run(handler)).status, 200)
+})
+
+test('other upstream failures never hold visitors off', async () => {
+  let fetches = 0
+  const handler = create({ fetchImpl: async () => {
+    fetches++
+    return new Response(JSON.stringify({ base_resp: { status_code: 1039 } }), { headers: { 'content-type': 'application/json' } })
+  } })
+  for (let index = 0; index < 3; index++)
+    assert.equal((await run(handler)).status, 502)
+  assert.equal(fetches, 3)
 })

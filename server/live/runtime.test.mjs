@@ -5,10 +5,12 @@ import test from 'node:test'
 import { STAGE_PROTOCOL } from '../../shared/performance-cues.mjs'
 
 import { createRequestHandler } from '../app.mjs'
+import { readMinimaxConfig } from '../minimax.mjs'
+import { createSpeechHandler } from '../speech.mjs'
 import { SpeechProviderError } from '../speech-error.mjs'
 import { TtsBudgetError } from '../tts-budget.mjs'
 import { createLiveRuntime } from './runtime.mjs'
-import { planUtterance } from './utterance.mjs'
+import { planClips, planUtterance } from './utterance.mjs'
 
 // Every test drives the real request handler with a fake speech instance and
 // a fetch that refuses DeepSeek, so no test can reach a paid provider.
@@ -221,13 +223,14 @@ test('say is refused until an OBS stage is ready, then reaches every stage page'
   assert.equal(said.status, 200)
   const { turnId, sentences } = await said.json()
   assert.equal(sentences, 2)
-  const expected = { turnId, text: '你好。今天天气不错。', delivery: 'happy', cues: [], acts: [], replyTo: null }
+  const expected = { turnId, text: '你好。今天天气不错。', delivery: 'happy', cues: [], acts: [], replyTo: null, join: true }
   assert.deepEqual(await obs.next('say'), expected)
   assert.deepEqual(await preview.next('say'), expected)
 
   const current = await state(base)
   assert.equal(current.turn.turnId, turnId)
   assert.equal(current.turn.sentencesPlanned, 2)
+  assert.equal(current.turn.clipsPlanned, 1, 'the two same-tone sentences are one clip')
   assert.equal(current.stage.previews, 1)
   assert.equal(current.stage.primary.ready, true)
   const busy = await control(base, { action: 'say', text: '另一句。' })
@@ -235,13 +238,45 @@ test('say is refused until an OBS stage is ready, then reaches every stage page'
   assert.deepEqual(await busy.json(), { code: 'LIVE_TURN_ACTIVE' })
 })
 
-test('the stage buys each planned sentence once, only as primary and only for the current turn', async (context) => {
-  const { base, speech } = await start(context)
-  const { hello } = await readyStage(context, base)
+test('the stage buys each planned clip once: a joined clip whole, never one of its sentences', async (context) => {
+  const { base, speech, runtime } = await start(context)
+  const ended = []
+  runtime.hub.subscribe('turn.ended', event => ended.push(event.data))
+  const { stage, hello } = await readyStage(context, base)
+  const text = '好！好！再见。'
+  const { turnId, sentences } = await (await control(base, { action: 'say', text, delivery: 'soft' })).json()
+  assert.equal(sentences, 3)
+  assert.equal((await stage.next('say')).join, true)
+  const clips = await planClips({ text, delivery: 'soft' })
+  assert.deepEqual(clips, [{ text: '好！好！再见。', delivery: 'soft', parts: ['好！', '好！', '再见。'] }])
+  const buy = (sentence, overrides = {}) => post(base, '/api/live/stage/speech',
+    { leaseId: hello.leaseId, turnId, ...sentence, ...overrides })
+  for (const part of ['好！', '再见。', '好！好！'])
+    assert.equal((await buy({ text: part, delivery: 'soft' })).status, 409, `${part} alone was never planned`)
+  assert.equal((await buy({ text: '好！好！再见。', delivery: 'soft', act: 'laugh' })).status, 409)
+  assert.equal(speech.calls.length, 0, 'refusals never reach the provider')
+  const response = await buy({ text: '好！好！再见。', delivery: 'soft', parts: ['ignored'] })
+  assert.equal(response.status, 200)
+  assert.deepEqual(speech.calls, [{ text: '好！好！再见。', delivery: 'soft' }], 'one request for the clip, nothing else the stage sent')
+  assert.equal((await buy({ text: '好！好！再见。', delivery: 'soft' })).status, 409, 'no re-buying')
+  const current = (await state(base)).turn
+  assert.deepEqual([current.sentencesPlanned, current.sentencesBought, current.clipsPlanned, current.clipsBought], [3, 3, 1, 1])
+  assert.equal((await post(base, '/api/live/stage/report',
+    { leaseId: hello.leaseId, type: 'ended', turnId, outcome: 'played' })).status, 204)
+  const after = await state(base)
+  assert.deepEqual([after.lastOutcome.sentencesBought, after.lastOutcome.clipsBought], [3, 1])
+  assert.deepEqual(ended.map(turn => [turn.spoken, turn.planned, turn.bought, turn.clipsPlanned, turn.clipsBought]),
+    [[['好！', '好！', '再见。'], 3, 3, 1, 1]], 'the brain\'s history stays by sentence')
+})
+
+test('with LIVE_JOIN_SENTENCES=0 the stage buys each planned sentence once, only as primary and only for the current turn', async (context) => {
+  const { base, speech } = await start(context, { env: { LIVE_JOIN_SENTENCES: '0' } })
+  const { stage, hello } = await readyStage(context, base)
   const preview = await openStage(context, base, 'preview')
   await preview.next('hello')
   const text = '好！好！再见。'
   const { turnId } = await (await control(base, { action: 'say', text, delivery: 'soft' })).json()
+  assert.equal((await stage.next('say')).join, false, 'the stage is told not to join')
   const plan = await planUtterance({ text, delivery: 'soft' })
   assert.deepEqual(plan.map(sentence => sentence.text), ['好！', '好！', '再见。'])
   const buy = (sentence, overrides = {}) => post(base, '/api/live/stage/speech',
@@ -267,8 +302,10 @@ test('the stage buys each planned sentence once, only as primary and only for th
   assert.deepEqual(speech.calls, plan, 'exactly the planned sentences, the duplicate twice')
   assert.equal((await buy(plan[0])).status, 409, 'a third 好！ was never planned')
   assert.equal((await buy(plan[2])).status, 409, 'no re-buying a played sentence')
+  assert.equal((await buy({ text: '好！好！再见。', delivery: 'soft' })).status, 409, 'nor a joined clip that was not planned')
   assert.equal(speech.calls.length, 3)
   assert.equal((await state(base)).turn.sentencesBought, 3)
+  assert.equal((await state(base)).turn.clipsBought, 3)
 
   assert.equal((await post(base, '/api/live/stage/report',
     { leaseId: hello.leaseId, type: 'ended', turnId, outcome: 'played' })).status, 204)
@@ -547,18 +584,23 @@ test('a stage buys an act sentence only with exactly the planned act, and names 
   const say = await stage.next('say')
   assert.deepEqual([say.delivery, say.cues, say.acts], ['happy', [{ start: 0, delivery: 'happy' }], [{ start: 0, act: 'laugh' }]])
   assert.deepEqual(started.map(turn => turn.acts), [say.acts], 'the hub and the audit log see the same acts')
-  const plan = await planUtterance(say)
-  assert.deepEqual(plan, [
+  assert.equal(say.join, true)
+  assert.deepEqual(await planUtterance(say), [
     { text: '哈哈，被你逗笑了。', delivery: 'happy', act: 'laugh' },
     { text: '再说一句吧。', delivery: 'happy' },
   ])
+  // The laugh opens a clip, and the same-tone sentence after it joins it.
+  const plan = (await planClips(say)).map(({ parts: _parts, ...clip }) => clip)
+  assert.deepEqual(plan, [{ text: '哈哈，被你逗笑了。再说一句吧。', delivery: 'happy', act: 'laugh' }])
+  const sentences = await planUtterance(say)
   const buy = sentence => post(base, '/api/live/stage/speech', { leaseId: hello.leaseId, turnId: say.turnId, ...sentence })
   const { act: _laugh, ...withoutAct } = plan[0]
   for (const [sentence, label] of [
     [withoutAct, 'a planned laugh removed'],
     [{ ...plan[0], act: null }, 'removed as null'],
     [{ ...plan[0], act: 'sigh' }, 'changed'],
-    [{ ...plan[1], act: 'pause' }, 'a pause added'],
+    [{ ...sentences[0] }, 'the act sentence alone'],
+    [{ ...sentences[1], act: 'pause' }, 'a pause added'],
     [{ ...plan[0], act: 'giggle' }, 'an unknown act'],
     [{ ...plan[0], act: '(laughs)' }, 'provider syntax'],
     [{ ...plan[0], act: ['laugh'] }, 'not a name'],
@@ -571,7 +613,7 @@ test('a stage buys an act sentence only with exactly the planned act, and names 
   for (const sentence of plan)
     assert.equal((await buy({ ...sentence, pauseSeconds: 9 })).status, 200)
   assert.deepEqual(speech.calls, plan, 'exactly the validated text, delivery and act; nothing else the stage sent')
-  assert.equal(Object.hasOwn(speech.calls[1], 'act'), false, 'no act key without an act')
+  assert.equal((await buy(sentences[1])).status, 409, 'the joined sentence is not sold again alone')
 })
 test('a stage page from before the current say payload is told to reload, not made ready', async (context) => {
   const { base } = await start(context)
@@ -588,4 +630,135 @@ test('a stage page from before the current say payload is told to reload, not ma
   assert.equal((await post(base, '/api/live/stage/report', { leaseId: hello.leaseId, type: 'ready', protocol: 1 })).status, 409)
   await assert.rejects(old.next('reload', 200))
   assert.equal((await post(base, '/api/live/stage/report', { leaseId: hello.leaseId, type: 'ready', protocol: STAGE_PROTOCOL })).status, 204)
+})
+
+// Polls real time until the runtime (on fake timers) reaches a state.
+async function until(predicate, message) {
+  for (let index = 0; index < 400; index++) {
+    if (await predicate())
+      return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  throw new Error(message)
+}
+const retryPending = timers => [...timers.pending.values()].some(handle => handle.ms === 4_000)
+const rateLimited = () => new SpeechProviderError('TTS_UPSTREAM_RATE_LIMITED')
+
+test('a clip refused for the provider\'s rate limit waits 4 s once and is asked again; the host sees why', async (context) => {
+  const timers = fakeTimers()
+  let attempts = 0
+  const speech = fakeSpeech(async () => { if (attempts++ === 0) throw rateLimited(); return CLIP })
+  const { base, runtime } = await start(context, { speech, timers })
+  const steps = []
+  runtime.hub.subscribe('speech.rate_limited', event => steps.push(event.data))
+  const { hello } = await readyStage(context, base)
+  const text = '你好。'
+  const { turnId } = await (await control(base, { action: 'say', text })).json()
+  const pending = post(base, '/api/live/stage/speech', { leaseId: hello.leaseId, turnId, text, delivery: 'neutral' })
+  await until(() => retryPending(timers), 'no retry wait was scheduled')
+  assert.equal(speech.calls.length, 1, 'nothing more is sent during the wait')
+  assert.equal((await state(base)).lastSpeechProblem.message, 'MiniMax 每分钟请求数到上限，4 秒后重试这一段。')
+
+  timers.fire(4_000)
+  const response = await pending
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), CLIP)
+  assert.deepEqual(speech.calls, [{ text, delivery: 'neutral' }, { text, delivery: 'neutral' }])
+  const current = await state(base)
+  assert.deepEqual([current.lastSpeechProblem.code, current.lastSpeechProblem.message, current.lastSpeechProblem.clips],
+    ['TTS_UPSTREAM_RATE_LIMITED', 'MiniMax 每分钟请求数到上限，重试后已出声。', 1])
+  assert.equal(typeof current.lastSpeechProblem.agoMs, 'number')
+  assert.deepEqual([current.turn.clipsBought, current.turn.sentencesBought], [1, 1], 'one clip, however many requests')
+  assert.deepEqual(steps, [{ step: 'waiting', clips: 1 }, { step: 'recovered', clips: 1 }])
+})
+
+test('a second refusal ends the clip with 429 and no third request; the stage\'s own report does not hide it', async (context) => {
+  const timers = fakeTimers()
+  const speech = fakeSpeech(async () => { throw rateLimited() })
+  const { base } = await start(context, { speech, timers })
+  const { hello } = await readyStage(context, base)
+  const text = '你好。'
+  const { turnId } = await (await control(base, { action: 'say', text })).json()
+  const pending = post(base, '/api/live/stage/speech', { leaseId: hello.leaseId, turnId, text, delivery: 'neutral' })
+  await until(() => retryPending(timers), 'no retry wait was scheduled')
+  timers.fire(4_000)
+  const response = await pending
+  assert.equal(response.status, 429)
+  assert.deepEqual(await response.json(), { code: 'TTS_UPSTREAM_RATE_LIMITED' })
+  assert.equal(speech.calls.length, 2)
+  assert.equal(retryPending(timers), false)
+
+  assert.equal((await post(base, '/api/live/stage/report',
+    { leaseId: hello.leaseId, type: 'problem', message: '云端语音失败，本句已跳过。' })).status, 204)
+  const current = await state(base)
+  assert.equal(current.lastProblem.message, '云端语音失败，本句已跳过。')
+  assert.equal(current.lastSpeechProblem.message, 'MiniMax 每分钟请求数到上限，这一段没有声音。')
+})
+
+test('every other speech failure is final: one request, no wait', async (context) => {
+  const timers = fakeTimers()
+  const failures = [new SpeechProviderError('TTS_UPSTREAM_INVALID'), new SpeechProviderError('TTS_UPSTREAM_FAILED'),
+    new SpeechProviderError('TTS_TIMEOUT'), new TtsBudgetError('TTS_DAILY_LIMIT'), new SpeechProviderError('TTS_BUSY')]
+  let index = 0
+  const speech = fakeSpeech(async () => { throw failures[index] })
+  const { base } = await start(context, { speech, timers })
+  const { hello } = await readyStage(context, base)
+  for (; index < failures.length; index++) {
+    const text = `第${index}句。`
+    const { turnId } = await (await control(base, { action: 'say', text })).json()
+    const response = await post(base, '/api/live/stage/speech', { leaseId: hello.leaseId, turnId, text, delivery: 'neutral' })
+    assert.notEqual(response.status, 200)
+    assert.equal(speech.calls.length, index + 1, failures[index].code)
+    assert.equal(retryPending(timers), false)
+    await control(base, { action: 'stop' })
+  }
+  assert.equal((await state(base)).lastSpeechProblem, null)
+})
+
+test('a turn stopped during the wait is not bought again', async (context) => {
+  const timers = fakeTimers()
+  const speech = fakeSpeech(async () => { throw rateLimited() })
+  const { base } = await start(context, { speech, timers })
+  const { hello } = await readyStage(context, base)
+  const text = '你好。'
+  const { turnId } = await (await control(base, { action: 'say', text })).json()
+  const pending = post(base, '/api/live/stage/speech', { leaseId: hello.leaseId, turnId, text, delivery: 'neutral' })
+  await until(() => retryPending(timers), 'no retry wait was scheduled')
+  assert.equal((await control(base, { action: 'stop' })).status, 200)
+  timers.fire(4_000)
+  const response = await pending
+  assert.equal(response.status, 409)
+  assert.deepEqual(await response.json(), { code: 'LIVE_TURN_MISMATCH' })
+  assert.equal(speech.calls.length, 1)
+  assert.equal((await state(base)).lastSpeechProblem.message, 'MiniMax 每分钟请求数到上限，这一段没有声音。')
+})
+
+test('a MiniMax 1002 body reaches the console as a rate-limit line, end to end (a fake fetch; nothing paid)', async (context) => {
+  const timers = fakeTimers()
+  const config = readMinimaxConfig({ MINIMAX_TTS_ENABLED: '1', MINIMAX_API_KEY: 'test-key-do-not-leak',
+    MINIMAX_VOICE_ID: 'test-voice', MINIMAX_TTS_DAILY_CHAR_LIMIT: '1000' })
+  const sent = []
+  const speech = createSpeechHandler({ rootDirectory: '/unused-test-root', config, budget: { reserve: async () => {} },
+    fetchImpl: async (url) => {
+      sent.push(String(url))
+      return new Response(JSON.stringify({ base_resp: { status_code: 1002, status_msg: 'rate limit exceeded(RPM)' } }),
+        { headers: { 'content-type': 'application/json' } })
+    } })
+  const { base } = await start(context, { speech, timers })
+  const { hello } = await readyStage(context, base)
+  const text = '你好。'
+  const { turnId } = await (await control(base, { action: 'say', text })).json()
+  const pending = post(base, '/api/live/stage/speech', { leaseId: hello.leaseId, turnId, text, delivery: 'neutral' })
+  await until(() => retryPending(timers), 'no retry wait was scheduled')
+  timers.fire(4_000)
+  const response = await pending
+  const body = await response.text()
+  assert.equal(response.status, 429)
+  assert.deepEqual(JSON.parse(body), { code: 'TTS_UPSTREAM_RATE_LIMITED' })
+  assert.deepEqual(sent, ['https://api.minimax.cn/v1/t2a_v2', 'https://api.minimax.cn/v1/t2a_v2'])
+  const current = await state(base)
+  assert.equal(current.lastSpeechProblem.message, 'MiniMax 每分钟请求数到上限，这一段没有声音。')
+  // Timestamps could contain any digits, so only the texts are checked for the code.
+  assert.doesNotMatch(JSON.stringify(current), /RPM|test-key/)
+  assert.doesNotMatch(body + current.lastSpeechProblem.message, /1002|status-code/)
 })

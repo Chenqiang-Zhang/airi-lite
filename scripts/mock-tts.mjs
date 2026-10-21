@@ -21,10 +21,32 @@ const SAY = '/usr/bin/say'
 const run = promisify(execFile)
 
 // Roughly a Chinese speaking pace, so captions and mouth movement last about
-// as long as the line would; bounded so one clip never runs on.
+// as long as the line would; bounded so one clip never runs on. A joined
+// clip of 60 characters is 12 s.
 export function toneSeconds(text) {
   const characters = [...String(text ?? '').trim()].length
-  return Math.min(8, Math.max(0.6, characters * 0.2))
+  return Math.min(15, Math.max(0.6, characters * 0.2))
+}
+
+// MOCK_TTS_LATENCY_MS="fixed,perCharacter" (e.g. "800,40"): each clip arrives
+// that much later, like a provider that sends a clip once it is complete, so
+// a rehearsal shows whether the next clip is ready before one finishes.
+export function parseMockLatency(value) {
+  if (value === undefined || value === '')
+    return null
+  const match = /^(\d{1,5}),(\d{1,4})$/.exec(String(value).trim())
+  if (!match || Number(match[1]) > 10_000 || Number(match[2]) > 1_000)
+    throw new Error('MOCK_TTS_LATENCY_MS must be "fixed,perCharacter" in milliseconds, e.g. 800,40')
+  return { fixedMs: Number(match[1]), perCharacterMs: Number(match[2]) }
+}
+
+function abortableDelay(milliseconds, signal) {
+  return new Promise((resolve, reject) => {
+    signal?.throwIfAborted()
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', stop); resolve() }, milliseconds)
+    const stop = () => { clearTimeout(timer); reject(signal.reason) }
+    signal?.addEventListener('abort', stop, { once: true })
+  })
 }
 
 // Amplitude-modulated sine: the 4 Hz envelope opens and closes the mouth,
@@ -78,6 +100,8 @@ export function createMockSpeech({
   exec = run,
   fs = { readFile, rm, writeFile },
   log = line => console.log(line),
+  latency = null, // parseMockLatency's result
+  delay = abortableDelay,
 }) {
   let clips = 0
 
@@ -122,6 +146,8 @@ export function createMockSpeech({
       }
       const engine = audio ? 'say' : 'tone'
       audio ??= toneWav(toneSeconds(text))
+      if (latency)
+        await delay(latency.fixedMs + latency.perCharacterMs * text.length, signal)
       log(JSON.stringify({ mockClip: id, delivery, act: act ?? null, characters: text.length, bytes: audio.length, engine }))
       return { audio: audio.toString('base64'), format: 'mp3', sampleRate: SAMPLE_RATE, words: [] }
     },
