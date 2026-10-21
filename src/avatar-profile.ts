@@ -1,5 +1,5 @@
-import { ACTS, EMOTIONS } from '../shared/performance-cues.mjs'
-import type { Act, Emotion } from '../shared/performance-cues.mjs'
+import { ACTS, EMOTIONS, isViseme, VISEMES } from '../shared/performance-cues.mjs'
+import type { Act, Emotion, Viseme } from '../shared/performance-cues.mjs'
 
 // One JSON file describes how a model performs: faces per tone, act pulses,
 // motion triggers, speaking sway/drift/blink guard, parameter roles and
@@ -98,6 +98,35 @@ export interface AvatarParameters {
   readonly prePhysics: readonly ParamId[]
 }
 
+// One mouth shape for vowel lip sync. The audio still decides how much and
+// when the mouth opens; a shape only rescales that opening and sets the form
+// for its share of the frame's weight.
+export interface MouthShape {
+  readonly open?: number // 0..2, scales the audio opening (default 1)
+  readonly form?: number // -2..2, replaces the audio form (default: keep it)
+  // Set absolutely to opening·weight·value, and to 0 when unshaped.
+  readonly params?: Readonly<Record<ParamId, number>>
+}
+
+// a, i, u, e and o are required; n (narrow neutral) and m (lips closed) are
+// optional, and a weight on a shape the profile leaves out is dropped.
+export interface MouthVowels {
+  readonly a: MouthShape
+  readonly i: MouthShape
+  readonly u: MouthShape
+  readonly e: MouthShape
+  readonly o: MouthShape
+  readonly n?: MouthShape
+  readonly m?: MouthShape
+  readonly strength?: number // 0..1, scales every weight (default 1)
+}
+
+export interface AvatarMouth {
+  readonly formRange: readonly [number, number]
+  // Absent: the mouth is the audio opening and spectral form, as before P4.
+  readonly vowels?: MouthVowels
+}
+
 export interface AvatarProfile {
   readonly version: 1
   readonly id: string
@@ -105,7 +134,7 @@ export interface AvatarProfile {
   readonly model: string
   readonly layout: AvatarLayout
   readonly parameters: AvatarParameters
-  readonly mouth: { readonly formRange: readonly [number, number] }
+  readonly mouth: AvatarMouth
   readonly timing: { readonly easeInMs: number, readonly relaxMs: number }
   readonly expressions: Readonly<Record<Emotion, Expression>>
   readonly activities: { readonly attentive: AddOnly, readonly thinking: AddOnly }
@@ -127,7 +156,7 @@ function deepFreeze<T>(value: T): T {
 }
 
 // Today's Hiyori, exactly: four faces (the newer tones borrow the closest),
-// no acts, no speaking layer, and only the chat page's click Tap.
+// no acts, no speaking layer, no vowel shapes, and only the chat page's click Tap.
 export const FALLBACK_AVATAR_PROFILE: AvatarProfile = deepFreeze({
   version: 1,
   id: 'hiyori',
@@ -377,6 +406,44 @@ function keyedTriggers<K extends string>(check: Checker, value: unknown, path: s
   return out
 }
 
+// Only the five vowels are required: n and m are optional shapes.
+const REQUIRED_VISEMES: readonly Viseme[] = ['a', 'i', 'u', 'e', 'o']
+
+function mouthShape(check: Checker, value: unknown, path: string, formRange: readonly [number, number] | undefined): MouthShape | undefined {
+  const source = fields(check, value, path, ['open', 'form', 'params'])
+  if (!source) return undefined
+  const out: { -readonly [K in keyof MouthShape]: MouthShape[K] } = {}
+  const open = optional(source.open, () => number(check, source.open, join(path, 'open'), 0, 2))
+  if (open !== undefined) out.open = open
+  const form = optional(source.form, () => number(check, source.form, join(path, 'form'), -2, 2))
+  if (form !== undefined) {
+    out.form = form
+    // Valid, and a face bias may bring it back inside; worth a look though.
+    if (formRange && (form < formRange[0] || form > formRange[1]))
+      check.note(join(path, 'form'), `${form} is outside formRange [${formRange[0]}, ${formRange[1]}], so it is clamped`)
+  }
+  if (source.params !== undefined) out.params = paramMap(check, source.params, join(path, 'params'), (v, p) => number(check, v, p, -30, 30))
+  return out
+}
+
+function mouthVowels(check: Checker, value: unknown, formRange: readonly [number, number] | undefined): MouthVowels | undefined {
+  if (!isRecord(value)) {
+    check.fail('mouth.vowels', 'must be an object')
+    return undefined
+  }
+  for (const key of visibleKeys(value))
+    if (key !== 'strength' && !isViseme(key)) check.fail(join('mouth.vowels', key), 'not a viseme (a, i, u, e, o, n, m)')
+  const out: { -readonly [K in keyof MouthVowels]?: MouthVowels[K] } = {}
+  for (const viseme of VISEMES) {
+    if (value[viseme] === undefined && !REQUIRED_VISEMES.includes(viseme)) continue
+    const shape = mouthShape(check, value[viseme], join('mouth.vowels', viseme), formRange)
+    if (shape) out[viseme] = shape
+  }
+  const strength = optional(value.strength, () => number(check, value.strength, 'mouth.vowels.strength', 0, 1))
+  if (strength !== undefined) out.strength = strength
+  return out as MouthVowels
+}
+
 const SECTIONS = {
   layout(check: Checker, value: unknown): AvatarLayout | undefined {
     const keys = ['fitWidth', 'fitHeight', 'anchorY', 'portraitFitHeight', 'portraitAnchorY'] as const
@@ -403,8 +470,8 @@ const SECTIONS = {
       prePhysics,
     }
   },
-  mouth(check: Checker, value: unknown) {
-    const source = fields(check, value, 'mouth', ['formRange'])
+  mouth(check: Checker, value: unknown): AvatarMouth | undefined {
+    const source = fields(check, value, 'mouth', ['formRange', 'vowels'])
     if (!source) return undefined
     const range = source.formRange
     if (!Array.isArray(range) || range.length !== 2) {
@@ -415,7 +482,11 @@ const SECTIONS = {
     const max = number(check, range[1], 'mouth.formRange[1]', 0, 3)
     if (min === 0) check.fail('mouth.formRange[0]', 'must be below 0')
     if (max === 0) check.fail('mouth.formRange[1]', 'must be above 0')
-    return min === undefined || max === undefined ? undefined : { formRange: [min, max] as const }
+    const formRange = min === undefined || max === undefined ? undefined : [min, max] as const
+    // Any failure here resets the whole mouth, formRange included (the section rule).
+    const vowels = optional(source.vowels, () => mouthVowels(check, source.vowels, formRange))
+    if (!formRange) return undefined
+    return vowels === undefined ? { formRange } : { formRange, vowels }
   },
   timing(check: Checker, value: unknown) {
     const source = fields(check, value, 'timing', ['easeInMs', 'relaxMs'])
@@ -621,6 +692,29 @@ export function resolveAvatarProfile(profile: AvatarProfile, model: AvatarModelI
   const resolveTriggers = <K extends string>(source: Readonly<Partial<Record<K, Trigger>>> | undefined, path: string) =>
     source && Object.fromEntries(Object.entries(source).map(([key, value]) => [key, resolveTrigger(value as Trigger, join(path, key))])) as Partial<Record<K, Trigger>>
 
+  // The two mouth roles are written from open and form: a vowel parameter
+  // on one would overwrite them every frame.
+  const vowelParams = (params: Readonly<Record<ParamId, number>>, path: string) => {
+    const kept: Record<ParamId, number> = { ...map(params, path) }
+    for (const [role, use] of [['mouthOpen', 'open'], ['mouthForm', 'form']] as const) {
+      const id = profile.parameters[role]
+      if (!(id in kept)) continue
+      problems.push(`${join(path, id)}: ${id} is the ${role} parameter, use ${use} instead; dropped`)
+      delete kept[id]
+    }
+    return kept
+  }
+  const resolveMouth = (mouth: AvatarMouth): AvatarMouth => {
+    const { vowels } = mouth
+    if (!vowels) return mouth
+    const shapes: { -readonly [K in keyof MouthVowels]?: MouthVowels[K] } = { ...vowels }
+    for (const viseme of VISEMES) {
+      const shape = vowels[viseme]
+      if (shape?.params) shapes[viseme] = { ...shape, params: vowelParams(shape.params, join(join('mouth.vowels', viseme), 'params')) }
+    }
+    return { ...mouth, vowels: shapes as MouthVowels }
+  }
+
   const { parameters, motions, speaking } = profile
   const expressions = Object.fromEntries(EMOTIONS.map(emotion =>
     [emotion, resolveOps(profile.expressions[emotion], join('expressions', emotion))])) as Record<Emotion, Expression>
@@ -647,6 +741,7 @@ export function resolveAvatarProfile(profile: AvatarProfile, model: AvatarModelI
       motion: list(parameters.motion, 'parameters.motion'),
       prePhysics: parameters.prePhysics.filter(id => model.hasParameter(id)),
     },
+    mouth: resolveMouth(profile.mouth),
     expressions,
     activities: {
       attentive: { add: map(profile.activities.attentive.add, 'activities.attentive.add') ?? {} },

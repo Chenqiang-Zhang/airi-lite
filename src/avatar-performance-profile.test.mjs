@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { EMOTIONS } from '../shared/performance-cues.mjs'
+import { EMOTIONS, VISEMES } from '../shared/performance-cues.mjs'
 import { SNAPSHOT_GRID, settlePose, snapshotCases, snapshotPoses } from '../scripts/avatar-performance-snapshot.mjs'
 import { attachAvatarPerformance } from './avatar-performance.ts'
 import { FALLBACK_AVATAR_PROFILE, parseAvatarProfile, pulseEnvelope, smoothstep } from './avatar-profile.ts'
@@ -601,4 +601,237 @@ test('under reduced motion the blink guard still holds the eyes for an unaligned
   actor.setMouth(0.5, 0)
   for (let index = 0; index < 5; index++) frame(FRAME, eyes(1))
   assert.ok(frame(FRAME, eyes(0)).ParamEyeLOpen >= 0.95, 'the guard is not a head motion')
+})
+
+// --- vowel lip sync (P4) -----------------------------------------------------
+
+const VOWEL_MOTION = { ParamMouthOpenY: 1, ParamMouthForm: -2 }
+const only = (viseme, weight = 1) => VISEMES.map(name => name === viseme ? weight : 0)
+const withVowels = (vowels, change = json => json) => {
+  const json = activeJson()
+  json.mouth.vowels = structuredClone(vowels)
+  change(json)
+  const { profile, problems } = parseAvatarProfile(json)
+  assert.deepEqual(problems, [])
+  return profile
+}
+// A model with per-vowel parameters, as in docs/avatar-profile.md.
+const PARAM_VOWELS = {
+  a: { open: 0, params: { ParamA: 1 } }, i: { open: 0, params: { ParamI: 1 } },
+  u: { open: 0, params: { ParamU: 1 } }, e: { open: 0, params: { ParamE: 1 } },
+  o: { open: 0, params: { ParamO: 1 } }, n: { open: 0.4 }, m: { open: 0 },
+}
+
+test('each vowel shape at full weight rescales the opening and replaces the form, under every face and a mouth-pulling motion', () => {
+  const { vowels, formRange } = HIYORI.mouth
+  for (const [tone, form, bias] of [['neutral', 0.2, 0], ['happy', 0.2, HIYORI.expressions.happy.mouthForm], ['sad', 0.2, -0.4], ['pout', -0.32, -0.5]]) {
+    for (const viseme of VISEMES) {
+      const shape = vowels[viseme]
+      const { actor, frame } = rig()
+      actor.setActivity('speaking')
+      actor.setDelivery(tone)
+      actor.setMouth(0.7, form, null, null, only(viseme))
+      let pose
+      for (let index = 0; index < 20; index++) pose = frame(50, VOWEL_MOTION)
+      assert.equal(pose.ParamMouthOpenY, clamp(0.7 * (shape.open ?? 1), [0, 1]), `${tone} ${viseme}`)
+      assert.ok(Math.abs(pose.ParamMouthForm - clamp((shape.form ?? form) + bias, formRange)) < 1e-12, `${tone} ${viseme}: ${pose.ParamMouthForm}`)
+      assert.deepEqual(actor.inspect().mouth, {
+        audioOpen: 0.7, open: pose.ParamMouthOpenY, form: pose.ParamMouthForm, vowel: viseme, weight: 1, source: 'track', lead: null,
+      })
+      actor.setActivity('idle')
+      pose = frame(16, VOWEL_MOTION)
+      assert.equal(pose.ParamMouthOpenY, 0, 'idle closes, even with weights still set')
+      assert.ok(Math.abs(pose.ParamMouthForm - bias) < 1e-12)
+      assert.equal(actor.inspect().mouth.source, 'closed')
+    }
+  }
+  // m is the lip closure.
+  const { actor, frame } = rig()
+  actor.setActivity('speaking')
+  actor.setMouth(1, 0, null, null, only('m'))
+  assert.equal(frame(50, VOWEL_MOTION).ParamMouthOpenY, 0)
+})
+
+test('partial vowel weight interpolates toward the audio mouth, and no weights is exactly the pre-P4 mouth', () => {
+  const { a, i } = HIYORI.mouth.vowels
+  const form = 0.2
+  const settle = (vowel, tone = 'neutral') => {
+    const { actor, frame } = rig()
+    actor.setActivity('speaking')
+    actor.setDelivery(tone)
+    actor.setMouth(0.7, form, null, null, vowel)
+    let pose
+    for (let index = 0; index < 20; index++) pose = frame(50, VOWEL_MOTION)
+    return { pose, actor }
+  }
+  const half = settle(only('a', 0.5)).pose
+  assert.ok(Math.abs(half.ParamMouthOpenY - 0.7 * (0.5 + 0.5 * a.open)) < 1e-12)
+  assert.ok(Math.abs(half.ParamMouthForm - (0.5 * form + 0.5 * a.form)) < 1e-12)
+  const mixed = settle([0.5, 0.5, 0, 0, 0, 0, 0])
+  assert.ok(Math.abs(mixed.pose.ParamMouthOpenY - 0.7 * (0.5 * a.open + 0.5 * i.open)) < 1e-12)
+  assert.ok(Math.abs(mixed.pose.ParamMouthForm - (0.5 * a.form + 0.5 * i.form)) < 1e-12)
+  assert.equal(mixed.actor.inspect().mouth.weight, 1)
+  for (const tone of ['neutral', 'happy', 'pout']) {
+    const today = settle(undefined, tone)
+    assert.deepEqual(settle(null, tone).pose, today.pose, tone)
+    assert.equal(today.pose.ParamMouthOpenY, 0.7)
+    assert.ok(Math.abs(today.pose.ParamMouthForm - clamp(form + (HIYORI.expressions[tone].mouthForm ?? 0), HIYORI.mouth.formRange)) < 1e-12)
+    assert.equal(today.actor.inspect().mouth.source, 'audio')
+    assert.equal(today.actor.inspect().mouth.vowel, null)
+  }
+})
+
+test('vowels change only the two mouth parameters: envelope, sway, drift, blink guard, beat, emphasis and the laugh shake are identical', () => {
+  for (const aligned of [true, false]) {
+    const plain = rig()
+    const shaped = rig()
+    for (const { actor } of [plain, shaped]) {
+      actor.setActivity('speaking')
+      actor.setDelivery('happy')
+    }
+    let differed = 0
+    for (let index = 0; index < 120; index++) {
+      const open = [0, 0.15, 0.5, 0.8, 0.45, 0.1, 0, 0.6, 0.3, 0.05][index % 10]
+      const form = [0.1, -0.2, 0.3][index % 3]
+      const beat = aligned ? [0, 0.3, 0.8, 0.2][index % 4] : null
+      const ahead = aligned ? [0.4, 0, 0.1][index % 3] : null
+      plain.actor.setMouth(open, form, beat, ahead)
+      shaped.actor.setMouth(open, form, beat, ahead, only(VISEMES[index % VISEMES.length], index % 2 ? 1 : 0.6))
+      if (index === 10) for (const { actor } of [plain, shaped]) actor.performAct('laugh')
+      const baseline = { ...eyes(index % 7 < 4 ? 1 : 0), ParamAngleY: 2, ...VOWEL_MOTION }
+      const a = plain.frame(FRAME, baseline)
+      const b = shaped.frame(FRAME, baseline)
+      if (a.ParamMouthOpenY !== b.ParamMouthOpenY || a.ParamMouthForm !== b.ParamMouthForm) differed++
+      for (const pose of [a, b]) {
+        delete pose.ParamMouthOpenY
+        delete pose.ParamMouthForm
+      }
+      assert.deepEqual(b, a, `${aligned ? 'aligned' : 'unaligned'} frame ${index}`)
+      const { mouth: _plainMouth, ...plainState } = plain.actor.inspect()
+      const { mouth: _shapedMouth, ...shapedState } = shaped.actor.inspect()
+      assert.deepEqual(shapedState, plainState, `${aligned ? 'aligned' : 'unaligned'} state ${index}`)
+    }
+    assert.ok(differed > 60, `the vowels did shape the mouth (${differed} frames)`)
+  }
+})
+
+test('reduced motion keeps the vowels, browser speech ignores them, and strength scales them', () => {
+  const { i, a } = HIYORI.mouth.vowels
+  const reduced = rig({ reduced: true })
+  reduced.actor.setActivity('speaking')
+  reduced.actor.setMouth(0.7, 0.2, null, null, only('i'))
+  const pose = reduced.frame(50, VOWEL_MOTION)
+  assert.equal(pose.ParamMouthOpenY, 0.7 * i.open)
+  assert.ok(Math.abs(pose.ParamMouthForm - i.form) < 1e-12)
+
+  const browser = rig()
+  const silent = rig()
+  for (const [{ actor }, vowel] of [[browser, only('a')], [silent, null]]) {
+    actor.setActivity('speaking')
+    actor.setMouth(null, 0, null, null, vowel)
+  }
+  for (let index = 0; index < 10; index++) assert.deepEqual(browser.frame(FRAME, VOWEL_MOTION), silent.frame(FRAME, VOWEL_MOTION))
+  assert.equal(browser.actor.inspect().mouth.source, 'browser')
+
+  const half = rig({ profile: withVowels(HIYORI.mouth.vowels, json => { json.mouth.vowels.strength = 0.5 }) })
+  half.actor.setActivity('speaking')
+  half.actor.setMouth(0.7, 0.2, null, null, only('a'))
+  const scaled = half.frame(50, VOWEL_MOTION)
+  assert.ok(Math.abs(scaled.ParamMouthOpenY - 0.7 * (0.5 + 0.5 * a.open)) < 1e-12)
+  assert.ok(Math.abs(scaled.ParamMouthForm - (0.5 * 0.2 + 0.5 * a.form)) < 1e-12)
+  assert.equal(half.actor.inspect().mouth.weight, 0.5)
+})
+
+test('a shape the profile leaves out takes no weight', () => {
+  const profile = withVowels(HIYORI.mouth.vowels, json => {
+    delete json.mouth.vowels.n
+    delete json.mouth.vowels.m
+  })
+  const { actor, frame } = rig({ profile })
+  actor.setActivity('speaking')
+  actor.setMouth(0.7, 0.2, null, null, only('m'))
+  const closure = frame(50, VOWEL_MOTION)
+  assert.equal(closure.ParamMouthOpenY, 0.7, 'no m shape: the audio opening')
+  assert.ok(Math.abs(closure.ParamMouthForm - 0.2) < 1e-12)
+  assert.equal(actor.inspect().mouth.weight, 0)
+  actor.setMouth(0.7, 0.2, null, null, [0.5, 0, 0, 0, 0, 0, 0.5])
+  const mixed = frame(50, VOWEL_MOTION)
+  assert.ok(Math.abs(mixed.ParamMouthOpenY - 0.7 * (0.5 + 0.5 * HIYORI.mouth.vowels.a.open)) < 1e-12)
+  assert.equal(actor.inspect().mouth.vowel, 'a')
+})
+
+test('vowel parameters (ParamA..O) are written absolutely over a motion baseline and 0 when idle or unshaped', () => {
+  const ids = ['ParamA', 'ParamI', 'ParamU', 'ParamE', 'ParamO']
+  const motion = { ...VOWEL_MOTION, ParamA: 0.8, ParamI: 0.5, ParamU: 0.3, ParamE: 0.2, ParamO: 0.9 }
+  const { actor, frame } = rig({ profile: withVowels(PARAM_VOWELS) })
+  const values = pose => Object.fromEntries(ids.map(id => [id, pose[id]]))
+  const zero = Object.fromEntries(ids.map(id => [id, 0]))
+  assert.deepEqual(values(frame(50, motion)), zero, 'idle: the motion curves never show')
+  actor.setActivity('speaking')
+  actor.setMouth(0.7, 0.2, null, null, only('a'))
+  let pose = frame(50, motion)
+  assert.deepEqual(values(pose), { ...zero, ParamA: 0.7 })
+  assert.equal(pose.ParamMouthOpenY, 0, 'open 0: the jaw gives way to ParamA')
+  assert.ok(Math.abs(pose.ParamMouthForm - 0.2) < 1e-12, 'no form: the audio form stays')
+  actor.setMouth(0.7, 0.2, null, null, [0, 0.5, 0, 0.25, 0, 0, 0])
+  pose = frame(50, motion)
+  assert.deepEqual(values(pose), { ...zero, ParamI: 0.35, ParamE: 0.175 })
+  assert.ok(Math.abs(pose.ParamMouthOpenY - 0.7 * 0.25) < 1e-12, 'consonant gaps still open the jaw')
+  actor.setMouth(0.7, 0.2, null, null, only('n'))
+  pose = frame(50, motion)
+  assert.deepEqual(values(pose), zero)
+  assert.ok(Math.abs(pose.ParamMouthOpenY - 0.7 * 0.4) < 1e-12)
+  actor.setMouth(0.7, 0.2)
+  pose = frame(50, motion)
+  assert.deepEqual(values(pose), zero, 'no track: 0, not the motion value')
+  assert.equal(pose.ParamMouthOpenY, 0.7)
+  actor.setMouth(0.7, 0.2, null, null, only('o'))
+  frame(50, motion)
+  actor.setActivity('idle')
+  assert.deepEqual(values(frame(50, motion)), zero)
+
+  // Unresolved, a vowel parameter on a mouth role is still never written.
+  const roles = rig({ profile: withVowels(PARAM_VOWELS, json => { json.mouth.vowels.a.params.ParamMouthForm = 1 }) })
+  roles.actor.setActivity('speaking')
+  roles.actor.setMouth(0.7, 0.2, null, null, only('a'))
+  const rolePose = roles.frame(50, motion)
+  assert.ok(Math.abs(rolePose.ParamMouthForm - 0.2) < 1e-12)
+  assert.equal(rolePose.ParamA, 0.7)
+})
+
+test('the vowel hold shows one shape at opening 0.6 over any face, with or without audio; vowels: false ignores the track', () => {
+  const { i, a } = HIYORI.mouth.vowels
+  const { actor, frame } = rig()
+  actor.setDebug({ vowel: 'i' })
+  let pose = frame(50, VOWEL_MOTION)
+  assert.ok(Math.abs(pose.ParamMouthOpenY - 0.6 * i.open) < 1e-12, 'held while idle')
+  assert.ok(Math.abs(pose.ParamMouthForm - i.form) < 1e-12)
+  assert.deepEqual(actor.inspect().mouth, { audioOpen: 0.6, open: pose.ParamMouthOpenY, form: pose.ParamMouthForm, vowel: 'i', weight: 1, source: 'hold', lead: null })
+  actor.setDebug({ hold: 'happy' })
+  for (let index = 0; index < 10; index++) pose = frame(50, VOWEL_MOTION)
+  assert.ok(Math.abs(pose.ParamMouthForm - clamp(i.form + HIYORI.expressions.happy.mouthForm, HIYORI.mouth.formRange)) < 1e-12, 'combines with the face hold')
+  actor.setActivity('speaking')
+  actor.setMouth(0.9, 0.3, null, null, only('a'))
+  pose = frame(50, VOWEL_MOTION)
+  assert.ok(Math.abs(pose.ParamMouthOpenY - 0.6 * i.open) < 1e-12, 'the hold wins over the audio and its track')
+  actor.setDebug({ vowels: false })
+  assert.ok(Math.abs(frame(50, VOWEL_MOTION).ParamMouthOpenY - 0.6 * i.open) < 1e-12, 'and over vowels: false')
+  actor.setDebug({ vowel: null, hold: null })
+  pose = frame(50, VOWEL_MOTION)
+  assert.equal(pose.ParamMouthOpenY, 0.9, 'vowels off: the audio opening')
+  assert.equal(actor.inspect().mouth.source, 'audio')
+  actor.setDebug({ vowels: true })
+  assert.equal(frame(50, VOWEL_MOTION).ParamMouthOpenY, Math.min(1, 0.9 * a.open), 'vowels on again: the track')
+  actor.setDebug({ vowel: 'i' })
+  actor.setDebug({ vowel: 'y' })
+  assert.equal(frame(50, VOWEL_MOTION).ParamMouthOpenY, 1, 'an unknown shape releases the hold')
+  assert.equal(actor.inspect().mouth.source, 'track')
+
+  // Strength does not weaken the hold; a shape the profile lacks holds the plain opening.
+  const weak = rig({ profile: withVowels(HIYORI.mouth.vowels, json => { json.mouth.vowels.strength = 0.3; delete json.mouth.vowels.m }) })
+  weak.actor.setDebug({ vowel: 'a' })
+  assert.equal(weak.frame(50, VOWEL_MOTION).ParamMouthOpenY, 0.6 * a.open)
+  weak.actor.setDebug({ vowel: 'm' })
+  assert.equal(weak.frame(50, VOWEL_MOTION).ParamMouthOpenY, 0.6)
+  assert.deepEqual([weak.actor.inspect().mouth.vowel, weak.actor.inspect().mouth.weight], ['m', 0])
 })

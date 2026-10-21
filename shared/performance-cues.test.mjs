@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-import { ACT_PAUSE_SECONDS, ACTS, EMOTIONS, isAct, isEmotion, MAX_ACTS_PER_REPLY, normaliseActCues, normaliseEmotion } from './performance-cues.mjs'
+import { ACT_PAUSE_SECONDS, ACTS, EMOTIONS, isAct, isEmotion, isViseme, MAX_ACTS_PER_REPLY, normaliseActCues, normaliseEmotion, VISEMES } from './performance-cues.mjs'
 
 test('one vocabulary: eight emotions, three acts, and bright read as happy', () => {
   assert.deepEqual(EMOTIONS, ['neutral', 'happy', 'soft', 'curious', 'surprised', 'sad', 'pout', 'shy'])
@@ -29,4 +29,12 @@ test('the type declarations list the same values as the module', async () => {
   const union = name => [...new RegExp(`export type ${name} = ([^\\n]+)`).exec(declarations)[1].matchAll(/'([a-z]+)'/g)].map(match => match[1])
   assert.deepEqual(union('Emotion'), [...EMOTIONS])
   assert.deepEqual(union('Act'), [...ACTS])
+  assert.deepEqual(union('Viseme'), [...VISEMES])
+})
+
+test('visemes are a frozen, ordered list and only their names pass', () => {
+  assert.deepEqual([...VISEMES], ['a', 'i', 'u', 'e', 'o', 'n', 'm'])
+  assert.ok(Object.isFrozen(VISEMES))
+  for (const viseme of VISEMES) assert.equal(isViseme(viseme), true)
+  for (const value of ['__proto__', 'y', 'A', '', null, 1]) assert.equal(isViseme(value), false, String(value))
 })

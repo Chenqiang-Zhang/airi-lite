@@ -43,6 +43,17 @@ export function isAct(value) {
   return typeof value === 'string' && ACT_SET.has(value)
 }
 
+// Mouth shapes for vowel lip sync (src/visemes.ts), in the order of the
+// weight arrays: the five vowels, n a narrow neutral shape (the apical -i
+// of 是/字, 嗯, 哼) and m a lip closure (b/p/m onsets).
+export const VISEMES = Object.freeze(['a', 'i', 'u', 'e', 'o', 'n', 'm'])
+
+const VISEME_SET = new Set(VISEMES)
+
+export function isViseme(value) {
+  return typeof value === 'string' && VISEME_SET.has(value)
+}
+
 // Acts of one reply: {start, act} with start a UTF-16 offset in the visible
 // text (the act is performed before the character there), earliest first,
 // at most MAX_ACTS_PER_REPLY.

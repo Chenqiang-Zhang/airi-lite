@@ -1,6 +1,13 @@
+// One weight per VISEMES entry (shared/performance-cues.mjs), in that order:
+// each 0..1, summing to at most 1; the rest of the frame keeps the audio form.
+export type VisemeWeights = readonly number[]
+
 export interface MouthFrame {
   open: number
   form: number
+  // From src/visemes.ts on clips with usable text timings; only where the
+  // total weight is at least 0.01, and never on a closed (open 0) frame.
+  vowel?: VisemeWeights
 }
 
 export const MOUTH_FRAMES_PER_SECOND = 40
@@ -44,7 +51,9 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 // Audio-synchronous approximation, not phoneme/viseme forced alignment.
-// The mid-band share loosely tracks rounded versus spread vowel colour.
+// The mid-band share is a brightness cue only: on real MiniMax speech it
+// separates a from i a little but does not track rounding (u and e measure
+// the same), so vowel shapes come from the text timings in src/visemes.ts.
 export function mouthFrames(samples: Float32Array, sampleRate: number): MouthFrame[] {
   if (!Number.isFinite(sampleRate) || sampleRate <= 0)
     return []

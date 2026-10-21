@@ -18,6 +18,7 @@ import { createAvatarContext, SPOKEN_FACE_HOLD_MS } from './avatar-context'
 import { loadAvatarModule } from './avatar-startup'
 import { loadAvatarRenderProfile, saveAvatarRenderProfile } from './avatar-render-settings'
 import type { AvatarRenderBudget } from './avatar-rendering'
+import type { VisemeWeights } from './mouth'
 import { chooseDelivery } from './delivery'
 import type { Delivery } from './delivery'
 import { clearUserMemory, loadUserMemory, proposeUserMemory, saveUserMemory, USER_MEMORY_LIMIT } from './memory'
@@ -107,7 +108,7 @@ const faceDelivery = () => leadDelivery ?? avatarContext.current
 const avatarContext = createAvatarContext({ onChange: () => live2d?.setDelivery(faceDelivery()), holdMs: SPOKEN_FACE_HOLD_MS })
 const avatarMountController = new AbortController()
 let viewDisposed = false
-let latestMouth: { opening: number | null, form: number, beat: number | null, beatAhead: number | null } = { opening: 0, form: 0, beat: null, beatAhead: null }
+let latestMouth: { opening: number | null, form: number, beat: number | null, beatAhead: number | null, vowel: VisemeWeights | null } = { opening: 0, form: 0, beat: null, beatAhead: null, vowel: null }
 let speech: ReturnType<typeof createSpeechController> | null = null
 let activeCloudProvider: 'minimax' | 'elevenlabs' | 'local' = 'minimax'
 let activeCloudRegion: 'cn' | 'global' = 'cn'
@@ -170,9 +171,10 @@ onMounted(async () => {
       if (delivery) live2d?.cueTone(delivery)
       live2d?.setDelivery(faceDelivery())
     },
-    onMouth: (opening, form, beat, beatAhead = null) => {
-      latestMouth = { opening, form, beat, beatAhead }
-      live2d?.setMouth(opening, form, beat, beatAhead)
+    onMouth: (opening, form, beat, beatAhead = null, vowel = null) => {
+      // A stop passes three arguments: the defaults clear the vowel as well.
+      latestMouth = { opening, form, beat, beatAhead, vowel }
+      live2d?.setMouth(opening, form, beat, beatAhead, vowel)
     },
     onAudioReady: ready => (audioAvailable.value = ready),
     onProblem: message => (voiceProblem.value = message),
@@ -214,7 +216,7 @@ onMounted(async () => {
     live2d = avatar
     // A user may have changed the preference while model assets were loading.
     activeRenderBudget.value = live2d.setRenderProfile(selectedRenderProfile.value)
-    live2d.setMouth(latestMouth.opening, latestMouth.form, latestMouth.beat, latestMouth.beatAhead)
+    live2d.setMouth(latestMouth.opening, latestMouth.form, latestMouth.beat, latestMouth.beatAhead, latestMouth.vowel)
     syncAvatarActivity()
     modelStatus.value = ''
   }

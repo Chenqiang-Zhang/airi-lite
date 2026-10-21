@@ -1,6 +1,6 @@
 import type { Delivery } from './delivery'
-import { ACTS, EMOTIONS, isAct, normaliseEmotion } from '../shared/performance-cues.mjs'
-import type { Act, Emotion } from '../shared/performance-cues.mjs'
+import { ACTS, EMOTIONS, isAct, isViseme, normaliseEmotion, VISEMES } from '../shared/performance-cues.mjs'
+import type { Act, Emotion, Viseme } from '../shared/performance-cues.mjs'
 import { FALLBACK_AVATAR_PROFILE, faceOf, faceWeightsAt, follow, pulseEnvelope, waveAt } from './avatar-profile.ts'
 import type { ActPulse, AvatarProfile, FaceTrack, Ops, ParamId, Wave } from './avatar-profile.ts'
 import { createMotionDirector } from './avatar-motion.ts'
@@ -42,6 +42,22 @@ export interface AvatarDebug {
   hold?: Delivery | null // wear this face regardless of setDelivery; null releases
   reducedMotion?: boolean | null // simulate; null follows the real setting
   ignoreGates?: boolean // gestures skip turn limit, gap, cooldown and chance
+  // Show this mouth shape alone (W = 1) at opening 0.6 and audio form 0,
+  // with or without audio; null releases. It wins over vowels: false.
+  vowel?: Viseme | null
+  vowels?: boolean // false ignores the vowel weights of setMouth (A/B on one clip)
+}
+
+// What the mouth wrote this frame. `track` is the vowel path; `audio` is
+// the opening and spectral form as before P4.
+export interface AvatarMouthReadout {
+  audioOpen: number // the opening the mouth is shaped from (0.6 under a hold)
+  open: number // rendered mouthOpen
+  form: number // rendered mouthForm
+  vowel: Viseme | null // the strongest applied shape (the held one under a hold)
+  weight: number // W, the total applied shape weight, 0..1
+  source: 'track' | 'audio' | 'browser' | 'hold' | 'closed'
+  lead: 0 | 1 | null // the vowel track's lead decision; not reported to the engine yet
 }
 
 // Per parameter: every add, then every scale, then blends in slot order.
@@ -106,6 +122,18 @@ const ACT_RETRIGGER_MS = 700
 // With no voice the envelope snaps to 0 here, so sway goes fully still.
 const ENVELOPE_FLOOR = 0.01
 const BLINK_FLOOR = 0.01
+const VOWEL_HOLD_OPEN = 0.6
+
+// Weights in VISEMES order: anything but 7 numbers is no track, non-finite
+// is 0, each is 0..1 and they are scaled down to sum to at most 1; an
+// all-but-zero frame is no track either.
+function sanitiseVowel(vowel: unknown): number[] | null {
+  if (!Array.isArray(vowel) || vowel.length !== VISEMES.length) return null
+  const weights = vowel.map(weight => typeof weight === 'number' && Number.isFinite(weight) ? Math.max(0, Math.min(1, weight)) : 0)
+  const sum = weights.reduce((total, weight) => total + weight, 0)
+  if (sum < 0.001) return null
+  return sum > 1 ? weights.map(weight => weight / sum) : weights
+}
 
 // Apply after Cubism's motion/physics pass, immediately before vertices update.
 // A normal PIXI ticker callback runs too early: Idle overwrites its parameters.
@@ -137,9 +165,23 @@ export function attachAvatarPerformance(model: ParameterModel, options: AvatarPe
   const blink = speakingLayer?.blink
   const eyeIds = roles.eyeOpen
   const pitchId = roles.headPitch
+  // Only the shapes the profile defines take weight. The mouth roles come
+  // from open and form, never from params (resolve reports such an id).
+  const vowelProfile = profile.mouth.vowels
+  const vowelStrength = vowelProfile?.strength ?? 1
+  const vowelParamIds = [...new Set(VISEMES.flatMap(viseme => Object.keys(vowelProfile?.[viseme]?.params ?? {})))]
+    .filter(id => id !== roles.mouthOpen && id !== roles.mouthForm)
+  const vowelShapes = VISEMES.flatMap((viseme, slot) => {
+    const shape = vowelProfile?.[viseme]
+    if (!shape) return []
+    const params = Object.entries(shape.params ?? {}).flatMap(([id, value]) => vowelParamIds.includes(id) ? [[vowelParamIds.indexOf(id), value] as const] : [])
+    return [{ viseme, slot, open: shape.open ?? 1, form: shape.form ?? null, params }]
+  })
 
   let debugHold: Emotion | null = null
   let debugReduced: boolean | null = null
+  let debugVowel: Viseme | null = null
+  let debugVowels = true
   const isReduced = () => debugReduced ?? options.reducedMotion?.() ?? false
   const director = options.motions
     ? createMotionDirector({ motions: profile.motions, port: options.motions, now, random: options.random ?? Math.random, reducedMotion: isReduced })
@@ -153,6 +195,8 @@ export function attachAvatarPerformance(model: ParameterModel, options: AvatarPe
   let track: FaceTrack = { from: face, to: neutralFace, start: previousTime, duration: 0 }
   let mouthOpen: number | null = 0
   let mouthForm = 0
+  let mouthVowel: number[] | null = null
+  let mouthReadout: AvatarMouthReadout = { audioOpen: 0, open: 0, form: 0, vowel: null, weight: 0, source: 'closed', lead: null }
   let alignedBeat: number | null = null
   let beatAhead: number | null = null
   let previousAudioOpen = 0
@@ -200,9 +244,65 @@ export function attachAvatarPerformance(model: ParameterModel, options: AvatarPe
   }
 
   // Closing is immediate on pause/cancel, even if an Idle motion opens its mouth.
+  // Everything but the mouth write (followVoice, envelope, sway, emphasis,
+  // blink guard) keeps this raw opening.
   const mouthOpenNow = () => activity === 'speaking'
     ? mouthOpen ?? (0.2 + Math.abs(Math.sin(elapsed * 9.6)) * 0.5)
     : 0
+
+  // The vowel path, or null for today's writes. o is the audio opening and
+  // f the audio form; W = Σ k·w over the defined shapes:
+  //   open = o·((1−W) + Σ k·w·open_s), form = (1−W)·f + Σ k·w·(form_s ?? f)
+  //   params[id] = o·Σ k·w·params_s[id]
+  // Not smoothed: the frames are already smoothed and blurred upstream.
+  const shapeMouth = (speaking: boolean) => {
+    let o: number
+    let f: number
+    let weights: readonly number[]
+    let strength: number
+    if (debugVowel !== null) {
+      o = VOWEL_HOLD_OPEN
+      f = 0
+      weights = VISEMES.map(viseme => Number(viseme === debugVowel))
+      strength = 1
+    }
+    else if (vowelProfile && debugVowels && speaking && mouthOpen !== null && mouthVowel !== null) {
+      o = mouthOpen
+      f = mouthForm
+      weights = mouthVowel
+      strength = vowelStrength
+    }
+    else {
+      return null
+    }
+    let total = 0
+    let open = 0
+    let form = 0
+    let strongest: Viseme | null = debugVowel
+    let strongestWeight = 0
+    const params = vowelParamIds.map(() => 0)
+    for (const shape of vowelShapes) {
+      const weight = strength * weights[shape.slot]
+      if (!weight) continue
+      total += weight
+      open += weight * shape.open
+      form += weight * (shape.form ?? f)
+      for (const [index, value] of shape.params) params[index] += weight * value
+      if (debugVowel === null && weight > strongestWeight) {
+        strongest = shape.viseme
+        strongestWeight = weight
+      }
+    }
+    const rest = Math.max(0, 1 - total)
+    return {
+      audioOpen: o,
+      open: Math.max(0, Math.min(1, o * (rest + open))),
+      form: rest * f + form,
+      params: params.map(value => o * value),
+      vowel: strongest,
+      weight: Math.min(1, total),
+    }
+  }
 
   // Clock, activity weights, face track, emphasis, envelope, act pulse: once per frame.
   const step = () => {
@@ -352,12 +452,27 @@ export function attachAvatarPerformance(model: ParameterModel, options: AvatarPe
     const speaking = activity === 'speaking'
     const reducedMotion = frameReduced
     const audioOpen = speaking && mouthOpen !== null ? mouthOpen : null
-    core.setParameterValueById(roles.mouthOpen, mouthOpenNow())
+    const rawOpen = mouthOpenNow()
+    const shaped = shapeMouth(speaking)
+    const renderedOpen = shaped ? shaped.open : rawOpen
+    core.setParameterValueById(roles.mouthOpen, renderedOpen)
     guardBlink(core)
-    let form = speaking ? mouthForm : 0
+    let form = shaped ? shaped.form : speaking ? mouthForm : 0
     for (const [slot, bias] of faceForms) form += face[slot] * bias
     if (act?.pulse.mouthForm) form += actEnvelope * act.pulse.mouthForm
-    core.setParameterValueById(roles.mouthForm, Math.max(formRange[0], Math.min(formRange[1], form)))
+    const renderedForm = Math.max(formRange[0], Math.min(formRange[1], form))
+    core.setParameterValueById(roles.mouthForm, renderedForm)
+    // Absolute every frame, so no motion curve on these ids ever shows.
+    vowelParamIds.forEach((id, index) => core.setParameterValueById(id, shaped ? shaped.params[index] : 0))
+    mouthReadout = {
+      audioOpen: shaped ? shaped.audioOpen : rawOpen,
+      open: renderedOpen,
+      form: renderedForm,
+      vowel: shaped ? shaped.vowel : null,
+      weight: shaped ? shaped.weight : 0,
+      source: debugVowel !== null ? 'hold' : shaped ? 'track' : !speaking ? 'closed' : mouthOpen === null ? 'browser' : 'audio',
+      lead: null,
+    }
     const late = (layer: Layer) => !layer.pre && !(reducedMotion && layer.motion)
     applyLayers(core, faceLayers, face, late)
     if (act) {
@@ -431,12 +546,14 @@ export function attachAvatarPerformance(model: ParameterModel, options: AvatarPe
     // Untyped callers may still pass the old 'bright'; unknown is neutral.
     setDelivery(value: Delivery) { requested = normaliseEmotion(value) ?? 'neutral' },
     // beatAhead is the beat ~0.12 s later, so the blink guard can engage
-    // before a strong syllable instead of at its peak.
-    setMouth(open: number | null, form: number, beat: number | null = null, ahead: number | null = null) {
+    // before a strong syllable instead of at its peak. vowel is one weight
+    // per VISEMES entry (src/visemes.ts), or null where the clip has none.
+    setMouth(open: number | null, form: number, beat: number | null = null, ahead: number | null = null, vowel: readonly number[] | null = null) {
       alignedBeat = beat === null ? null : Number.isFinite(beat) ? Math.max(0, Math.min(1, beat)) : 0
       beatAhead = ahead === null ? null : Number.isFinite(ahead) ? Math.max(0, Math.min(1, ahead)) : 0
       mouthOpen = open === null ? null : Number.isFinite(open) ? Math.max(0, Math.min(1, open)) : 0
       mouthForm = Number.isFinite(form) ? Math.max(-0.32, Math.min(0.32, form)) : 0
+      mouthVowel = sanitiseVowel(vowel)
       if (mouthOpen === null || mouthOpen < 0.06) {
         emphasisStartedAt = null
         previousAudioOpen = mouthOpen ?? 0
@@ -479,6 +596,7 @@ export function attachAvatarPerformance(model: ParameterModel, options: AvatarPe
         sway: { ...swayValues },
         drift: { ...driftValues },
         blink: { holding: blinkHolding, hold: blinkHold },
+        mouth: { ...mouthReadout },
         act: act ? { name: act.name, envelope: actEnvelope, ageMs: frameTime - act.startedAt } : null,
         reducedMotion: isReduced(),
         prePhysics: usesPrePhysics,
@@ -489,6 +607,8 @@ export function attachAvatarPerformance(model: ParameterModel, options: AvatarPe
       if (debug.hold !== undefined) debugHold = debug.hold === null ? null : normaliseEmotion(debug.hold) ?? 'neutral'
       if (debug.reducedMotion !== undefined) debugReduced = debug.reducedMotion
       if (debug.ignoreGates !== undefined) director?.setOverrides({ ignoreGates: debug.ignoreGates })
+      if (debug.vowel !== undefined) debugVowel = isViseme(debug.vowel) ? debug.vowel : null
+      if (debug.vowels !== undefined) debugVowels = debug.vowels !== false
     },
     destroy() {
       if (destroyed) return

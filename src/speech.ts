@@ -11,9 +11,10 @@ import { createPcm16Blob, createWavBlob, createWavHeader } from './audio-wav.ts'
 import { deliverySpeed } from './delivery.ts'
 import { mouthAtTime, mouthFrames } from './mouth.ts'
 import { createPlaybackClockGuard } from './playback-clock.ts'
-import type { MouthSegment } from './mouth'
+import type { MouthSegment, VisemeWeights } from './mouth'
 import { deliveryAtTime, joinLimit, joinSentence, replySentenceStream, SpeechSentenceStream, upcomingDelivery } from './speech-sentences.ts'
 import type { DeliveryCue, PlaybackCue, SpokenSentence } from './speech-sentences'
+import { withVowels } from './visemes.ts'
 import { DEFAULT_VOICE } from './voice.ts'
 import { ACT_PAUSE_SECONDS, isAct, normaliseEmotion } from '../shared/performance-cues.mjs'
 import type { Act, ActCue } from '../shared/performance-cues.mjs'
@@ -134,8 +135,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   onPlaying: (playing: boolean) => void
   onPreparing: (preparing: boolean) => void
   onDelivery: (delivery: Delivery) => void
-  // beatAhead is given only while an audio source plays.
-  onMouth: (opening: number | null, form: number, beat: number | null, beatAhead?: number | null) => void
+  // beatAhead and vowel are given only while an audio source plays; vowel
+  // is null on frames without a vowel track (src/visemes.ts). Stops and the
+  // system voice keep three arguments.
+  onMouth: (opening: number | null, form: number, beat: number | null, beatAhead?: number | null, vowel?: VisemeWeights | null) => void
   onAudioReady: (ready: boolean) => void
   onProblem: (message: string) => void
   // A laugh, sigh or pause is being performed now: once per act as playback
@@ -320,7 +323,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     const time = audio.currentTime
     const mouth = mouthAtTime(playbackMouth, time)
     callbacks.onMouth(mouth.open, mouth.form, speechBeatAtTime(playbackBeats, time),
-      speechBeatAtTime(playbackBeats, time + BEAT_LOOKAHEAD_SECONDS))
+      speechBeatAtTime(playbackBeats, time + BEAT_LOOKAHEAD_SECONDS), mouth.vowel ?? null)
     if (owns()) scheduleMouthFrame()
   }
   const onPlaying = () => {
@@ -947,7 +950,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         // Check aggregate RIFF dimensions before accepting another part, not
         // later in an ended callback while installing the completed replay.
         createWavHeader(sampleRate, session.total + data.length)
-        const frames = mouthFrames(data, sampleRate)
+        // Shapes from the (already pause-shifted) timings ride on the frames,
+        // so ready-clip sharing, the replay, seeks and cancel carry them.
+        // Open and form are unchanged, so the beats below are too.
+        const frames = withVowels(mouthFrames(data, sampleRate), alignment, duration)
         const start = session.total / sampleRate
         const events = speechBeats(alignment, frames, duration, session.lastBeatPeak - start)
         if (events?.length) session.lastBeatPeak = start + events.at(-1)!.peak

@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { existsSync, readFileSync } from 'node:fs'
 import test from 'node:test'
+import { VISEMES } from '../shared/performance-cues.mjs'
 import { attachAvatarPerformance } from './avatar-performance.ts'
+import { FALLBACK_AVATAR_PROFILE, parseAvatarProfile } from './avatar-profile.ts'
 
 function fixture(reducedMotion = false) {
   let time = 0
@@ -323,4 +325,87 @@ test('the newer tones borrow the closest of the four faces, and the old bright s
   assert.ok(Math.abs(happy.ParamMouthForm - 0.32) < 1e-3)
   const faces = ['neutral', 'happy', 'soft', 'curious'].map(delivery => JSON.stringify(settled(delivery)))
   assert.equal(new Set(faces).size, 4)
+})
+
+test('without vowel shapes in the profile a vowel argument changes nothing', () => {
+  const { actor, frame } = fixture()
+  actor.setActivity('speaking')
+  for (const vowel of [[1, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 1], [0.2, 0.2, 0.2, 0.2, 0.2, 0, 0]]) {
+    actor.setMouth(0.7, 0.2, null, null, vowel)
+    for (const idleMouth of [0, 1]) {
+      const pose = frame(16, idleMouth)
+      assert.equal(pose.ParamMouthOpenY, 0.7)
+      assert.equal(pose.ParamMouthForm, 0.2)
+    }
+    assert.equal(actor.inspect().mouth.source, 'audio')
+  }
+  actor.setMouth(0.6, 0, 0.5, 0.5, [1, 0, 0, 0, 0, 0, 0])
+  assert.equal(frame().ParamAngleY, -0.5 * 0.9, 'the beat still drives the pitch')
+})
+
+// One parameter per shape and no jaw, so each written value is the
+// sanitised weight times the opening.
+function vowelFixture() {
+  const json = structuredClone(FALLBACK_AVATAR_PROFILE)
+  json.mouth.vowels = Object.fromEntries(VISEMES.map(viseme => [viseme, { open: 0, params: { [`ParamShape${viseme.toUpperCase()}`]: 1 } }]))
+  const { profile, problems } = parseAvatarProfile(json)
+  assert.deepEqual(problems, [])
+  let time = 0
+  const values = new Map()
+  const model = new EventEmitter()
+  model.coreModel = {
+    getParameterValueById: id => values.get(id) ?? 0,
+    setParameterValueById: (id, value, weight = 1) => values.set(id, (values.get(id) ?? 0) * (1 - weight) + value * weight),
+    addParameterValueById: (id, value) => values.set(id, (values.get(id) ?? 0) + value),
+  }
+  const actor = attachAvatarPerformance(model, { profile, now: () => time })
+  const frame = () => {
+    time += 16
+    values.clear()
+    values.set('ParamMouthOpenY', 1)
+    model.emit('beforeModelUpdate')
+    return Object.fromEntries(values)
+  }
+  const weights = pose => VISEMES.map(viseme => pose[`ParamShape${viseme.toUpperCase()}`])
+  return { actor, frame, weights }
+}
+
+test('vowel weights are sanitised: non-finite is 0, each is 0..1, a sum above 1 is scaled down, and a bad or empty frame is no track', () => {
+  const { actor, frame, weights } = vowelFixture()
+  actor.setActivity('speaking')
+  const close = (actual, expected, label) => {
+    assert.equal(actual.length, expected.length, label)
+    actual.forEach((value, index) => assert.ok(Math.abs(value - expected[index]) < 1e-12, `${label}[${index}]: ${value} vs ${expected[index]}`))
+  }
+  for (const [label, vowel, expected] of [
+    ['NaN', [NaN, 0.5, 0, 0, 0, 0, 0], [0, 0.5, 0, 0, 0, 0, 0]],
+    ['Infinity', [Infinity, 0.25, -Infinity, 0, 0, 0, 0], [0, 0.25, 0, 0, 0, 0, 0]],
+    ['negative', [-1, 0, 0.5, 0, 0, 0, 0], [0, 0, 0.5, 0, 0, 0, 0]],
+    ['above 1', [2, 0, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0, 0]],
+    ['sum above 1', [0.8, 0.6, 0, 0, 0, 0, 0], [0.8 / 1.4, 0.6 / 1.4, 0, 0, 0, 0, 0]],
+    ['not a number', ['0.5', null, 0.3, 0, 0, 0, 0], [0, 0, 0.3, 0, 0, 0, 0]],
+  ]) {
+    actor.setMouth(1, 0, null, null, vowel)
+    const pose = frame()
+    close(weights(pose), expected, label)
+    const total = expected.reduce((sum, weight) => sum + weight, 0)
+    assert.ok(Math.abs(pose.ParamMouthOpenY - (1 - total)) < 1e-12, `${label}: the jaw keeps the rest`)
+    assert.equal(actor.inspect().mouth.source, 'track', label)
+  }
+  for (const [label, vowel] of [
+    ['too short', [1, 0, 0, 0, 0]], ['too long', [1, 0, 0, 0, 0, 0, 0, 0]], ['not a list', { 0: 1, length: 7 }], ['a string', 'aaaaaaa'],
+    ['all zero', [0, 0, 0, 0, 0, 0, 0]], ['all but zero', [0.0005, 0, 0, 0, 0, 0, 0]], ['all invalid', [NaN, -1, Infinity, -Infinity, 'a', null, undefined]],
+  ]) {
+    actor.setMouth(1, 0, null, null, vowel)
+    const pose = frame()
+    assert.deepEqual(weights(pose), [0, 0, 0, 0, 0, 0, 0], label)
+    assert.equal(pose.ParamMouthOpenY, 1, `${label}: the audio opening, as without a track`)
+    assert.equal(actor.inspect().mouth.source, 'audio', label)
+  }
+  const shared = [0.4, 0, 0, 0, 0, 0, 0]
+  actor.setMouth(1, 0, null, null, shared)
+  shared[0] = 1
+  assert.ok(Math.abs(weights(frame())[0] - 0.4) < 1e-12, 'the caller\'s array is copied')
+  actor.setMouth(0, 0, null)
+  assert.deepEqual(weights(frame()), [0, 0, 0, 0, 0, 0, 0], 'a three-argument stop clears the track')
 })

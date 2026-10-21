@@ -5,8 +5,9 @@ import { mouthAtTime, mouthFrames } from './mouth.ts'
 import { speechBeats, speechBeatAtTime } from './speech-beats.ts'
 import { BROWSER_SPEECH_START_DEADLINE_MS, createSpeechController } from './speech.ts'
 import { groupSentences, replySentenceStream } from './speech-sentences.ts'
+import { withVowels } from './visemes.ts'
 import { collectMinimaxStream } from '../server/minimax.mjs'
-import { ACT_PAUSE_SECONDS } from '../shared/performance-cues.mjs'
+import { ACT_PAUSE_SECONDS, VISEMES } from '../shared/performance-cues.mjs'
 
 class AudioStub extends EventTarget {
   paused = true
@@ -3358,7 +3359,7 @@ test('the completed replay announces each tone change one lead ahead, and a back
   finally { f.close() }
 })
 
-test('onMouth\'s fourth argument is the beat BEAT_LOOKAHEAD_SECONDS ahead, only while an audio source plays', async () => {
+test('onMouth\'s fourth argument is the beat BEAT_LOOKAHEAD_SECONDS ahead and the fifth the vowel, only while an audio source plays', async () => {
   const { BEAT_LOOKAHEAD_SECONDS } = await import('./speech.ts')
   assert.equal(BEAT_LOOKAHEAD_SECONDS, 0.12)
   const sampleRate = 24000, duration = 1.317
@@ -3371,6 +3372,9 @@ test('onMouth\'s fourth argument is the beat BEAT_LOOKAHEAD_SECONDS ahead, only 
   const track = { time: 0, duration: samples.length / sampleRate,
     events: speechBeats({ words: [], characters }, mouthFrames(samples, sampleRate), samples.length / sampleRate) }
   assert.ok(track.events.length > 0, 'fixture has measured audible peaks')
+  const vowels = [{ time: 0, duration: samples.length / sampleRate,
+    frames: withVowels(mouthFrames(samples, sampleRate), { words: [], characters }, samples.length / sampleRate) }]
+  const vowelAt = time => mouthAtTime(vowels, time).vowel ?? null
   const near = (actual, expected) => actual === expected
     || (actual !== null && expected !== null && Math.abs(actual - expected) < 1e-12)
   const mouth = []
@@ -3383,15 +3387,21 @@ test('onMouth\'s fourth argument is the beat BEAT_LOOKAHEAD_SECONDS ahead, only 
     const times = [0.05, ...track.events.flatMap(event => [event.start - 0.1, event.peak - BEAT_LOOKAHEAD_SECONDS, event.peak]), duration - 0.05]
       .filter(time => time >= 0).sort((a, b) => a - b)
     let ahead = 0
-    for (const time of times) {
+    const shaped = new Set()
+    for (const time of [...times, 0.25, 0.95].sort((a, b) => a - b)) {
       f.tick(time)
       const args = mouth.at(-1)
-      assert.equal(args.length, 4)
+      assert.equal(args.length, 5)
       assert.ok(near(args[2], speechBeatAtTime([track], time)), `beat at ${time}`)
       assert.ok(near(args[3], speechBeatAtTime([track], time + BEAT_LOOKAHEAD_SECONDS)), `beat ahead at ${time}`)
+      assert.deepEqual(args[4], vowelAt(time), `vowel at ${time}`)
+      if (args[4]) shaped.add(VISEMES[args[4].indexOf(Math.max(...args[4]))])
       ahead = Math.max(ahead, args[3] ?? 0)
     }
     assert.ok(ahead > 0.1, 'a peak is seen ahead')
+    // 你 is ni (i), 好 is hao (a, then u); nothing before the first voice.
+    assert.equal(vowelAt(0.05), null)
+    assert.deepEqual([...shaped].sort(), ['a', 'i'])
     assert.equal(mouth.at(-1)[3], null, 'nothing ahead past the source end')
     f.audio.pause()
     assert.deepEqual(mouth.at(-1), [0, 0, null], 'a stop keeps three arguments')
@@ -3460,4 +3470,176 @@ test('a late clip in the tone just spoken is announced at install too, since the
     await speaking
   }
   finally { f.close() }
+})
+
+// P4 vowels: the controller builds them per clip (withVowels after the pause
+// shift) and passes them as onMouth's fifth argument during audio playback.
+const twoPeaks = (sampleRate = 24000, duration = 1.317) => Float32Array.from({ length: Math.round(sampleRate * duration) }, (_, index) => {
+  const time = index / sampleRate
+  const envelope = Math.max(0, 1 - Math.abs(time - .25) / .08, 1 - Math.abs(time - .95) / .09)
+  return .09 * envelope * Math.sin(time * Math.PI * 2 * 230)
+})
+const NI_HAO = [{ text: '你', start: .12, end: .42 }, { text: '，', start: .42, end: .6 }, { text: '好', start: .8, end: 1.17 }]
+const PROBE_TIMES = Array.from({ length: 52 }, (_, index) => index * 0.025 + 0.0125)
+function mouthArgs(source, callbacks = {}) {
+  const mouth = []
+  const f = fixture(source.loadModel, source.synthesizeCloud ? { synthesizeCloud: source.synthesizeCloud } : {},
+    { onMouth: (...args) => mouth.push(args), ...callbacks })
+  return { f, mouth }
+}
+
+test('Kokoro and cloud clips without timings pass a null vowel, with open and form unchanged', async () => {
+  const voiced = shapedClip(0.02, 24000, 24000).samples
+  const expected = [{ time: 0, duration: 1, frames: mouthFrames(voiced, 24000) }]
+  const sources = {
+    kokoro: { loadModel: async () => ({ async *stream() { yield { audio: { data: voiced.slice(), sampling_rate: 24000 } } } }) },
+    'cloud words: []': { synthesizeCloud: async () => ({ samples: voiced.slice(), sampleRate: 24000, words: [] }) },
+    'cloud wordAlignmentAvailable []': { synthesizeCloud: async () => ({ samples: voiced.slice(), sampleRate: 24000, words: [], wordAlignmentAvailable: true }) },
+  }
+  for (const [name, source] of Object.entries(sources)) {
+    const { f, mouth } = mouthArgs(source)
+    try {
+      const speaking = f.controller.speak('你好。', 'neutral', undefined, [], source.loadModel ? 'local' : 'cloud')
+      await settle()
+      let opened = 0
+      for (const time of PROBE_TIMES.filter(time => time < 1)) {
+        f.tick(time)
+        const args = mouth.at(-1)
+        assert.equal(args.length, 5, name)
+        assert.equal(args[4], null, `${name} at ${time}`)
+        const frame = mouthAtTime(expected, time)
+        assert.deepEqual([args[0], args[1]], [frame.open, frame.form], `${name} at ${time}`)
+        if (args[0] > 0.3) opened++
+      }
+      assert.ok(opened > 10, `${name}: the mouth still follows the audio`)
+      f.audio.end()
+      await speaking
+    }
+    finally { f.close() }
+  }
+})
+
+test('a pause sentence shows no vowel before ACT_PAUSE_SECONDS, then the track shifted with its timings', async () => {
+  const sampleRate = 24000
+  const voiced = twoPeaks(sampleRate)
+  const pause = Math.round(ACT_PAUSE_SECONDS * sampleRate)
+  const padded = Float32Array.from([...new Float32Array(pause), ...voiced])
+  const shifted = NI_HAO.map(character => ({ ...character, start: character.start + ACT_PAUSE_SECONDS, end: character.end + ACT_PAUSE_SECONDS }))
+  const expected = [{ time: 0, duration: padded.length / sampleRate,
+    frames: withVowels(mouthFrames(padded, sampleRate), { words: [], characters: shifted }, padded.length / sampleRate) }]
+  const unpadded = withVowels(mouthFrames(voiced, sampleRate), { words: [], characters: NI_HAO }, voiced.length / sampleRate)
+  assert.deepEqual(expected[0].frames.slice(16).map(frame => frame.vowel ?? null), unpadded.map(frame => frame.vowel ?? null),
+    'fixture: the pause moves the track by exactly 16 frames')
+  const { f, mouth } = mouthArgs({
+    synthesizeCloud: async () => ({ samples: voiced.slice(), sampleRate, words: [], characters: NI_HAO.map(character => ({ ...character })) }),
+  })
+  try {
+    const speaking = f.controller.speak('你，好。', 'neutral', undefined, [], 'cloud', { acts: [{ start: 0, act: 'pause' }] })
+    await settle()
+    let shaped = 0
+    for (const time of PROBE_TIMES.concat(PROBE_TIMES.map(time => time + 0.4 + 0.3))) {
+      f.tick(time)
+      const args = mouth.at(-1)
+      assert.equal(args.length, 5)
+      if (time < ACT_PAUSE_SECONDS) assert.equal(args[4], null, `nothing during the pause, at ${time}`)
+      assert.deepEqual(args[4], mouthAtTime(expected, time).vowel ?? null, `vowel at ${time}`)
+      if (args[4]) shaped++
+    }
+    assert.ok(shaped > 10, 'the shifted track shapes the spoken part')
+    f.audio.end()
+    await speaking
+  }
+  finally { f.close() }
+})
+
+test('each clip keeps its own vowels in the completed replay, and a backward seek matches live playback', async () => {
+  const sampleRate = 24000
+  const voiced = twoPeaks(sampleRate)
+  const duration = voiced.length / sampleRate
+  // Same audio, different text: only the vowels tell the clips apart.
+  const texts = [['啊', '哈'], ['衣', '你']]
+  let calls = 0
+  const { f, mouth } = mouthArgs({
+    synthesizeCloud: async () => {
+      const [first, second] = texts[calls++]
+      return { samples: voiced.slice(), sampleRate, words: [],
+        characters: [{ text: first, start: .12, end: .42 }, { text: '，', start: .42, end: .6 }, { text: second, start: .8, end: 1.17 }] }
+    },
+  })
+  const strongest = vowel => vowel ? VISEMES[vowel.indexOf(Math.max(...vowel))] : null
+  // Open, form and vowel exactly; a beat read at a clip offset may differ by ulps.
+  const same = (actual, expected, message) => {
+    assert.deepEqual([actual.length, actual[0], actual[1], actual[4]], [expected.length, expected[0], expected[1], expected[4]], message)
+    for (const index of [2, 3])
+      assert.ok(actual[index] === expected[index] || Math.abs(actual[index] - expected[index]) < 1e-12, message)
+  }
+  try {
+    const speaking = f.controller.speak('啊，哈。衣，你。', 'neutral', undefined, [], 'cloud')
+    await settle()
+    const live = []
+    for (let clip = 0; clip < 2; clip++) {
+      const values = []
+      for (const time of PROBE_TIMES) {
+        f.tick(time)
+        values.push(mouth.at(-1))
+      }
+      live.push(values)
+      f.audio.end()
+      await settle()
+    }
+    await speaking
+    assert.equal(calls, 2)
+    assert.deepEqual(new Set(live[0].map(args => strongest(args[4])).filter(Boolean)), new Set(['a']))
+    assert.deepEqual(new Set(live[1].map(args => strongest(args[4])).filter(Boolean)), new Set(['i']))
+    await f.audio.play()
+    for (const clip of [1, 0, 1]) {
+      for (const [index, time] of PROBE_TIMES.entries()) {
+        f.tick(clip * duration + time)
+        same(mouth.at(-1), live[clip][index], `replay clip ${clip} at ${time}`)
+      }
+    }
+    seekTo(f, 0.1)
+    for (const [index, time] of PROBE_TIMES.entries()) {
+      f.tick(time)
+      same(mouth.at(-1), live[0][index], `after a backward seek, at ${time}`)
+    }
+    f.audio.pause()
+    assert.deepEqual(mouth.at(-1), [0, 0, null], 'a stop keeps three arguments')
+    assert.equal(calls, 2, 'no provider calls for replay or seek')
+  }
+  finally { f.close() }
+})
+
+test('beats are identical with and without a vowel track', async () => {
+  const sampleRate = 24000
+  const voiced = twoPeaks(sampleRate)
+  const duration = voiced.length / sampleRate
+  const frames = mouthFrames(voiced, sampleRate)
+  const { vowelUnits } = await import('./visemes.ts')
+  // The same intervals as MiniMax words fail the lead check (the first word
+  // is under half voiced and the next interval is silent): no track.
+  assert.equal(vowelUnits({ words: NI_HAO, wordAlignmentAvailable: true }, frames, duration), null)
+  assert.notEqual(vowelUnits({ words: [], characters: NI_HAO }, frames, duration), null)
+  const runs = {}
+  for (const [name, alignment] of Object.entries({ characters: { words: [], characters: NI_HAO }, words: { words: NI_HAO, wordAlignmentAvailable: true } })) {
+    const { f, mouth } = mouthArgs({
+      synthesizeCloud: async () => ({ samples: voiced.slice(), sampleRate, ...structuredClone(alignment) }),
+    })
+    try {
+      const speaking = f.controller.speak('你，好。', 'neutral', undefined, [], 'cloud')
+      await settle()
+      runs[name] = PROBE_TIMES.map((time) => {
+        f.tick(time)
+        return mouth.at(-1)
+      })
+      f.audio.end()
+      await speaking
+    }
+    finally { f.close() }
+  }
+  assert.ok(runs.characters.some(args => args[4] !== null), 'characters give a track')
+  assert.ok(runs.words.every(args => args[4] === null), 'these words give none')
+  assert.deepEqual(runs.characters.map(args => args.slice(0, 4)), runs.words.map(args => args.slice(0, 4)),
+    'open, form, beat and beat ahead are the same either way')
+  assert.ok(runs.words.some(args => args[2] > 0.1), 'fixture: beats are present')
 })

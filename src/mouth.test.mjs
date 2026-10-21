@@ -128,3 +128,19 @@ test('timeline lookup respects clip boundaries, gaps, partial frames and reverse
   assert.deepEqual(mouthAtTime([], 0), { open: 0, form: 0 })
   assert.deepEqual(mouthAtTime([{ time: 0, duration: 1, frames: [] }], 0.1), { open: 0, form: 0 })
 })
+
+test('timeline lookup returns a frame vowel as stored, none at the end boundary, and the same after a backward seek', () => {
+  const vowel = [0.75, 0.25, 0, 0, 0, 0, 0]
+  const frames = [{ open: 0.4, form: 0.1, vowel }, { open: 0.5, form: 0.2 }, { open: 0.3, form: 0, vowel: [0, 0, 0, 0, 0, 0, 1] }]
+  const segments = [{ time: 1, duration: 0.075, frames }]
+  assert.equal(mouthAtTime(segments, 1.01).vowel, vowel)
+  assert.deepEqual(mouthAtTime(segments, 1.01), { open: 0.4, form: 0.1, vowel })
+  assert.equal(mouthAtTime(segments, 1.03).vowel, undefined)
+  assert.deepEqual(mouthAtTime(segments, 1.06).vowel, [0, 0, 0, 0, 0, 0, 1])
+  // The end boundary is closed, with no vowel left over from the last frame.
+  for (const time of [1.075, 1.2]) {
+    assert.deepEqual(mouthAtTime(segments, time), { open: 0, form: 0 })
+    assert.equal('vowel' in mouthAtTime(segments, time), false)
+  }
+  assert.equal(mouthAtTime(segments, 1.0).vowel, vowel)
+})

@@ -16,7 +16,19 @@
     "motion": ["ParamAngleX", "ParamAngleY", "ParamAngleZ", "ParamBodyAngleX", "ParamBodyAngleY", "ParamBodyAngleZ", "ParamEyeBallX", "ParamEyeBallY", "ParamBreath"],
     "prePhysics": ["ParamAngleX", "ParamAngleZ", "ParamBodyAngleX", "ParamBodyAngleZ"]
   },
-  "mouth": { "formRange": [-0.8, 0.9] },
+  "mouth": {
+    "formRange": [-0.8, 0.9],
+    "vowels": {
+      "_notes": "Starting values; settle with the Vowel hold screenshots. Negative form is a frown on Hiyori.",
+      "a": { "open": 1.3, "form": 0.1 },
+      "e": { "open": 0.95, "form": 0.2 },
+      "i": { "open": 0.6, "form": 0.4 },
+      "o": { "open": 1.0, "form": -0.15 },
+      "u": { "open": 0.6, "form": -0.25 },
+      "n": { "open": 0.55, "form": 0 },
+      "m": { "open": 0 }
+    }
+  },
   "timing": { "easeInMs": 300, "relaxMs": 1000 },
   "expressions": {
     "neutral": {},

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import test from 'node:test'
-import { ACTS, EMOTIONS } from '../shared/performance-cues.mjs'
+import { ACTS, EMOTIONS, VISEMES } from '../shared/performance-cues.mjs'
 import {
   FALLBACK_AVATAR_PROFILE, MAX_PROFILE_PROBLEMS, faceWeightsAt, follow, parseAvatarProfile, pulseEnvelope, resolveAvatarProfile, smoothstep,
 } from './avatar-profile.ts'
@@ -93,6 +93,16 @@ test('an invalid value names its path and replaces only that section with the bu
     ['parameters', json => { json.parameters.prePhysics.push('ParamHairFront') }, 'parameters.prePhysics[4]: ParamHairFront must also be in parameters.motion'],
     ['parameters', json => { json.parameters.eyeOpen = ['A', 'B', 'C', 'D', 'E'] }, 'parameters.eyeOpen: at most 4 parameter ids'],
     ['mouth', json => { json.mouth.formRange = [0.1, 0.6] }, 'mouth.formRange[0]: must be -3..0'],
+    ['mouth', json => { json.mouth.vowels.y = { open: 1 } }, 'mouth.vowels.y: not a viseme (a, i, u, e, o, n, m)'],
+    ['mouth', json => { delete json.mouth.vowels.u }, 'mouth.vowels.u: is required'],
+    ['mouth', json => { json.mouth.vowels.a.open = -0.1 }, 'mouth.vowels.a.open: must be 0..2'],
+    ['mouth', json => { json.mouth.vowels.a.open = 3 }, 'mouth.vowels.a.open: must be 0..2'],
+    ['mouth', json => { json.mouth.vowels.i.form = 3 }, 'mouth.vowels.i.form: must be -2..2'],
+    ['mouth', json => { json.mouth.vowels.e = 'wide' }, 'mouth.vowels.e: must be an object'],
+    ['mouth', json => { json.mouth.vowels.a.params = { 'Param-A': 1 } }, 'mouth.vowels.a.params.Param-A: not a parameter id'],
+    ['mouth', json => { json.mouth.vowels.o.params = { ParamO: 31 } }, 'mouth.vowels.o.params.ParamO: must be -30..30'],
+    ['mouth', json => { json.mouth.vowels = [] }, 'mouth.vowels: must be an object'],
+    ['mouth', json => { json.mouth.vowels.strength = 2 }, 'mouth.vowels.strength: must be 0..1'],
     ['acts', json => { json.acts.sigh.holdMs = 3000; json.acts.sigh.releaseMs = 1000 }, 'acts.sigh: attackMs + holdMs + releaseMs must be at most 4000'],
     ['acts', json => { json.acts.giggle = json.acts.laugh }, 'acts.giggle: not an act'],
     ['motions', json => { json.motions.emotions.happy.motions = Array.from({ length: 9 }, () => ({ group: 'Flick', index: 0 })) }, 'motions.emotions.happy.motions: at most 8 motions'],
@@ -137,6 +147,109 @@ test('unknown keys are reported but kept out, notes are ignored, and at most 20 
   assert.equal(named.profile.id, FALLBACK_AVATAR_PROFILE.id)
   assert.deepEqual(named.problems.map(problem => problem.split(':')[0]), ['id', 'name'])
   assert.deepEqual(named.profile.expressions, clean.expressions, 'a bad id or name does not drop the sections')
+})
+
+// A model with per-vowel parameters (not installed, so it stays here and not
+// in src/avatar-profiles/, whose files must resolve against their model).
+const PARAM_VOWELS = {
+  a: { open: 0, params: { ParamA: 1 } }, i: { open: 0, params: { ParamI: 1 } },
+  u: { open: 0, params: { ParamU: 1 } }, e: { open: 0, params: { ParamE: 1 } },
+  o: { open: 0, params: { ParamO: 1 } }, n: { open: 0.4 }, m: { open: 0 },
+}
+
+test('Hiyori\'s vowel shapes: all seven, jaw and form only, within formRange; the fallback has none', () => {
+  const { profile, problems } = parseAvatarProfile(active())
+  assert.deepEqual(problems, [])
+  const { formRange, vowels } = profile.mouth
+  assert.deepEqual(formRange, [-0.8, 0.9])
+  // Starting values from the P4 design, awaiting the Vowel hold screenshots.
+  assert.deepEqual(vowels, {
+    a: { open: 1.3, form: 0.1 }, e: { open: 0.95, form: 0.2 }, i: { open: 0.6, form: 0.4 },
+    o: { open: 1.0, form: -0.15 }, u: { open: 0.6, form: -0.25 }, n: { open: 0.55, form: 0 }, m: { open: 0 },
+  })
+  for (const viseme of VISEMES) {
+    const shape = vowels[viseme]
+    assert.ok(shape, viseme)
+    assert.equal(shape.params, undefined, `${viseme}: Hiyori has only MouthOpenY and MouthForm`)
+    assert.ok(shape.open >= 0 && shape.open <= 2, viseme)
+    if (shape.form !== undefined) assert.ok(shape.form >= formRange[0] && shape.form <= formRange[1], viseme)
+  }
+  // a is the widest; i, u and n the narrowest; m closes.
+  assert.ok(VISEMES.every(viseme => vowels[viseme].open <= vowels.a.open))
+  for (const narrow of ['i', 'u', 'n']) assert.ok(vowels[narrow].open < vowels.e.open && vowels[narrow].open < vowels.o.open, narrow)
+  assert.equal(vowels.m.open, 0)
+  assert.equal('vowels' in FALLBACK_AVATAR_PROFILE.mouth, false)
+  assert.ok(Object.isFrozen(vowels.a))
+})
+
+test('vowel shapes: n, m, open, form and strength are optional; unknown keys and notes inside are noted only', () => {
+  const clean = parseAvatarProfile(active()).profile
+  const json = active()
+  json.mouth.vowels.a.width = 2
+  json.mouth.vowels.a._why = 'notes go anywhere'
+  json.mouth.vowels._more = 'and here'
+  const parsed = parseAvatarProfile(json)
+  assert.deepEqual(parsed.problems, ['mouth.vowels.a.width: unknown key, ignored'])
+  assert.deepEqual(parsed.profile.mouth, clean.mouth)
+
+  const sparse = active()
+  delete sparse.mouth.vowels.n
+  delete sparse.mouth.vowels.m
+  sparse.mouth.vowels.o = {}
+  sparse.mouth.vowels.strength = 0.5
+  const { profile, problems } = parseAvatarProfile(sparse)
+  assert.deepEqual(problems, [])
+  assert.deepEqual(visible(profile.mouth.vowels).sort(), ['a', 'e', 'i', 'o', 'strength', 'u'])
+  assert.deepEqual(profile.mouth.vowels.o, {}, 'defaults are applied by the engine, not stored')
+  assert.equal(profile.mouth.vowels.strength, 0.5)
+
+  // A form outside formRange is valid (a face bias may bring it back) but noted.
+  const wide = active()
+  wide.mouth.vowels.i.form = 1.2
+  const noted = parseAvatarProfile(wide)
+  assert.deepEqual(noted.problems, ['mouth.vowels.i.form: 1.2 is outside formRange [-0.8, 0.9], so it is clamped'])
+  assert.equal(noted.profile.mouth.vowels.i.form, 1.2)
+  assert.deepEqual(noted.profile.mouth.formRange, [-0.8, 0.9])
+
+  // Without vowels the mouth is formRange alone, as before P4.
+  const none = active()
+  delete none.mouth.vowels
+  assert.deepEqual(parseAvatarProfile(none).profile.mouth, { formRange: [-0.8, 0.9] })
+})
+
+test('resolving drops vowel parameters the model lacks; the ParamA..O example resolves cleanly against a model that has them', () => {
+  const json = active()
+  json.mouth.vowels.a.params = { ParamA: 1, ParamCheek: 0.2 }
+  const { profile, problems } = parseAvatarProfile(json)
+  assert.deepEqual(problems, [])
+  const hiyori = resolveAvatarProfile(profile, { hasParameter: id => !/^Param[AIUEO]$/.test(id), motionCount: () => 3 })
+  assert.deepEqual(hiyori.problems, ['mouth.vowels.a.params.ParamA: ParamA is not in the model, dropped'])
+  assert.deepEqual(hiyori.profile.mouth.vowels.a, { open: 1.3, form: 0.1, params: { ParamCheek: 0.2 } })
+  for (const viseme of VISEMES.filter(viseme => viseme !== 'a')) assert.deepEqual(hiyori.profile.mouth.vowels[viseme], profile.mouth.vowels[viseme], viseme)
+  assert.deepEqual(hiyori.profile.mouth.formRange, profile.mouth.formRange)
+  assert.ok(Object.isFrozen(hiyori.profile.mouth.vowels.a.params))
+
+  const fixture = active()
+  fixture.mouth.vowels = structuredClone(PARAM_VOWELS)
+  const parsed = parseAvatarProfile(fixture)
+  assert.deepEqual(parsed.problems, [])
+  assert.deepEqual(parsed.profile.mouth.vowels, PARAM_VOWELS)
+  const resolved = resolveAvatarProfile(parsed.profile, { hasParameter: () => true, motionCount: () => 3 })
+  assert.deepEqual(resolved.problems, [])
+  assert.deepEqual(resolved.profile.mouth, parsed.profile.mouth)
+
+  const fallback = resolveAvatarProfile(FALLBACK_AVATAR_PROFILE, { hasParameter: () => true, motionCount: () => 1 })
+  assert.deepEqual(fallback.profile.mouth, { formRange: [-0.6, 0.6] })
+
+  // The mouth roles come from open and form; as a vowel parameter they are dropped.
+  const roles = active()
+  roles.mouth.vowels.o.params = { ParamMouthOpenY: 1, ParamMouthForm: -0.5, ParamCheek: 0.1 }
+  const roleProblems = resolveAvatarProfile(parseAvatarProfile(roles).profile, { hasParameter: () => true, motionCount: () => 3 })
+  assert.deepEqual(roleProblems.problems, [
+    'mouth.vowels.o.params.ParamMouthOpenY: ParamMouthOpenY is the mouthOpen parameter, use open instead; dropped',
+    'mouth.vowels.o.params.ParamMouthForm: ParamMouthForm is the mouthForm parameter, use form instead; dropped',
+  ])
+  assert.deepEqual(roleProblems.profile.mouth.vowels.o.params, { ParamCheek: 0.1 })
 })
 
 test('resolving against a model drops unknown ids and unplayable refs with problems, and expands index-less refs', () => {

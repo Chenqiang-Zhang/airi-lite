@@ -2,6 +2,7 @@ import './stage.css'
 
 import type { CloudSpeechClip } from '../cloud-speech'
 import type { Delivery } from '../delivery'
+import type { VisemeWeights } from '../mouth'
 import type { SpokenSentence } from '../speech-sentences'
 import type { ObsStatus } from './stage-client'
 
@@ -31,7 +32,7 @@ const audio = document.querySelector<HTMLAudioElement>('#voice')!
 document.body.dataset.role = role
 
 let live2d: Avatar | null = null
-let latestMouth: { opening: number | null, form: number, beat: number | null, beatAhead: number | null } = { opening: 0, form: 0, beat: null, beatAhead: null }
+let latestMouth: { opening: number | null, form: number, beat: number | null, beatAhead: number | null, vowel: VisemeWeights | null } = { opening: 0, form: 0, beat: null, beatAhead: null, vowel: null }
 let speaking = false
 let preparing = false
 let composing = false
@@ -84,9 +85,10 @@ const speech = createSpeechController(audio, {
     live2d?.setDelivery(faceDelivery())
     speechObserver?.('lead', delivery)
   },
-  onMouth: (opening, form, beat, beatAhead = null) => {
-    latestMouth = { opening, form, beat, beatAhead }
-    live2d?.setMouth(opening, form, beat, beatAhead)
+  onMouth: (opening, form, beat, beatAhead = null, vowel = null) => {
+    // A stop passes three arguments: the defaults clear the vowel as well.
+    latestMouth = { opening, form, beat, beatAhead, vowel }
+    live2d?.setMouth(opening, form, beat, beatAhead, vowel)
   },
   onAudioReady: () => {},
   // Includes "autoplay blocked": the host sees it in the console.
@@ -172,7 +174,7 @@ async function mountAvatar(attempt = 0) {
   try {
     const { mountHiyori } = await loadAvatarModule()
     live2d = await mountHiyori(stageElement, { autoInteract: false, renderProfile: 'auto', fixedFPS: frameRate })
-    live2d.setMouth(latestMouth.opening, latestMouth.form, latestMouth.beat, latestMouth.beatAhead)
+    live2d.setMouth(latestMouth.opening, latestMouth.form, latestMouth.beat, latestMouth.beatAhead, latestMouth.vowel)
     syncAvatar()
     document.body.dataset.avatarProfile = live2d.profile.id
     document.body.dataset.avatarProblems = String(live2d.profile.problemCount)
