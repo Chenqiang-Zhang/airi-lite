@@ -3236,3 +3236,228 @@ test('the web chat controller joins by default', async () => {
   }
   finally { f.close() }
 })
+
+// Leads: the next tone announced TONE_LEAD_SECONDS before playback reaches it,
+// on a separate callback so onDelivery and onAct keep their timing.
+const voicedSecond = () => shapedClip(0.02, 24000, 24000)
+function leadFixture(synthesizeCloud, callbacks = {}) {
+  const log = []
+  const f = fixture(undefined, { synthesizeCloud }, {
+    onDelivery: delivery => log.push(['delivery', delivery]),
+    onLead: delivery => log.push(['lead', delivery]),
+    ...callbacks(log),
+  })
+  return { f, log }
+}
+
+test('a ready next clip of another tone is announced in the last lead of its source, without moving onDelivery', async () => {
+  const { TONE_LEAD_SECONDS } = await import('./speech-sentences.ts')
+  assert.equal(TONE_LEAD_SECONDS, 0.18)
+  const calls = []
+  const { f, log } = leadFixture(async (sentence) => { calls.push(sentence.text); return voicedSecond() }, () => ({}))
+  const end = 1
+  try {
+    const speaking = f.controller.speak('开心。难过。', 'happy', undefined, [{ start: 3, delivery: 'sad' }], 'cloud')
+    await settle()
+    assert.deepEqual(calls, ['开心。', '难过。'], 'the sad clip is ready while the happy one plays')
+    assert.deepEqual(log, [['lead', 'happy'], ['delivery', 'happy'], ['lead', null]],
+      'the first clip is announced as it is installed, then the voice takes over')
+    log.length = 0
+    f.tick(end - 0.19)
+    assert.deepEqual(log, [], 'not yet one lead before the end')
+    f.tick(end - 0.17)
+    assert.deepEqual(log, [['lead', 'sad']])
+    f.tick(end - 0.01)
+    assert.deepEqual(log, [['lead', 'sad']], 'onDelivery keeps the old tone until its source ends')
+    f.audio.end()
+    assert.deepEqual(log, [['lead', 'sad'], ['delivery', 'sad'], ['lead', null]])
+    f.tick(end - 0.17)
+    assert.equal(log.length, 3, 'nothing follows the last clip')
+    f.audio.end()
+    await speaking
+    assert.equal(log.length, 3, 'the completed replay is installed with no lead')
+  }
+  finally { f.close() }
+})
+
+test('a next clip that was not ready is announced as it is installed, before play()', async () => {
+  const second = deferred()
+  let calls = 0
+  const { f, log } = leadFixture(async () => calls++ ? second.promise : voicedSecond(), log => ({
+    onLead: delivery => log.push(['lead', delivery, f.audio.plays]),
+    onPreparing: preparing => log.push(['preparing', preparing]),
+  }))
+  try {
+    const speaking = f.controller.speak('开心。难过。', 'happy', undefined, [{ start: 3, delivery: 'sad' }], 'cloud')
+    await settle()
+    assert.equal(calls, 2)
+    assert.deepEqual(log.filter(entry => entry[0] === 'lead'), [['lead', 'happy', 0], ['lead', null, 1]])
+    f.tick(0.9)
+    f.audio.end()
+    assert.deepEqual(log.filter(entry => entry[0] === 'lead').length, 2, 'nothing to announce while it is missing')
+    log.length = 0
+    second.resolve(voicedSecond())
+    await settle()
+    assert.deepEqual(log.slice(0, 2), [['lead', 'sad', 1], ['preparing', false]], 'before preparing ends and before play()')
+    assert.deepEqual(log.filter(entry => entry[0] !== 'preparing'), [['lead', 'sad', 1], ['delivery', 'sad'], ['lead', null, 2]])
+    f.audio.end()
+    await speaking
+  }
+  finally { f.close() }
+})
+
+test('cancel, speak and beginStream retract a pending lead and start the next turn clean', async () => {
+  for (const entry of ['cancel', 'speak', 'beginStream']) {
+    const { f, log } = leadFixture(async () => voicedSecond(), () => ({}))
+    try {
+      void f.controller.speak('开心。难过。', 'happy', undefined, [{ start: 3, delivery: 'sad' }], 'cloud')
+      await settle()
+      f.tick(0.83)
+      assert.deepEqual(log.at(-1), ['lead', 'sad'])
+      log.length = 0
+      let stream = null
+      if (entry === 'cancel') f.controller.cancel()
+      else if (entry === 'speak') void f.controller.speak('开心。', 'happy', undefined, [], 'cloud')
+      else stream = f.controller.beginStream('', 'happy', undefined, 'cloud')
+      assert.deepEqual(log, [['lead', null]], entry)
+      f.controller.cancel()
+      assert.deepEqual(log, [['lead', null]], `${entry}: only on a change`)
+      // The tone just spoken is announced again: nothing is carried over.
+      if (entry === 'beginStream') {
+        stream = f.controller.beginStream('', 'happy', undefined, 'cloud')
+        stream.push('开心。')
+        stream.finish()
+      }
+      else void f.controller.speak('开心。', 'happy', undefined, [], 'cloud')
+      await settle()
+      assert.deepEqual(log, [['lead', null], ['lead', 'happy'], ['delivery', 'happy'], ['lead', null]], entry)
+    }
+    finally { f.close() }
+  }
+})
+
+test('the completed replay announces each tone change one lead ahead, and a backward seek recomputes it', async () => {
+  const { f, log } = leadFixture(async () => voicedSecond(), () => ({}))
+  try {
+    await playThrough(f, f.controller.speak('开心。难过。', 'happy', undefined, [{ start: 3, delivery: 'sad' }], 'cloud'))
+    log.length = 0
+    await f.audio.play()
+    assert.deepEqual(log, [['delivery', 'happy']])
+    f.tick(0.81)
+    assert.deepEqual(log, [['delivery', 'happy']])
+    f.tick(0.83)
+    assert.deepEqual(log, [['delivery', 'happy'], ['lead', 'sad']], 'the sad cue at 1 s is announced at 0.82 s')
+    seekTo(f, 0.2)
+    assert.deepEqual(log.slice(2), [['lead', null]], 'a backward seek takes it back')
+    f.tick(0.83)
+    f.tick(1.05)
+    assert.deepEqual(log.slice(2), [['lead', null], ['lead', 'sad'], ['delivery', 'sad'], ['lead', null]])
+    f.tick(1.9)
+    assert.equal(log.length, 6, 'nothing after the last cue')
+  }
+  finally { f.close() }
+})
+
+test('onMouth\'s fourth argument is the beat BEAT_LOOKAHEAD_SECONDS ahead, only while an audio source plays', async () => {
+  const { BEAT_LOOKAHEAD_SECONDS } = await import('./speech.ts')
+  assert.equal(BEAT_LOOKAHEAD_SECONDS, 0.12)
+  const sampleRate = 24000, duration = 1.317
+  const samples = Float32Array.from({ length: sampleRate * duration }, (_, index) => {
+    const time = index / sampleRate
+    const envelope = Math.max(0, 1 - Math.abs(time - .25) / .08, 1 - Math.abs(time - .95) / .09)
+    return .09 * envelope * Math.sin(time * Math.PI * 2 * 230)
+  })
+  const characters = [{ text: '你', start: .12, end: .42 }, { text: '，', start: .42, end: .6 }, { text: '好', start: .8, end: 1.17 }]
+  const track = { time: 0, duration: samples.length / sampleRate,
+    events: speechBeats({ words: [], characters }, mouthFrames(samples, sampleRate), samples.length / sampleRate) }
+  assert.ok(track.events.length > 0, 'fixture has measured audible peaks')
+  const near = (actual, expected) => actual === expected
+    || (actual !== null && expected !== null && Math.abs(actual - expected) < 1e-12)
+  const mouth = []
+  const f = fixture(undefined, {
+    async synthesizeCloud() { return { samples: samples.slice(), sampleRate, words: [], characters: characters.map(character => ({ ...character })) } },
+  }, { onMouth: (...args) => mouth.push(args) })
+  try {
+    const speaking = f.controller.speak('你，好。', 'neutral', undefined, [], 'cloud')
+    await settle()
+    const times = [0.05, ...track.events.flatMap(event => [event.start - 0.1, event.peak - BEAT_LOOKAHEAD_SECONDS, event.peak]), duration - 0.05]
+      .filter(time => time >= 0).sort((a, b) => a - b)
+    let ahead = 0
+    for (const time of times) {
+      f.tick(time)
+      const args = mouth.at(-1)
+      assert.equal(args.length, 4)
+      assert.ok(near(args[2], speechBeatAtTime([track], time)), `beat at ${time}`)
+      assert.ok(near(args[3], speechBeatAtTime([track], time + BEAT_LOOKAHEAD_SECONDS)), `beat ahead at ${time}`)
+      ahead = Math.max(ahead, args[3] ?? 0)
+    }
+    assert.ok(ahead > 0.1, 'a peak is seen ahead')
+    assert.equal(mouth.at(-1)[3], null, 'nothing ahead past the source end')
+    f.audio.pause()
+    assert.deepEqual(mouth.at(-1), [0, 0, null], 'a stop keeps three arguments')
+    f.audio.end()
+    await speaking
+  }
+  finally { f.close() }
+
+  const browser = []
+  const g = fixture(undefined, {}, { onMouth: (...args) => browser.push(args) })
+  try {
+    const speaking = g.controller.speak('你好。', 'neutral', undefined, [], 'browser')
+    await settle()
+    const utterance = g.utterances[0]
+    utterance.onstart()
+    utterance.onpause()
+    utterance.onresume()
+    utterance.onend()
+    await speaking
+    assert.deepEqual(browser, [[0, 0, null], [null, 0, null], [0, 0, null], [null, 0, null], [0, 0, null]],
+      'the system voice passes the same three arguments as before')
+  }
+  finally { g.close() }
+})
+
+test('a pause or a blocked play takes back an announced tone; playing again announces it again', async () => {
+  const { f, log } = leadFixture(async () => voicedSecond(), () => ({}))
+  try {
+    void f.controller.speak('开心。难过。', 'happy', undefined, [{ start: 3, delivery: 'sad' }], 'cloud')
+    await settle()
+    f.tick(0.83)
+    assert.deepEqual(log.at(-1), ['lead', 'sad'])
+    f.audio.pause()
+    assert.deepEqual(log.at(-1), ['lead', null], 'paused inside the lead window: the face may relax')
+    await f.audio.play()
+    f.tick(0.84)
+    assert.deepEqual(log.at(-1), ['lead', 'sad'], 'the next playing frame announces it again')
+  }
+  finally { f.close() }
+
+  const blocked = leadFixture(async () => voicedSecond(), () => ({}))
+  blocked.f.audio.play = async function () { this.plays++; throw new DOMException('blocked', 'NotAllowedError') }
+  try {
+    void blocked.f.controller.speak('开心。', 'happy', undefined, [], 'cloud')
+    await settle()
+    await settle()
+    assert.deepEqual(blocked.log, [['lead', 'happy'], ['lead', null]], 'an install lead is taken back when autoplay is refused')
+  }
+  finally { blocked.f.close() }
+})
+
+test('a late clip in the tone just spoken is announced at install too, since the face may have relaxed meanwhile', async () => {
+  const second = deferred()
+  let calls = 0
+  const { f, log } = leadFixture(async () => calls++ ? second.promise : voicedSecond(), () => ({}))
+  try {
+    const speaking = f.controller.speak('开心。还开心。', 'happy', undefined, [], 'cloud', { join: false })
+    await settle()
+    f.tick(0.9)
+    f.audio.end()
+    log.length = 0
+    second.resolve(voicedSecond())
+    await settle()
+    assert.deepEqual(log, [['lead', 'happy'], ['delivery', 'happy'], ['lead', null]], 'announced at install, retracted on the first frame')
+    f.audio.end()
+    await speaking
+  }
+  finally { f.close() }
+})

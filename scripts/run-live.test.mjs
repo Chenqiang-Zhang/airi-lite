@@ -35,3 +35,10 @@ test('build steps run the packages\' own JavaScript entries, never a shell shim'
   assert.throws(() => binScript('missing', '/nowhere', read), /has no command/)
   assert.equal(binScript('tool', '/r', () => JSON.stringify({ bin: 'cli.js' })), join('/r', 'node_modules', 'tool', 'cli.js'))
 })
+
+test('the avatar profile is checked as JSON before the build, with a plain message', async () => {
+  const { checkAvatarProfile } = await import('./run-live.mjs')
+  assert.doesNotThrow(() => checkAvatarProfile())
+  assert.throws(() => checkAvatarProfile('/repo', () => '{ "version": 1, }'), /avatar profile .*active\.json is not valid JSON/)
+  assert.throws(() => checkAvatarProfile('/repo', () => { throw new Error('ENOENT: no such file') }), /is not valid JSON: ENOENT/)
+})

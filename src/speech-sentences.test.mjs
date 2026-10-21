@@ -534,3 +534,40 @@ test('takeReady never waits, takes only what accept wants, and the iterator neit
   cancelled.cancel()
   assert.equal(cancelled.takeReady(() => true), undefined)
 })
+
+test('upcomingDelivery announces a tone change one lead ahead, inside the source or from the next clip', async () => {
+  const { TONE_LEAD_SECONDS, upcomingDelivery } = await import('./speech-sentences.ts')
+  assert.equal(TONE_LEAD_SECONDS, 0.18)
+  const cues = [{ time: 0, delivery: 'happy' }, { time: 1, delivery: 'sad' }]
+  // A change within the source (the completed replay).
+  assert.equal(upcomingDelivery(cues, 0.81, 2, null), null, 'more than a lead before the cue')
+  assert.equal(upcomingDelivery(cues, 0.83, 2, null), 'sad')
+  assert.equal(upcomingDelivery(cues, 0.83, 2, 'shy'), 'sad', 'next only counts past the end')
+  assert.equal(upcomingDelivery(cues, 1, 2, null), null, 'nothing once it is the current tone')
+  assert.equal(upcomingDelivery(cues, 0.2, 2, null), null, 'a backward seek takes it back')
+  // A change into the next clip past the end.
+  assert.equal(upcomingDelivery(cues, 1.81, 2, 'shy'), null)
+  assert.equal(upcomingDelivery(cues, 1.83, 2, 'shy'), 'shy')
+  // The same tone, or no next clip ready.
+  assert.equal(upcomingDelivery(cues, 1.9, 2, 'sad'), null)
+  assert.equal(upcomingDelivery(cues, 1.9, 2, null), null)
+  // At or past the end.
+  assert.equal(upcomingDelivery(cues, 2, 2, 'shy'), 'shy')
+  assert.equal(upcomingDelivery(cues, 2.5, 2, 'shy'), 'shy')
+  assert.equal(upcomingDelivery(cues, 2.5, 2, null), null)
+  assert.equal(upcomingDelivery(cues, 2.5, 2, 'sad'), null)
+  // A custom lead.
+  assert.equal(upcomingDelivery(cues, 0.5, 2, null, 0.5), 'sad', 'a cue exactly one lead ahead counts')
+  // A cue inside the source's last lead (a short final clip in a replay) is
+  // announced and stays announced until it is spoken.
+  const short = [{ time: 0, delivery: 'happy' }, { time: 1.9, delivery: 'shy' }]
+  assert.equal(upcomingDelivery(short, 1.75, 2, null), 'shy')
+  assert.equal(upcomingDelivery(short, 1.85, 2, null), 'shy', 'not taken back once time + lead passes the end')
+  assert.equal(upcomingDelivery(short, 1.85, 2, 'sad'), 'shy', 'the cue inside the source wins over the next clip')
+  assert.equal(upcomingDelivery(cues, 0.4, 2, null, 0.5), null)
+  assert.equal(upcomingDelivery(cues, 1.6, 2, 'shy', 0.5), 'shy')
+  assert.equal(upcomingDelivery(cues, 0.99, 2, null, 0), null, 'no lead looks at nothing ahead')
+  // Before any cue the tone is neutral, as in deliveryAtTime.
+  assert.equal(upcomingDelivery([], 0, 0, 'happy'), 'happy')
+  assert.equal(upcomingDelivery([], 0, 0, 'neutral'), null)
+})

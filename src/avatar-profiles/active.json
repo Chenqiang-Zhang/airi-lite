@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "id": "hiyori",
+  "name": "Hiyori Momose (Live2D free sample)",
+  "_notes": [
+    "moc3 ranges: ParamCheek -1..0 (default 0 = blush fully on; it can only fade), MouthForm -2..1, EyeOpen 0..1.2, Brow -1..1, Angle -30..30, BodyAngle -10..10. Physics inputs: AngleX, AngleZ, BodyAngleX, BodyAngleZ.",
+    "neutral/soft/curious and activities are the pre-P3 constants (pinned by src/avatar-performance.snapshot.json). happy and shy were made stronger on 2026-10-21, chosen from screenshots: on Hiyori an eye smile only shows once the eyes are partly closed, so they narrow the eyes (EyeOpen scale) and raise EyeSmile, and the mouth range goes up to 0.9 for happy's smile. Everything else was checked with stage.html?debug=performance (docs/verification/2026-10-21-p3-performance.md)."
+  ],
+  "model": "models/hiyori/hiyori_free_t08.model3.json",
+  "layout": { "fitWidth": 0.9, "fitHeight": 0.94, "anchorY": 1.04, "portraitFitHeight": 1.8, "portraitAnchorY": 1.66 },
+  "parameters": {
+    "mouthOpen": "ParamMouthOpenY",
+    "mouthForm": "ParamMouthForm",
+    "eyeOpen": ["ParamEyeLOpen", "ParamEyeROpen"],
+    "headPitch": "ParamAngleY",
+    "motion": ["ParamAngleX", "ParamAngleY", "ParamAngleZ", "ParamBodyAngleX", "ParamBodyAngleY", "ParamBodyAngleZ", "ParamEyeBallX", "ParamEyeBallY", "ParamBreath"],
+    "prePhysics": ["ParamAngleX", "ParamAngleZ", "ParamBodyAngleX", "ParamBodyAngleZ"]
+  },
+  "mouth": { "formRange": [-0.8, 0.9] },
+  "timing": { "easeInMs": 300, "relaxMs": 1000 },
+  "expressions": {
+    "neutral": {},
+    "happy": { "mouthForm": 0.6, "add": { "ParamCheek": 0.18 }, "scale": { "ParamEyeLOpen": 0.72, "ParamEyeROpen": 0.72 }, "blend": { "ParamEyeLSmile": [1, 0.9], "ParamEyeRSmile": [1, 0.9] } },
+    "soft": { "mouthForm": -0.12, "blend": { "ParamCheek": [0, 0.9], "ParamEyeLSmile": [0, 0.9], "ParamEyeRSmile": [0, 0.9], "ParamBrowLForm": [-0.16, 0.9], "ParamBrowRForm": [-0.16, 0.9] } },
+    "curious": { "mouthForm": 0.18, "add": { "ParamBrowLForm": 0.16, "ParamBrowRForm": 0.16 } },
+    "surprised": { "mouthForm": 0, "add": { "ParamBrowLForm": 0.45, "ParamBrowRForm": 0.45, "ParamAngleY": 1.5 }, "scale": { "ParamEyeLOpen": 1.15, "ParamEyeROpen": 1.15 }, "blend": { "ParamEyeLSmile": [0, 0.8], "ParamEyeRSmile": [0, 0.8] } },
+    "sad": { "mouthForm": -0.4, "add": { "ParamAngleY": -2, "ParamEyeBallY": -0.15 }, "scale": { "ParamEyeLOpen": 0.85, "ParamEyeROpen": 0.85 }, "blend": { "ParamCheek": [-0.5, 0.8], "ParamEyeLSmile": [0, 0.9], "ParamEyeRSmile": [0, 0.9], "ParamBrowLForm": [-0.45, 0.85], "ParamBrowRForm": [-0.45, 0.85] } },
+    "pout": { "mouthForm": -0.5, "add": { "ParamAngleZ": -4, "ParamEyeBallX": 0.15 }, "scale": { "ParamEyeLOpen": 0.92, "ParamEyeROpen": 0.92 }, "blend": { "ParamEyeLSmile": [0, 0.9], "ParamEyeRSmile": [0, 0.9], "ParamBrowLForm": [-0.7, 0.85], "ParamBrowRForm": [-0.7, 0.85] } },
+    "shy": { "mouthForm": 0.3, "add": { "ParamAngleY": -2.5, "ParamAngleZ": 3, "ParamEyeBallX": -0.15, "ParamEyeBallY": -0.25 }, "scale": { "ParamEyeLOpen": 0.82, "ParamEyeROpen": 0.82 }, "blend": { "ParamEyeLSmile": [0.8, 0.85], "ParamEyeRSmile": [0.8, 0.85], "ParamBrowLForm": [-0.2, 0.6], "ParamBrowRForm": [-0.2, 0.6] } }
+  },
+  "activities": {
+    "attentive": { "add": { "ParamAngleY": 1.5, "ParamAngleZ": -1.2, "ParamEyeBallY": 0.06 } },
+    "thinking": { "add": { "ParamAngleX": -3, "ParamAngleY": 1.8, "ParamAngleZ": 2.2, "ParamEyeBallX": -0.12, "ParamEyeBallY": 0.1 } }
+  },
+  "acts": {
+    "laugh": { "attackMs": 80, "holdMs": 500, "releaseMs": 400, "mouthForm": 0.25, "followVoice": 0.6,
+      "blend": { "ParamEyeLSmile": [0.85, 0.9], "ParamEyeRSmile": [0.85, 0.9] },
+      "add": { "ParamAngleZ": 2 },
+      "oscillate": { "ParamAngleY": { "amplitude": 1.5, "periodMs": 220 }, "ParamBodyAngleY": { "amplitude": 1.5, "periodMs": 220, "phase": 0.6 } } },
+    "sigh": { "attackMs": 300, "holdMs": 300, "releaseMs": 700, "mouthForm": -0.1,
+      "add": { "ParamAngleY": -3.5, "ParamBodyAngleY": -1.5, "ParamBrowLForm": -0.15, "ParamBrowRForm": -0.15 },
+      "scale": { "ParamEyeLOpen": 0.75, "ParamEyeROpen": 0.75 } },
+    "pause": { "attackMs": 150, "holdMs": 250, "releaseMs": 350,
+      "add": { "ParamAngleX": 2.5, "ParamAngleY": 2, "ParamEyeBallX": 0.35, "ParamEyeBallY": 0.3, "ParamBrowLForm": 0.1, "ParamBrowRForm": 0.1 } }
+  },
+  "motions": {
+    "_notes": "Every non-Idle Hiyori motion is a strong reaction, so there is no turnStart. Checked by screenshot on 2026-10-21 (stage.html?debug=performance): Tap m06 is a startled arm flare, Tap@Body m07 arms out then a look aside, FlickDown m04 a head tilt ending eyes closed, Flick m03 a bouncy sway. Flick@Body m08 holds AngleY -30 for about 2 s but reads as a gentle downcast with troubled brows, face still visible, so it is sad's gesture.",
+    "minGapMs": 8000,
+    "maxPerTurn": 2,
+    "tap": { "motions": [{ "group": "Tap" }] },
+    "emotions": {
+      "happy": { "chance": 0.4, "cooldownMs": 20000, "motions": [{ "group": "Flick", "index": 0 }] },
+      "surprised": { "chance": 0.8, "cooldownMs": 15000, "motions": [{ "group": "Tap", "index": 0 }] },
+      "shy": { "chance": 0.7, "cooldownMs": 15000, "motions": [{ "group": "Tap@Body", "index": 0 }] },
+      "pout": { "chance": 0.6, "cooldownMs": 20000, "motions": [{ "group": "FlickDown", "index": 0 }] },
+      "sad": { "chance": 0.5, "cooldownMs": 30000, "motions": [{ "group": "Flick@Body", "index": 0 }] }
+    },
+    "acts": {
+      "laugh": { "chance": 0.5, "cooldownMs": 15000, "motions": [{ "group": "Flick", "index": 0 }] }
+    },
+    "idle": { "group": "Idle", "busyWeights": [3, 1, 0], "calmOnBusy": true }
+  },
+  "speaking": {
+    "envelope": { "attackMs": 120, "releaseMs": 600, "fullAt": 0.5 },
+    "sway": { "ParamBodyAngleX": { "amplitude": 1.2, "periodMs": 2900 }, "ParamBodyAngleZ": { "amplitude": 0.9, "periodMs": 4100, "phase": 1.1 } },
+    "drift": { "ParamAngleX": { "amplitude": 1.5, "periodMs": 5300 }, "ParamAngleZ": { "amplitude": 1.0, "periodMs": 3700, "phase": 1.3 } },
+    "blink": { "open": 1, "minBeat": 0.15, "minEmphasis": 0.35, "engageAbove": 0.9, "attackMs": 40, "releaseMs": 160 }
+  }
+}

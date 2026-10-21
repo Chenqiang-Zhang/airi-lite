@@ -15,6 +15,10 @@ export interface AvatarContextOptions {
   cancel?: (handle: unknown) => void
 }
 
+// The pages' hold: the tone lead already bridges tone changes, so the spoken
+// face only needs to cover a short synthesis gap before it relaxes.
+export const SPOKEN_FACE_HOLD_MS = 1_500
+
 /** Keep a brief facial context across waiting and actual speech, then release it. */
 export function createAvatarContext(options: AvatarContextOptions) {
   const schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs))

@@ -278,3 +278,21 @@ export function deliveryAtTime(cues: PlaybackCue[], time: number): Delivery {
   }
   return delivery
 }
+
+// How early a tone change is announced, so the face's 300 ms ease is about
+// half in at the first word. Aiming at 0.15 s: the speech loop and the avatar
+// each sample per frame (30 fps in OBS) and may lose up to a frame apiece.
+export const TONE_LEAD_SECONDS = 0.18
+
+// The tone this source will switch to within `lead` seconds, or null when it
+// stays the same. Past the source `end` the next queued clip's tone counts
+// (`next`); null there means nothing is ready, so nothing is announced.
+export function upcomingDelivery(cues: PlaybackCue[], time: number, end: number, next: Delivery | null, lead = TONE_LEAD_SECONDS): Delivery | null {
+  const current = deliveryAtTime(cues, time)
+  // A cue still inside this source wins over the next source's tone, so a
+  // short last clip in a replay is not announced and then taken back.
+  const ahead = deliveryAtTime(cues, Math.min(time + lead, end))
+  if (ahead !== current)
+    return ahead
+  return time + lead >= end && next !== null && next !== current ? next : null
+}

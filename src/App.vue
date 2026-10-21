@@ -14,7 +14,7 @@ import type { ConversationMessage } from './conversation'
 import { createChatScrollController } from './chat-scroll'
 import { createAssistantMessage, createChatTurnCoordinator, createComposerGuard, interruptAssistantMessage, prepareTypedMessage } from './chat-turn'
 import type { AvatarActivity } from './avatar-performance'
-import { createAvatarContext } from './avatar-context'
+import { createAvatarContext, SPOKEN_FACE_HOLD_MS } from './avatar-context'
 import { loadAvatarModule } from './avatar-startup'
 import { loadAvatarRenderProfile, saveAvatarRenderProfile } from './avatar-render-settings'
 import type { AvatarRenderBudget } from './avatar-rendering'
@@ -101,10 +101,13 @@ if (savedAccessCode && !accessCode.value) {
   lastError.value = INVALID_ACCESS_CODE_MESSAGE
 }
 let live2d: Awaited<ReturnType<typeof import('./live2d')['mountHiyori']>> | null = null
-const avatarContext = createAvatarContext({ onChange: delivery => live2d?.setDelivery(delivery) })
+// The next tone, announced just before its audio: the face eases in early.
+let leadDelivery: Delivery | null = null
+const faceDelivery = () => leadDelivery ?? avatarContext.current
+const avatarContext = createAvatarContext({ onChange: () => live2d?.setDelivery(faceDelivery()), holdMs: SPOKEN_FACE_HOLD_MS })
 const avatarMountController = new AbortController()
 let viewDisposed = false
-let latestMouth: { opening: number | null, form: number, beat: number | null } = { opening: 0, form: 0, beat: null }
+let latestMouth: { opening: number | null, form: number, beat: number | null, beatAhead: number | null } = { opening: 0, form: 0, beat: null, beatAhead: null }
 let speech: ReturnType<typeof createSpeechController> | null = null
 let activeCloudProvider: 'minimax' | 'elevenlabs' | 'local' = 'minimax'
 let activeCloudRegion: 'cn' | 'global' = 'cn'
@@ -158,13 +161,23 @@ onMounted(async () => {
     onState: state => (voiceState.value = state),
     onPlaying: playing => (isSpeaking.value = playing),
     onPreparing: preparing => (isPreparingSpeech.value = preparing),
-    onDelivery: delivery => (activeDelivery.value = delivery),
-    onMouth: (opening, form, beat) => {
-      latestMouth = { opening, form, beat }
-      live2d?.setMouth(opening, form, beat)
+    onDelivery: (delivery) => {
+      activeDelivery.value = delivery
+      live2d?.cueTone(delivery)
+    },
+    onLead: (delivery) => {
+      leadDelivery = delivery
+      if (delivery) live2d?.cueTone(delivery)
+      live2d?.setDelivery(faceDelivery())
+    },
+    onMouth: (opening, form, beat, beatAhead = null) => {
+      latestMouth = { opening, form, beat, beatAhead }
+      live2d?.setMouth(opening, form, beat, beatAhead)
     },
     onAudioReady: ready => (audioAvailable.value = ready),
     onProblem: message => (voiceProblem.value = message),
+    // A laugh/sigh/pause is being performed: its face pulse and gesture.
+    onAct: act => live2d?.performAct(act),
   }, {
     synthesizeCloud: async (sentence, signal) => {
       const provider = activeCloudProvider
@@ -201,7 +214,7 @@ onMounted(async () => {
     live2d = avatar
     // A user may have changed the preference while model assets were loading.
     activeRenderBudget.value = live2d.setRenderProfile(selectedRenderProfile.value)
-    live2d.setMouth(latestMouth.opening, latestMouth.form, latestMouth.beat)
+    live2d.setMouth(latestMouth.opening, latestMouth.form, latestMouth.beat, latestMouth.beatAhead)
     syncAvatarActivity()
     modelStatus.value = ''
   }
@@ -229,7 +242,7 @@ function syncAvatarActivity() {
     spokenDelivery: activeDelivery.value,
   })
   // Also sync a late-mounted model when the cue itself has not changed.
-  live2d?.setDelivery(avatarContext.current)
+  live2d?.setDelivery(faceDelivery())
 }
 watch([avatarActivity, activeDelivery, isGenerating, isPreparingSpeech], syncAvatarActivity)
 watch(() => [messages.value.length, messages.value.at(-1)?.id, messages.value.at(-1)?.text], () => chatScroll?.notifyContentChanged(), { flush: 'post' })
@@ -258,6 +271,8 @@ async function refreshProviderStatus() {
 }
 
 function speak(text: string, delivery: Delivery = 'neutral', cues: DeliveryCue[] = [], acts: ActCue[] = []) {
+  // Every speak is a new reply for gestures, as on the stage (replays too).
+  live2d?.beginTurn()
   activeVoice.value = selectedVoice.value
   activeSpeechEngine.value = speechPolicy.value.engine
   if (activeSpeechEngine.value === 'cloud') pinCloudProvider()
@@ -297,6 +312,8 @@ async function sendMessage() {
       userMemory: userMemory.value, accessProtected: accessProtected.value, accessCode: accessCode.value,
     }), (prepared) => {
       live2d?.clearReaction()
+      // A fresh gesture budget and tone dedupe for this reply.
+      live2d?.beginTurn()
       avatarContext.beginTurn(prepared.text)
       voiceProblem.value = ''
       lastError.value = ''
@@ -521,6 +538,7 @@ function previewVoice(voice: VoiceId) {
   activeDelivery.value = 'neutral'
   activeVoice.value = voice
   activeSpeechEngine.value = 'local'
+  live2d?.beginTurn()
   void speech?.speak('嗨，我是日和。今天想听你说一件小事，也可以让我先讲个奇怪的想法。', 'neutral', voice, [], 'local')
 }
 
@@ -536,6 +554,7 @@ function previewSpeechMode() {
   activeVoice.value = draftVoice.value
   activeSpeechEngine.value = engine
   if (engine === 'cloud') pinCloudProvider()
+  live2d?.beginTurn()
   void speech?.speak('诶，你终于来了！我刚才还在想，今天要不要偷偷多吃一块蛋糕。', 'happy', draftVoice.value, [], engine)
 }
 

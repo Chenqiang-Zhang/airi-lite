@@ -53,6 +53,12 @@ export function resolveStageRole(requested: string | null, insideObs: boolean): 
   return insideObs ? 'obs' : 'preview'
 }
 
+// The DEV-only ?debug=performance panel: exactly that value, on a preview
+// page outside OBS. Anything else (role=obs, OBS's own browser) is the stream.
+export function shouldShowPerformanceDebug(debug: string | null, role: StageRole, insideObs: boolean): boolean {
+  return debug === 'performance' && role === 'preview' && !insideObs
+}
+
 export function isStageProblem(message: string): boolean {
   return !PROGRESS_MESSAGES.has(message)
 }

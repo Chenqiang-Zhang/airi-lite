@@ -1,0 +1,134 @@
+/* DEV-only ?debug=performance panel. Every rule is scoped to the debug page,
+   and this file ships only in the panel's own chunk, never in the stream. */
+
+body[data-debug="performance"][data-debug-background="dark"] {
+  background: #1f1f24 !important;
+}
+
+body[data-debug="performance"][data-debug-background="green"] {
+  background: #00b140 !important;
+}
+
+body[data-debug="performance"][data-debug-background="checker"] {
+  background: repeating-conic-gradient(#8a8a8a 0 25%, #c8c8c8 0 50%) 0 0 / 32px 32px !important;
+}
+
+body[data-debug="performance"] #performance-debug {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  width: 300px;
+  overflow-y: auto;
+  padding: 8px 10px 24px;
+  color: #eee;
+  background: rgb(20 18 24 / 88%);
+  font: 11px/1.35 ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+body[data-debug="performance"][data-debug-panel="hidden"] #performance-debug {
+  display: none;
+}
+
+/* The badge sits under the panel otherwise. */
+body[data-debug="performance"] #connection {
+  right: 316px;
+}
+
+body[data-debug="performance"][data-debug-panel="hidden"] #connection {
+  right: 24px;
+}
+
+#performance-debug header {
+  margin-bottom: 6px;
+}
+
+#performance-debug .pd-muted {
+  color: #999;
+}
+
+#performance-debug .pd-row {
+  margin: 0 0 8px;
+}
+
+#performance-debug h3 {
+  margin: 0 0 3px;
+  color: #b8a6ff;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+#performance-debug .pd-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 4px;
+  align-items: center;
+}
+
+#performance-debug button,
+#performance-debug select {
+  padding: 2px 6px;
+  border: 1px solid #555;
+  border-radius: 4px;
+  color: #eee;
+  background: #2c2833;
+  font: inherit;
+  cursor: pointer;
+}
+
+#performance-debug button:hover {
+  background: #3d3747;
+}
+
+#performance-debug label {
+  white-space: nowrap;
+}
+
+#performance-debug .pd-block > div {
+  overflow-wrap: anywhere;
+}
+
+#performance-debug .pd-bar {
+  display: grid;
+  grid-template-columns: 62px 1fr 34px;
+  gap: 4px;
+  align-items: center;
+}
+
+#performance-debug .pd-track {
+  height: 6px;
+  background: #3a3542;
+}
+
+#performance-debug .pd-track i {
+  display: block;
+  height: 100%;
+  background: #b8a6ff;
+}
+
+#performance-debug .pd-bar b {
+  font-weight: 400;
+  text-align: right;
+}
+
+#performance-debug .pd-list {
+  max-height: 180px;
+  margin: 3px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+#performance-debug .pd-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+#performance-debug .pd-table td {
+  padding: 0 2px;
+}
+
+#performance-debug .pd-table td:not(:first-child) {
+  text-align: right;
+}

@@ -12,7 +12,7 @@ import { deliverySpeed } from './delivery.ts'
 import { mouthAtTime, mouthFrames } from './mouth.ts'
 import { createPlaybackClockGuard } from './playback-clock.ts'
 import type { MouthSegment } from './mouth'
-import { deliveryAtTime, joinLimit, joinSentence, replySentenceStream, SpeechSentenceStream } from './speech-sentences.ts'
+import { deliveryAtTime, joinLimit, joinSentence, replySentenceStream, SpeechSentenceStream, upcomingDelivery } from './speech-sentences.ts'
 import type { DeliveryCue, PlaybackCue, SpokenSentence } from './speech-sentences'
 import { DEFAULT_VOICE } from './voice.ts'
 import { ACT_PAUSE_SECONDS, isAct, normaliseEmotion } from '../shared/performance-cues.mjs'
@@ -37,6 +37,10 @@ export interface SpeakOptions {
 // Policy deadline for an unconfirmed native start, not a browser guarantee or
 // maximum speaking duration. A real start retires it, including during pause.
 export const BROWSER_SPEECH_START_DEADLINE_MS = 15_000
+
+// onMouth's beatAhead: the beat this far ahead, so the avatar can hold a
+// blink off before a strong syllable rather than once it has begun.
+export const BEAT_LOOKAHEAD_SECONDS = 0.12
 
 interface AudioClip {
   samples: Float32Array
@@ -130,13 +134,18 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   onPlaying: (playing: boolean) => void
   onPreparing: (preparing: boolean) => void
   onDelivery: (delivery: Delivery) => void
-  onMouth: (opening: number | null, form: number, beat: number | null) => void
+  // beatAhead is given only while an audio source plays.
+  onMouth: (opening: number | null, form: number, beat: number | null, beatAhead?: number | null) => void
   onAudioReady: (ready: boolean) => void
   onProblem: (message: string) => void
   // A laugh, sigh or pause is being performed now: once per act as playback
   // reaches it (again after a backward seek), or at the start of a system
   // voice utterance. The avatar's hook; the sound itself is in the audio.
   onAct?: (act: Act) => void
+  // The tone playback is about to switch to, TONE_LEAD_SECONDS early (or as
+  // its clip is installed, when it was not ready), so the face can ease in
+  // before the words; null once there is none. onDelivery is unchanged.
+  onLead?: (delivery: Delivery | null) => void
 }, dependencies: {
   loadModel?: () => Promise<SpeechModel>
   synthesizeCloud?: (sentence: SpokenSentence, signal: AbortSignal) => Promise<CloudSpeechClip>
@@ -165,6 +174,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   let activeInput: SpeechSentenceStream | null = null
   let playbackTimeline: PlaybackCue[] = []
   let reportedDelivery: Delivery | null = null
+  // The tone onDelivery last reported, which the page still shows between
+  // sources, and the lead last reported (both null after cancel).
+  let spokenTone: Delivery | null = null
+  let reportedLead: Delivery | null = null
   // Acts already performed in this source, and the media time before which
   // acts are skipped (null: take it from the next frame after a seek).
   let performedActs = new Set<PlaybackCue>()
@@ -199,6 +212,12 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   const resetPlaybackClock = () => {
     playbackClock.reset()
     playbackClockStalled = false
+  }
+  const reportLead = (delivery: Delivery | null) => {
+    if (delivery === reportedLead)
+      return
+    reportedLead = delivery
+    callbacks.onLead?.(delivery)
   }
   // A new source starts from 0. A seek starts from wherever it lands, so a
   // forward seek never performs the acts it skipped.
@@ -278,6 +297,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     const delivery = deliveryAtTime(playbackTimeline, audio.currentTime)
     if (delivery !== reportedDelivery) {
       reportedDelivery = delivery
+      spokenTone = delivery
       callbacks.onDelivery(delivery)
       if (!owns()) return
     }
@@ -291,8 +311,16 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       callbacks.onAct?.(cue.act)
       if (!owns()) return
     }
-    const mouth = mouthAtTime(playbackMouth, audio.currentTime)
-    callbacks.onMouth(mouth.open, mouth.form, speechBeatAtTime(playbackBeats, audio.currentTime))
+    // Past this source's end the next ready clip plays; the completed replay
+    // has none, and holds every tone change in its own timeline.
+    const last = playbackMouth.at(-1)
+    reportLead(upcomingDelivery(playbackTimeline, audio.currentTime, last ? last.time + last.duration : Infinity,
+      activeRun?.queue[0]?.delivery ?? null))
+    if (!owns()) return
+    const time = audio.currentTime
+    const mouth = mouthAtTime(playbackMouth, time)
+    callbacks.onMouth(mouth.open, mouth.form, speechBeatAtTime(playbackBeats, time),
+      speechBeatAtTime(playbackBeats, time + BEAT_LOOKAHEAD_SECONDS))
     if (owns()) scheduleMouthFrame()
   }
   const onPlaying = () => {
@@ -323,6 +351,10 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
   const onStopped = () => {
     if (!currentSource() || (!audio.paused && !audio.ended))
       return
+    // A pause (not a source ending) takes back an announced tone: the face
+    // relaxes as before, and the next playing frame announces it again.
+    if (!audio.ended)
+      reportLead(null)
     suspendPlayback(false)
   }
   const onWaiting = () => {
@@ -452,11 +484,18 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
       session.chunkStarted = false
       if (!replaceAudioSource(ready.map(clip => clip.pcm), next.sampleRate, timeline, mouth, beats, session.token)) return
       const source = objectUrl
+      // A clip that was not ready in time is announced now, still ahead of
+      // its first frame, even in the tone just spoken: after a long wait the
+      // face may already have relaxed. One already announced near the last
+      // source's end reports no change, and the first frame retracts it.
+      reportLead(next.delivery)
+      if (session !== activeRun || session.token !== run || source !== objectUrl) return
       callbacks.onPreparing(false)
       if (session !== activeRun || session.token !== run || source !== objectUrl) return
       void audio.play().catch((error) => {
         if (session !== activeRun || session.token !== run || source !== objectUrl)
           return
+        reportLead(null)
         console.warn('Automatic audio playback was blocked', error)
         callbacks.onProblem('语音已生成，但自动播放被浏览器拦截。请点击下方播放器的播放键。')
       })
@@ -470,6 +509,9 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
 
     activeRun = null
     const source = objectUrl
+    // The replay is installed paused and nothing follows it: no lead stands.
+    reportLead(null)
+    if (session.token !== run || activeRun !== null || source !== objectUrl) return
     callbacks.onPreparing(false)
     if (session.token !== run || activeRun !== null || source !== objectUrl) return
     replaceAudioSource(session.pcmParts, session.sampleRate, session.timeline, session.mouthTimeline, session.beatTimeline, session.token, session.synthesisSucceeded)
@@ -589,6 +631,8 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
     playbackTimeline = []
     reportedDelivery = null
     resetActs(0)
+    spokenTone = null
+    reportLead(null)
     callbacks.onAudioReady(false)
     callbacks.onMouth(0, 0, null)
     callbacks.onPlaying(false)
@@ -638,6 +682,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
           started = true
           retireStartDeadline()
           callbacks.onPreparing(false)
+          spokenTone = sentence.delivery
           callbacks.onDelivery(sentence.delivery)
           // The system voice has no laugh/sigh and no pause: only the hook.
           if (sentence.act)
@@ -654,6 +699,7 @@ export function createSpeechController(audio: HTMLAudioElement, callbacks: {
         utterance.onresume = () => {
           if (!started || completed || token !== run || releaseUtterance !== cancelUtterance) return
           callbacks.onPreparing(false)
+          spokenTone = sentence.delivery
           callbacks.onDelivery(sentence.delivery)
           callbacks.onMouth(null, 0, null)
           callbacks.onPlaying(true)

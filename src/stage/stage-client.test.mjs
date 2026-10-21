@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import { STAGE_PROTOCOL } from '../../shared/performance-cues.mjs'
 
 import { SpeechApiError } from '../cloud-speech.ts'
-import { createStageClient, isStageProblem, resolveStageRole } from './stage-client.ts'
+import { createStageClient, isStageProblem, resolveStageRole, shouldShowPerformanceDebug } from './stage-client.ts'
 
 const settle = () => new Promise(resolve => setImmediate(resolve))
 const CLIP = { samples: new Float32Array([0.1, -0.1]), sampleRate: 32000, words: [] }
@@ -277,4 +278,33 @@ test('a say joins sentences only when the server planned clips that way', async 
   assert.equal(JSON.stringify(f.posts.at(-1).body),
     JSON.stringify({ leaseId: 'lease-1', turnId: 't3', text: '哈哈真好。再说一句。', delivery: 'happy', act: 'laugh' }), 'a joined clip is bought like a sentence')
   f.client.stop()
+})
+
+test('the performance panel is only for ?debug=performance on a preview page outside OBS', () => {
+  assert.equal(shouldShowPerformanceDebug('performance', 'preview', false), true)
+  for (const debug of [null, '', 'Performance', 'PERFORMANCE', ' performance', 'performance ', 'perf', '1', 'true'])
+    assert.equal(shouldShowPerformanceDebug(debug, 'preview', false), false, `debug=${debug}`)
+  assert.equal(shouldShowPerformanceDebug('performance', 'obs', false), false, 'role=obs is the stream')
+  assert.equal(shouldShowPerformanceDebug('performance', 'preview', true), false, 'never inside OBS, whatever the role')
+  assert.equal(shouldShowPerformanceDebug('performance', 'obs', true), false)
+  assert.equal(shouldShowPerformanceDebug(null, 'obs', true), false)
+  // The stage's real role resolution: inside OBS a missing role is obs.
+  assert.equal(shouldShowPerformanceDebug('performance', resolveStageRole(null, true), true), false)
+  assert.equal(shouldShowPerformanceDebug('performance', resolveStageRole(null, false), false), true)
+})
+
+test('main.ts loads the debug panel once, only behind the DEV and runtime guards, and never connects for it', () => {
+  const source = readFileSync(new URL('./main.ts', import.meta.url), 'utf8')
+  const imports = source.match(/import\(\s*['"]\.\/performance-debug['"]\s*\)/g) ?? []
+  assert.equal(imports.length, 1, 'exactly one dynamic import of the panel')
+  assert.doesNotMatch(source, /from\s+['"]\.\/performance-debug/, 'no static import would bundle it into the stream')
+  const guard = source.indexOf('if (import.meta.env.DEV && shouldShowPerformanceDebug(')
+  assert.ok(guard >= 0, 'the branch is gated by the DEV build flag first')
+  const at = source.indexOf(imports[0])
+  // The import sits inside that if-block, and the else branch is the only start().
+  const elseAt = source.indexOf('\nelse {', guard)
+  assert.ok(at > guard && elseAt > at, 'the import is inside the guarded branch')
+  const starts = source.match(/client\.start\(\)/g) ?? []
+  assert.equal(starts.length, 1)
+  assert.ok(source.indexOf('client.start()') > elseAt, 'the debug page never starts the client')
 })

@@ -63,9 +63,22 @@ function runStep({ label, args }) {
   })
 }
 
+// The avatar profile is bundled; a syntax error would only show up as a
+// confusing build failure, so say plainly what is wrong first.
+export function checkAvatarProfile(directory = root, read = readFileSync) {
+  const path = join(directory, 'src', 'avatar-profiles', 'active.json')
+  try {
+    JSON.parse(read(path, 'utf8'))
+  }
+  catch (error) {
+    throw new Error(`avatar profile ${path} is not valid JSON: ${error.message}`)
+  }
+}
+
 async function main() {
   const options = parseArguments(process.argv.slice(2))
   if (options.build) {
+    checkAvatarProfile()
     for (const step of buildSteps())
       await runStep(step)
   }
