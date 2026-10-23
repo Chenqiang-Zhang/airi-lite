@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, rmdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
 
-import { createTtsBudget } from './tts-budget.mjs'
+import { createTtsBudget, snapshotLedgerLocks } from './tts-budget.mjs'
 
 const day = () => Date.parse('2026-10-01T12:00:00Z')
 async function setup(context) {
@@ -71,6 +71,49 @@ test('exclusive on-disk locks fail closed instead of overwriting another reserva
   await mkdir(`${path}.lock`, { recursive: true })
   await assert.rejects(createTtsBudget({ path, dailyLimit: 10, now: day }).reserve(2),
     { code: 'TTS_BUDGET_UNAVAILABLE' })
+})
+
+test('a lock held by another process leaves the ledger unhealthy until restart', async (context) => {
+  const path = await setup(context)
+  const budget = createTtsBudget({ path, dailyLimit: 10, now: day })
+  assert.equal(budget.healthy(), true)
+  await mkdir(`${path}.lock`, { recursive: true })
+  await assert.rejects(budget.reserve(2), { code: 'TTS_BUDGET_UNAVAILABLE' })
+  assert.equal(budget.healthy(), false)
+  // The other process finishes and releases its lock: this one still refuses.
+  await rmdir(`${path}.lock`)
+  await assert.rejects(budget.reserve(2), { code: 'TTS_BUDGET_UNAVAILABLE' })
+  assert.equal(budget.healthy(), false)
+  await assert.rejects(readFile(path), { code: 'ENOENT' }, 'nothing was reserved')
+  // A restart (a new instance) starts healthy and reserves again.
+  const restarted = createTtsBudget({ path, dailyLimit: 10, now: day })
+  assert.equal(restarted.healthy(), true)
+  assert.deepEqual(await restarted.reserve(2), { day: '2026-10-01', reserved: 2 })
+})
+
+test('the daily limit and a cancel refuse without making the ledger unhealthy', async (context) => {
+  const budget = createTtsBudget({ path: await setup(context), dailyLimit: 3, now: day })
+  await assert.rejects(budget.reserve(4), { code: 'TTS_DAILY_LIMIT' })
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(budget.reserve(1, controller.signal), { code: 'TTS_CANCELLED' })
+  assert.equal(budget.healthy(), true)
+  assert.deepEqual(await budget.reserve(3), { day: '2026-10-01', reserved: 3 })
+  assert.equal(budget.healthy(), true)
+})
+
+test('a lock snapshot claims only ledgers this process was reserving meanwhile', async (context) => {
+  const path = await setup(context)
+  const other = join(path, '..', 'other-ledger.json')
+  const budget = createTtsBudget({ path, dailyLimit: 10, now: day })
+  const idle = snapshotLedgerLocks()
+  assert.equal(idle(`${path}.lock`), false, 'no reservation here: any lock is another process\'s')
+  const pending = budget.reserve(1)
+  assert.equal(idle(`${path}.lock`), true, 'a reservation started after the snapshot may hold it')
+  assert.equal(snapshotLedgerLocks()(`${path}.lock`), true, 'one queued at the snapshot may hold it')
+  assert.equal(idle(`${other}.lock`), false, 'another ledger is not claimed')
+  await pending
+  assert.equal(snapshotLedgerLocks()(`${path}.lock`), false, 'settled: no longer claimed')
 })
 
 test('cancel before reservation does not write, cancellation after reservation never refunds', async (context) => {

@@ -351,6 +351,8 @@ export function createLiveRuntime({
       deepseek: { configured: Boolean(apiKey), model: config.model ?? 'deepseek-flash' },
       speech: speech.health(),
       dataDirectory,
+      // A ledger that failed closed refuses until restart (tts-budget.mjs).
+      ledgers: { replies: budget.healthy?.() !== false, speech: speech.ledgerHealthy?.() !== false },
       replies: { limit: dailyReplies, reserved: repliesReservedToday() },
       moderation: {
         loaded: rulesLoaded,

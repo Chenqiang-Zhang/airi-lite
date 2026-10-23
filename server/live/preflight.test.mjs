@@ -141,7 +141,7 @@ test('an unknown AIRI_PROFILE fails closed and the rest is checked as cloud', as
   assert.match(byId(result, 'profile').fix, /cloud 或 local-voice/)
 })
 
-test('a stale ledger lock fails with removal instructions; an in-flight one does not', async (context) => {
+test('a stale ledger lock fails with removal instructions; this process\'s in-flight one does not', async (context) => {
   const directory = await temporaryDirectory(context)
   await mkdir(join(directory, 'tts-budget.json.lock'))
   await mkdir(join(directory, 'live-reply-budget.json.lock'))
@@ -149,16 +149,67 @@ test('a stale ledger lock fails with removal instructions; an in-flight one does
   await utimes(join(directory, 'tts-budget.json.lock'), old, old)
   const fresh = new Date(NOW - 1_000)
   await utimes(join(directory, 'live-reply-budget.json.lock'), fresh, fresh)
-  const result = await runPreflight(passing(directory))
+  // This process is reserving on the reply ledger right now.
+  const ownReplyLock = () => path => path === join(directory, 'live-reply-budget.json.lock')
+  const result = await runPreflight(passing(directory, { snapshotLocks: ownReplyLock }))
   assert.deepEqual(failed(result), ['ledger'])
   const ledger = byId(result, 'ledger')
   assert.match(ledger.detail, /tts-budget\.json\.lock（5 分钟前）/)
-  assert.doesNotMatch(ledger.detail, /live-reply-budget/, 'a lock younger than the threshold is a reservation in progress')
+  assert.doesNotMatch(ledger.detail, /live-reply-budget/, 'a young lock of this process is a reservation in progress')
   assert.match(ledger.fix, /删除/)
   assert.match(ledger.fix, /npm run live/)
   // The write probe leaves nothing behind.
   assert.deepEqual((await readdir(directory)).sort(), ['live-reply-budget.json.lock', 'tts-budget.json.lock'])
   assert.ok(STALE_LOCK_MS >= 10_000)
+})
+
+test('a fresh lock held by another process fails until that process stops', async (context) => {
+  const directory = await temporaryDirectory(context)
+  await mkdir(join(directory, 'live-reply-budget.json.lock'))
+  const fresh = new Date(NOW - 3_000)
+  await utimes(join(directory, 'live-reply-budget.json.lock'), fresh, fresh)
+  // No reservation of this process is in flight, so the lock is another's.
+  const result = await runPreflight(passing(directory))
+  assert.deepEqual(failed(result), ['ledger'])
+  const ledger = byId(result, 'ledger')
+  assert.match(ledger.detail, /另一个进程正占着账本锁：live-reply-budget\.json\.lock（3 秒前）/)
+  assert.match(ledger.fix, /停掉另一个 AIRI 服务/)
+  assert.match(ledger.fix, /重新检查/)
+  assert.doesNotMatch(ledger.fix, /删除/, 'a live lock is never deleted by hand')
+  // The snapshot is taken before the locks are read and asked after.
+  const order = []
+  const fs = {
+    mkdir: async () => {}, writeFile: async () => {}, unlink: async () => {},
+    readdir: async () => { order.push('readdir'); return ['live-reply-budget.json.lock'] },
+    stat: async () => { order.push('stat'); return { mtimeMs: NOW - 1_000 } },
+  }
+  const snapshotLocks = () => { order.push('snapshot'); return () => { order.push('owned?'); return true } }
+  assert.equal((await runPreflight(passing(directory, { fs, snapshotLocks }))).ok, true)
+  assert.deepEqual(order, ['snapshot', 'readdir', 'stat', 'owned?'])
+})
+
+test('an unhealthy ledger fails the check and asks for a restart, with or without locks', async (context) => {
+  const directory = await temporaryDirectory(context)
+  const replies = await runPreflight(passing(directory, { ledgers: { replies: false, speech: true } }))
+  assert.deepEqual(failed(replies), ['ledger'])
+  assert.match(byId(replies, 'ledger').detail, /回复额度账本出过错.*重启前回复会一直被拒绝/)
+  assert.doesNotMatch(byId(replies, 'ledger').detail, /语音/)
+  assert.match(byId(replies, 'ledger').fix, /另一个 AIRI 服务.*重新 npm run live/)
+  assert.match(byId(replies, 'ledger').fix, /只有重启才会恢复/)
+  assert.doesNotMatch(byId(replies, 'ledger').fix, /重新检查/)
+  const speech = await runPreflight(passing(directory, { ledgers: { replies: true, speech: false } }))
+  assert.match(byId(speech, 'ledger').detail, /本进程的语音额度账本出过错/)
+  const both = await runPreflight(passing(directory, { ledgers: { replies: false, speech: false } }))
+  assert.match(byId(both, 'ledger').detail, /回复额度账本和语音额度账本.*回复和语音/)
+  // Runs without a data directory still report it.
+  assert.deepEqual(failed(await runPreflight(passing(null, { ledgers: { replies: false, speech: true } }))), ['ledger'])
+  // With a leftover lock as well, one fix covers both: remove it while stopped.
+  await mkdir(join(directory, 'tts-budget.json.lock'))
+  const old = new Date(NOW - 5 * 60_000)
+  await utimes(join(directory, 'tts-budget.json.lock'), old, old)
+  const stale = await runPreflight(passing(directory, { ledgers: { replies: false, speech: true } }))
+  assert.match(byId(stale, 'ledger').detail, /回复额度账本出过错.*残留的账本锁：tts-budget\.json\.lock/)
+  assert.match(byId(stale, 'ledger').fix, /删除 .data 里残留的 .lock 文件夹，然后重新 npm run live/)
 })
 
 test('an unwritable data directory fails the ledger check', async (context) => {
@@ -462,4 +513,54 @@ test('resume is refused while the daily reply budget is used up', async (context
   const refused = await control(base, { action: 'resume' })
   assert.equal(refused.status, 409)
   assert.deepEqual(failed((await refused.json()).preflight), ['replies'])
+})
+
+test('a reply ledger that met another process\'s lock refuses resume until restart', async (context) => {
+  const { base, runtime, root } = await start(context)
+  await readyStage(context, base)
+  await control(base, { action: 'pause' })
+  assert.equal((await control(base, { action: 'resume' })).status, 200, 'healthy ledgers resume as before')
+  // Another AIRI process is reserving on the same reply ledger.
+  const lock = join(root, '.data', 'live-reply-budget.json.lock')
+  await mkdir(lock)
+  const held = await preflight(base)
+  assert.deepEqual(failed(held), ['ledger'])
+  assert.match(byId(held, 'ledger').detail, /另一个进程正占着账本锁：live-reply-budget\.json\.lock/)
+  // The next approved line meets that lock: the reservation fails closed
+  // (before any DeepSeek call) and the brain pauses.
+  const outcome = new Promise((resolve) => {
+    runtime.hub.subscribe('brain', (event) => {
+      if (event.type === 'brain.paused' || event.type === 'brain.error')
+        resolve([event.type, event.data])
+    })
+  })
+  assert.equal((await control(base, { action: 'inject', text: '大家好' })).status, 200)
+  assert.deepEqual(await outcome, ['brain.paused', { reason: 'reply-budget-unavailable' }])
+  // The other process finishes and its lock is gone, but this process's
+  // ledger keeps refusing: the checklist says so instead of passing.
+  await rm(lock, { recursive: true })
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const refused = await control(base, { action: 'resume' })
+    assert.equal(refused.status, 409)
+    const body = await refused.json()
+    assert.equal(body.code, 'LIVE_PREFLIGHT_FAILED')
+    assert.deepEqual(failed(body.preflight), ['ledger'])
+    assert.match(byId(body.preflight, 'ledger').detail, /回复额度账本出过错/)
+    assert.doesNotMatch(byId(body.preflight, 'ledger').detail, /占着账本锁/, 'the lock itself is gone')
+    assert.match(byId(body.preflight, 'ledger').fix, /重新 npm run live/)
+  }
+  const state = await (await fetch(`${base}/airi/api/live/state`)).json()
+  assert.deepEqual([state.control, state.pauseReason], ['paused', 'reply-budget-unavailable'])
+})
+
+test('an unhealthy TTS ledger fails the checklist through speech', async (context) => {
+  let healthy = true
+  const speech = { ...fakeSpeech(), ledgerHealthy: () => healthy }
+  const { base } = await start(context, { speech })
+  await readyStage(context, base)
+  assert.equal((await preflight(base)).ok, true)
+  healthy = false
+  const result = await preflight(base)
+  assert.deepEqual(failed(result), ['ledger'])
+  assert.match(byId(result, 'ledger').detail, /语音额度账本出过错/)
 })

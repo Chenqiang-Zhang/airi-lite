@@ -3,6 +3,8 @@ import { mkdir, open, rename, rmdir, unlink } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 
 const queues = new Map()
+// Reservations started per canonical path, for snapshotLedgerLocks().
+const started = new Map()
 const MAX_FILE_BYTES = 1_024
 
 export class TtsBudgetError extends Error {
@@ -12,15 +14,33 @@ export class TtsBudgetError extends Error {
   }
 }
 
+// Tells a ledger lock this process might hold from another process's (the
+// go-live checklist). Snapshot before reading the lock, then ask about its
+// path: true if a reservation on that ledger was queued at the snapshot or
+// has started since, so the lock may be this process's own.
+export function snapshotLedgerLocks() {
+  const queued = new Set(queues.keys())
+  const counts = new Map(started)
+  return (lockPath) => {
+    const file = resolve(lockPath).replace(/\.lock$/, '')
+    return queued.has(file) || (started.get(file) ?? 0) !== (counts.get(file) ?? 0)
+  }
+}
+
 // A conservative local reservation ledger, NOT the provider's actual balance.
 // All instances in this process serialize on the canonical path. An exclusive
 // filesystem lock also fails closed if another process is reserving or crashed.
+// A lock held by another process, or a ledger that cannot be read or written,
+// leaves this instance unhealthy (refusing everything) until restart.
 export function createTtsBudget({ path, dailyLimit, now = Date.now }) {
   const file = resolve(path)
   let unhealthy = false
 
   return {
+    // false once a reservation failed closed; every later one is refused.
+    healthy: () => !unhealthy,
     reserve(characters, signal) {
+      started.set(file, (started.get(file) ?? 0) + 1)
       const previous = queues.get(file) ?? Promise.resolve()
       const current = previous.catch(() => {}).then(async () => {
         if (signal?.aborted)
