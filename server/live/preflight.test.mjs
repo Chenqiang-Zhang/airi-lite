@@ -173,7 +173,8 @@ test('a fresh lock held by another process fails until that process stops', asyn
   assert.deepEqual(failed(result), ['ledger'])
   const ledger = byId(result, 'ledger')
   assert.match(ledger.detail, /另一个进程正占着账本锁：live-reply-budget\.json\.lock（3 秒前）/)
-  assert.match(ledger.fix, /停掉另一个 AIRI 服务/)
+  assert.match(ledger.fix, /停掉另一个使用本项目 \.data 的进程.*minimax-p5b-check/)
+  assert.match(ledger.fix, /mock-live 用自己的临时目录/, 'mock-live never shares the project ledgers')
   assert.match(ledger.fix, /重新检查/)
   assert.doesNotMatch(ledger.fix, /删除/, 'a live lock is never deleted by hand')
   // The snapshot is taken before the locks are read and asked after.
@@ -194,7 +195,7 @@ test('an unhealthy ledger fails the check and asks for a restart, with or withou
   assert.deepEqual(failed(replies), ['ledger'])
   assert.match(byId(replies, 'ledger').detail, /回复额度账本出过错.*重启前回复会一直被拒绝/)
   assert.doesNotMatch(byId(replies, 'ledger').detail, /语音/)
-  assert.match(byId(replies, 'ledger').fix, /另一个 AIRI 服务.*重新 npm run live/)
+  assert.match(byId(replies, 'ledger').fix, /另一个使用本项目 \.data 的进程.*重新 npm run live/)
   assert.match(byId(replies, 'ledger').fix, /只有重启才会恢复/)
   assert.doesNotMatch(byId(replies, 'ledger').fix, /重新检查/)
   const speech = await runPreflight(passing(directory, { ledgers: { replies: true, speech: false } }))
@@ -563,4 +564,30 @@ test('an unhealthy TTS ledger fails the checklist through speech', async (contex
   const result = await preflight(base)
   assert.deepEqual(failed(result), ['ledger'])
   assert.match(byId(result, 'ledger').detail, /语音额度账本出过错/)
+})
+
+test('a ledger file a reservation would refuse is named, since a restart alone does not fix it', async (context) => {
+  const directory = await temporaryDirectory(context)
+  const today = new Date(NOW).toISOString().slice(0, 10)
+  await writeFile(join(directory, 'tts-budget.json'), JSON.stringify({ version: 1, day: today, reservedCharacters: 12 }))
+  assert.deepEqual(failed(await runPreflight(passing(directory))), [], 'a valid ledger passes')
+  for (const [content, reason] of [
+    [JSON.stringify({ version: 1, day: '2999-01-01', reservedCharacters: 0 }), '日期在今天之后'],
+    ['{ "version": 1,', '不是合法 JSON'],
+    [JSON.stringify({ version: 2, day: today, reservedCharacters: 0 }), '版本不对'],
+    [JSON.stringify({ version: 1, day: today, reservedCharacters: -1 }), '计数不对'],
+    [`${' '.repeat(2_000)}{}`, '文件太大'],
+  ]) {
+    await writeFile(join(directory, 'live-reply-budget.json'), content)
+    const result = await runPreflight(passing(directory))
+    assert.deepEqual(failed(result), ['ledger'], reason)
+    const ledger = byId(result, 'ledger')
+    assert.match(ledger.detail, new RegExp(`账本文件内容无效：live-reply-budget\\.json（${reason}）.*重启也不会恢复`), reason)
+    assert.match(ledger.fix, /改名备份/)
+  }
+  await writeFile(join(directory, 'live-reply-budget.json'), JSON.stringify({ version: 1, day: today, reservedCharacters: 3 }))
+  await writeFile(join(directory, 'tts-budget-elevenlabs.json'), 'nope')
+  assert.match(byId(await runPreflight(passing(directory)), 'ledger').detail, /tts-budget-elevenlabs\.json（不是合法 JSON）/, 'every provider ledger is read')
+  await writeFile(join(directory, 'tts-budget-elevenlabs.json'), JSON.stringify({ version: 1, day: '2000-01-01', reservedCharacters: 9 }))
+  assert.deepEqual(failed(await runPreflight(passing(directory))), [], 'an old day is fine: it restarts at 0')
 })

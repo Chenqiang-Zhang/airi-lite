@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { localTtsUrlProblem } from '../local-tts.mjs'
-import { snapshotLedgerLocks } from '../tts-budget.mjs'
+import { ledgerProblem, MAX_LEDGER_BYTES, snapshotLedgerLocks } from '../tts-budget.mjs'
 
 // The go-live checklist. Every check is {id, ok, detail, fix}: `detail` says
 // what was found and `fix` tells the host what to do, both in the console's
@@ -130,13 +130,18 @@ function checkReplies(replies) {
 // until restart (`ledgers` says which). A lock this process is not holding
 // belongs to another process: still running (fresh) or dead (stale).
 const LEDGERS = Object.freeze({ replies: ['回复额度账本', '回复'], speech: ['语音额度账本', '语音'] })
+// The processes that reserve on the repository's .data ledgers.
+const OTHER_PROCESSES = '另一个使用本项目 .data 的进程（npm run live / dev / start，或 scripts/minimax-audition.mjs、minimax-p5b-check.mjs；mock-live 用自己的临时目录，不算）'
+// Ledger files in .data: the daily replies and each speech provider's.
+const LEDGER_FILE = /^(?:live-reply-budget|tts-budget(?:-[a-z]+)?)\.json$/
+const INVALID_REASON = Object.freeze({ version: '版本不对', day: '日期格式不对', count: '计数不对', 'future day': '日期在今天之后', json: '不是合法 JSON', size: '文件太大' })
 
 async function checkLedger(dataDirectory, ledgers, fs, now, staleLockMs, snapshotLocks) {
   const broken = Object.keys(LEDGERS).filter(key => ledgers?.[key] === false).map(key => LEDGERS[key])
   const brokenDetail = broken.length
-    ? `本进程的${broken.map(([name]) => name).join('和')}出过错（锁被另一个进程占着，或写入失败），重启前${broken.map(([, what]) => what).join('和')}会一直被拒绝。`
+    ? `本进程的${broken.map(([name]) => name).join('和')}出过错（锁被另一个进程占着、写入失败，或账本文件内容无效），重启前${broken.map(([, what]) => what).join('和')}会一直被拒绝。`
     : ''
-  const restartFix = (stale = false) => `先停掉还在运行的另一个 AIRI 服务（npm run live / mock-live / dev），确认磁盘没满、.data 可写；再停止本服务${stale ? '，删除 .data 里残留的 .lock 文件夹' : ''}，然后重新 npm run live。账本出错后只有重启才会恢复。`
+  const restartFix = (stale = false) => `先停掉${OTHER_PROCESSES}，确认磁盘没满、.data 可写；再停止本服务${stale ? '，删除 .data 里残留的 .lock 文件夹' : ''}，然后重新 npm run live。账本出错后只有重启才会恢复。`
   if (!dataDirectory) {
     return broken.length
       ? fail('ledger', brokenDetail, restartFix())
@@ -159,8 +164,18 @@ async function checkLedger(dataDirectory, ledgers, fs, now, staleLockMs, snapsho
   const mightOwn = snapshotLocks()
   const stale = []
   const held = []
+  const invalid = []
+  const today = new Date(now()).toISOString().slice(0, 10)
   try {
     for (const name of await fs.readdir(dataDirectory)) {
+      // The same rule a reservation applies: a file it would refuse keeps
+      // refusing after every restart, so name it instead.
+      if (LEDGER_FILE.test(name) && fs.readFile) {
+        const reason = await ledgerFileProblem(fs, join(dataDirectory, name), today)
+        if (reason)
+          invalid.push(`${name}（${INVALID_REASON[reason] ?? reason}）`)
+        continue
+      }
       if (!name.endsWith('.lock'))
         continue
       const info = await fs.stat(join(dataDirectory, name)).catch(() => null)
@@ -177,20 +192,46 @@ async function checkLedger(dataDirectory, ledgers, fs, now, staleLockMs, snapsho
     return fail('ledger', `读不了 .data 目录（${error?.code ?? 'error'}）。`, '检查 .data 目录的权限，然后重启。')
   }
   const found = [
+    invalid.length ? `账本文件内容无效：${invalid.join('、')}。用到它的额度会一直拒绝，重启也不会恢复。` : '',
     brokenDetail,
     stale.length ? `残留的账本锁：${stale.join('、')}。对应的额度会一直拒绝。` : '',
     held.length ? `另一个进程正占着账本锁：${held.join('、')}。本服务碰上它就会拒绝额度，直到重启。` : '',
   ].filter(Boolean)
   if (!found.length)
     return pass('ledger', '.data 可写，没有残留的锁。')
+  if (invalid.length) {
+    return fail('ledger', found.join(''),
+      `停止本服务，把 .data 里这些文件改名备份（例如加 .bad 后缀）或修正，然后重新 npm run live。改名后当天的额度从 0 重新记，注意别超出供应商的实际余额。`)
+  }
   if (broken.length)
     return fail('ledger', found.join(''), restartFix(stale.length > 0))
   if (stale.length) {
     return fail('ledger', found.join(''),
-      '先确认没有另一个 AIRI 服务还在运行（npm run live / mock-live / dev），再停止本服务，删除 .data 里这些 .lock 文件夹，然后重新 npm run live。')
+      `先确认没有${OTHER_PROCESSES}还在运行，再停止本服务，删除 .data 里这些 .lock 文件夹，然后重新 npm run live。`)
   }
   return fail('ledger', found.join(''),
-    '停掉另一个 AIRI 服务（npm run live / mock-live / dev），它和本服务共用 .data 里的额度账本；然后点「重新检查」。')
+    `停掉${OTHER_PROCESSES}，它和本服务共用 .data 里的额度账本；然后点「重新检查」。正被占用的锁不要动。`)
+}
+
+async function ledgerFileProblem(fs, path, today) {
+  try {
+    const info = await fs.stat(path)
+    if (info?.size > MAX_LEDGER_BYTES)
+      return 'size'
+    let ledger
+    try {
+      ledger = JSON.parse(await fs.readFile(path, 'utf8'))
+    }
+    catch (error) {
+      return error?.code ? null : 'json'
+    }
+    return ledgerProblem(ledger, today)
+  }
+  catch {
+    // Gone or unreadable between readdir and here: the write probe and the
+    // reservation itself report real permission problems.
+    return null
+  }
 }
 
 function checkModeration({ loaded, problem, terms, ignored = 0 }) {
@@ -256,7 +297,7 @@ export async function runPreflight({
   stage = null,
   stageUrl = 'http://127.0.0.1:5173/airi/stage.html?role=obs',
   probe = fetch,
-  fs = { mkdir, readdir, stat, unlink, writeFile },
+  fs = { mkdir, readdir, readFile, stat, unlink, writeFile },
   now = Date.now,
   snapshotLocks = snapshotLedgerLocks,
   staleLockMs = STALE_LOCK_MS,

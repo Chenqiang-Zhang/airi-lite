@@ -141,3 +141,16 @@ test('reserve reports the day total and peek reads it without reserving', async 
   time = Date.parse('2026-10-20T00:00:01Z')
   assert.deepEqual(await budget.peek(), { day: '2026-10-20', reserved: 0 }, 'a new UTC day starts at zero')
 })
+
+test('ledgerProblem is the rule a reservation applies, with a reason the checklist can show', async () => {
+  const { ledgerProblem } = await import('./tts-budget.mjs')
+  const today = '2026-10-23'
+  assert.equal(ledgerProblem({ version: 1, day: today, reservedCharacters: 5 }, today), null)
+  assert.equal(ledgerProblem({ version: 1, day: '2026-10-01', reservedCharacters: 0 }, today), null, 'an old day restarts at 0')
+  for (const [ledger, reason] of [
+    [null, 'version'], [{ version: 2, day: today, reservedCharacters: 0 }, 'version'],
+    [{ version: 1, day: '2026-02-30', reservedCharacters: 0 }, 'day'], [{ version: 1, day: 20261023, reservedCharacters: 0 }, 'day'],
+    [{ version: 1, day: today, reservedCharacters: -1 }, 'count'], [{ version: 1, day: today, reservedCharacters: 1.5 }, 'count'],
+    [{ version: 1, day: '2026-10-24', reservedCharacters: 0 }, 'future day'],
+  ]) assert.equal(ledgerProblem(ledger, today), reason, JSON.stringify(ledger))
+})

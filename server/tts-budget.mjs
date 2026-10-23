@@ -5,7 +5,24 @@ import { dirname, resolve } from 'node:path'
 const queues = new Map()
 // Reservations started per canonical path, for snapshotLedgerLocks().
 const started = new Map()
-const MAX_FILE_BYTES = 1_024
+export const MAX_LEDGER_BYTES = 1_024
+
+// Why a parsed ledger cannot be used, or null. A reservation refuses such a
+// file (and the ledger then refuses until restart); the go-live checklist
+// reads the files with the same rule so it can name the file, since a
+// restart alone does not fix it.
+export function ledgerProblem(ledger, today) {
+  if (ledger?.version !== 1)
+    return 'version'
+  if (typeof ledger.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(ledger.day)
+    || new Date(`${ledger.day}T00:00:00Z`).toISOString().slice(0, 10) !== ledger.day)
+    return 'day'
+  if (!Number.isSafeInteger(ledger.reservedCharacters) || ledger.reservedCharacters < 0)
+    return 'count'
+  if (ledger.day > today)
+    return 'future day'
+  return null
+}
 
 export class TtsBudgetError extends Error {
   constructor(code) {
@@ -63,7 +80,7 @@ export function createTtsBudget({ path, dailyLimit, now = Date.now }) {
             // A bounded read prevents a corrupted/untrusted ledger from consuming memory.
             const handle = await open(file, 'r')
             try {
-              if ((await handle.stat()).size > MAX_FILE_BYTES)
+              if ((await handle.stat()).size > MAX_LEDGER_BYTES)
                 throw new Error('Invalid ledger')
               ledger = JSON.parse(await handle.readFile('utf8'))
             }
@@ -75,11 +92,7 @@ export function createTtsBudget({ path, dailyLimit, now = Date.now }) {
             if (error?.code !== 'ENOENT')
               throw error
           }
-          if (ledger?.version !== 1 || typeof ledger.day !== 'string'
-            || !/^\d{4}-\d{2}-\d{2}$/.test(ledger.day)
-            || new Date(`${ledger.day}T00:00:00Z`).toISOString().slice(0, 10) !== ledger.day
-            || !Number.isSafeInteger(ledger.reservedCharacters) || ledger.reservedCharacters < 0
-            || ledger.day > today)
+          if (ledgerProblem(ledger, today))
             throw new Error('Invalid ledger')
           if (ledger.day !== today)
             ledger = { version: 1, day: today, reservedCharacters: 0 }
@@ -142,7 +155,7 @@ export function createTtsBudget({ path, dailyLimit, now = Date.now }) {
       try {
         const handle = await open(file, 'r')
         try {
-          if ((await handle.stat()).size > MAX_FILE_BYTES)
+          if ((await handle.stat()).size > MAX_LEDGER_BYTES)
             return null
           const ledger = JSON.parse(await handle.readFile('utf8'))
           if (!Number.isSafeInteger(ledger?.reservedCharacters) || typeof ledger.day !== 'string')
